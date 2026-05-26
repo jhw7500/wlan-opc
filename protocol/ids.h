@@ -77,4 +77,7 @@
 #define OPC_INIT_STATE_LOGGED_IN        0x00000003
 #define OPC_INIT_STATE_LOGGED_OUT       0x00000004
 
+/* Command-specific error causes used by multiple handlers. */
+#define OPC_ERR_INDICATION_SETTING_VIOLATION  0x0010
+
 #endif /* WLAN_OPC_IDS_H */
