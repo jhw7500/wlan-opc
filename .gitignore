@@ -3,3 +3,8 @@
 opcd/opcd
 vhlctl/vhlctl
 protocol/tests/test_codec
+
+# OMC harness scratch (never tracked)
+.omc/
+.bkit/
+.gstack/

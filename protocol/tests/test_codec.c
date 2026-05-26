@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "commands.h"
+#include "indications.h"
 
 #define ASSERT(cond, msg) do {                                              \
     if (!(cond)) {                                                          \
@@ -406,6 +407,137 @@ static int test_reset(void)
     return 0;
 }
 
+/* ---- 0x0001 InitComplete ---- */
+
+static int test_ind_init_complete(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_init_complete_t in = { .status = OPC_INIT_STATE_RADIO_UP };
+    ssize_t n = opc_ind_init_complete_pack(frame, sizeof frame, 1, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(frame[1] == OPC_CMD_INDICATION, "cmd type");
+    ASSERT(opc_be16_read(&frame[2]) == OPC_IND_INIT_COMPLETE, "ind id");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_INIT_COMPLETE_LENGTH, "length");
+    opc_ind_init_complete_t out;
+    ASSERT(opc_ind_init_complete_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(out.status == in.status, "status");
+    return 0;
+}
+
+/* ---- 0x0002 WlanStatusChange ---- */
+
+static int test_ind_wlan_status_change(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_wlan_status_change_t in = {
+        .wlan_status   = OPC_WLAN_STATUS_DISCONNECTED,
+        .indication_ch = 0x0206,    /* 5GHz ch 6 */
+    };
+    ssize_t n = opc_ind_wlan_status_change_pack(frame, sizeof frame, 2, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_WLAN_STATUS_CHANGE_LENGTH, "length");
+    opc_ind_wlan_status_change_t out;
+    ASSERT(opc_ind_wlan_status_change_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(out.wlan_status   == in.wlan_status,   "status");
+    ASSERT(out.indication_ch == in.indication_ch, "ch");
+    return 0;
+}
+
+/* ---- 0x0004 Roaming ---- */
+
+static int test_ind_roaming(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_roaming_t in = {
+        .current_snr  = 28,
+        .current_rssi = -72,
+        .ch_number    = 0x0224,
+    };
+    fill_mac(in.connect_ap_mac, 0xA0);
+    ssize_t n = opc_ind_roaming_pack(frame, sizeof frame, 3, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_ROAMING_LENGTH, "length");
+    opc_ind_roaming_t out;
+    ASSERT(opc_ind_roaming_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(out.current_snr  == in.current_snr,  "snr");
+    ASSERT(out.current_rssi == in.current_rssi, "rssi");
+    ASSERT(out.ch_number    == in.ch_number,    "ch");
+    ASSERT(macs_equal(out.connect_ap_mac, in.connect_ap_mac), "ap mac");
+    return 0;
+}
+
+/* ---- 0x0008 ApDisconnect ---- */
+
+static int test_ind_ap_disconnect(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_ap_disconnect_t in = {
+        .message_id  = OPC_AP_MSG_DEAUTHENTICATION,
+        .result_code = 0x0004,
+    };
+    fill_mac(in.disconnect_ap_mac, 0xB0);
+    ssize_t n = opc_ind_ap_disconnect_pack(frame, sizeof frame, 4, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_AP_DISCONNECT_LENGTH, "length");
+    opc_ind_ap_disconnect_t out;
+    ASSERT(opc_ind_ap_disconnect_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(out.message_id == in.message_id, "msg id");
+    ASSERT(out.result_code == in.result_code, "reason");
+    ASSERT(macs_equal(out.disconnect_ap_mac, in.disconnect_ap_mac), "ap mac");
+    return 0;
+}
+
+/* ---- 0x0010 FaultDetect ---- */
+
+static int test_ind_fault_detect(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_fault_detect_t in = {
+        .congestion_id = OPC_CONGESTION_MEMORY,
+        .current_val   = 92,
+    };
+    ssize_t n = opc_ind_fault_detect_pack(frame, sizeof frame, 5, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_FAULT_DETECT_LENGTH, "length");
+    opc_ind_fault_detect_t out;
+    ASSERT(opc_ind_fault_detect_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(out.congestion_id == in.congestion_id, "id");
+    ASSERT(out.current_val   == in.current_val,   "val");
+    return 0;
+}
+
+/* ---- 0x0020 ResetNotice ---- */
+
+static int test_ind_reset_notice(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_reset_notice_t in = { .reset_cause = 0xDEADBEEF };
+    ssize_t n = opc_ind_reset_notice_pack(frame, sizeof frame, 6, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_RESET_NOTICE_LENGTH, "length");
+    opc_ind_reset_notice_t out;
+    ASSERT(opc_ind_reset_notice_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(out.reset_cause == in.reset_cause, "cause");
+    return 0;
+}
+
+/* ---- 0x0080 KeepAlive ---- */
+
+static int test_ind_keep_alive(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_keep_alive_t in;
+    memset(&in, 0, sizeof in);
+    strcpy(in.timestamp, "2026-02-16T15:47:00Z");
+    ssize_t n = opc_ind_keep_alive_pack(frame, sizeof frame, 7, &in);
+    ASSERT(n > 0, "pack");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_KEEP_ALIVE_LENGTH, "length");
+    opc_ind_keep_alive_t out;
+    ASSERT(opc_ind_keep_alive_unpack(frame, n, &out) == 0, "unpack");
+    ASSERT(strcmp(out.timestamp, in.timestamp) == 0, "timestamp");
+    return 0;
+}
+
 /* ---- bounds / rejection ---- */
 
 static int test_rejects(void)
@@ -441,6 +573,13 @@ int main(void)
         { "set_radio_config",       test_set_radio_config },
         { "set_indication_config",  test_set_indication_config },
         { "reset",                  test_reset },
+        { "ind_init_complete",      test_ind_init_complete },
+        { "ind_wlan_status_change", test_ind_wlan_status_change },
+        { "ind_roaming",            test_ind_roaming },
+        { "ind_ap_disconnect",      test_ind_ap_disconnect },
+        { "ind_fault_detect",       test_ind_fault_detect },
+        { "ind_reset_notice",       test_ind_reset_notice },
+        { "ind_keep_alive",         test_ind_keep_alive },
         { "rejects",                test_rejects },
     };
     int fail = 0;

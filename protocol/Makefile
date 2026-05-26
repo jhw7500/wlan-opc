@@ -3,7 +3,7 @@ AR      ?= ar
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -fPIC
 CFLAGS  += -I.
 
-OBJS := codec.o frame.o commands.o
+OBJS := codec.o frame.o commands.o indications.o
 
 libopcproto.a: $(OBJS)
 	$(AR) rcs $@ $(OBJS)
