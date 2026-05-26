@@ -1,0 +1,14 @@
+[Unit]
+Description=OPC wireless-board control daemon (wlan-opc)
+Documentation=https://github.com/jhw7500/wlan-opc
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/opc/bin/opcd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
