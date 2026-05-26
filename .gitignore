@@ -2,3 +2,4 @@
 *.a
 opcd/opcd
 vhlctl/vhlctl
+protocol/tests/test_codec
