@@ -2,8 +2,8 @@
 #define WLAN_OPC_OPCD_PLATFORM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
 
 #include "../protocol/commands.h"
 
@@ -150,7 +150,16 @@ typedef struct opcd_platform_ops {
      * on the AS-safe list — no fprintf, no malloc/free, no pthread mutexes,
      * no mlanutl exec — because opcd may invoke it from a SIGTERM/SIGINT
      * handler. State that cannot be torn down safely from a signal handler
-     * must be deferred to the main loop's post-signal cleanup path. */
+     * must be deferred to the main loop's post-signal cleanup path.
+     *
+     * IMPORTANT for signal-handler use: do NOT call opcd_platform()->teardown
+     * from inside a signal handler — reading the global ops pointer plus the
+     * indirect function-pointer call is not atomic under POSIX. The boot
+     * path should cache the teardown function pointer once registration is
+     * done, then call the cached pointer from the handler:
+     *   static void (*g_teardown)(void);
+     *   // after register: g_teardown = opcd_platform()->teardown;
+     *   // in handler:    if (g_teardown) g_teardown(); */
     int  (*init)(void);
     void (*teardown)(void);
 
@@ -232,7 +241,11 @@ const opcd_platform_ops_t *opcd_platform(void);
  * both yields a clean compile but the second register call silently
  * clobbers the first; each .c file is expected to enforce mutual exclusion
  * with a build-time guard (e.g. a unique linker symbol that conflicts on
- * dual link). The header itself cannot enforce this. */
+ * dual link). The header itself cannot enforce this.
+ *
+ * Implementations SHOULD also assert(g_ops == NULL) before writing the
+ * global ops pointer, so that an accidental double-register at runtime
+ * surfaces as an abort rather than a silent clobber. */
 void opcd_platform_stub_register(void);
 void opcd_platform_nxp_register(void);
 
