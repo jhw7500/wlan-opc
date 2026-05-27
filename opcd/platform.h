@@ -84,44 +84,75 @@ typedef enum opcd_platform_evt_kind {
 typedef struct opcd_platform_evt {
     opcd_platform_evt_kind_t kind;
     union {
-        struct { uint32_t status; }                                 init_complete;
-        struct { uint16_t status; uint16_t channel; }               wlan_status;
-        struct { int8_t snr; int8_t rssi; uint8_t mac[6];
-                 uint16_t channel; }                                roaming;
-        struct { uint16_t reason_msg_id; uint16_t result_code;
-                 uint8_t  mac[6]; }                                 ap_disconnect;
-        struct { uint16_t congestion_id; uint16_t current_val; }    fault_detect;
-        struct { uint32_t cause; }                                  reset_notice;
+        struct {
+            uint32_t status;
+        } init_complete;
+        struct {
+            uint8_t  idx;       /* 0=mlan0, 1=mlan1 — required for DUAL builds */
+            uint16_t status;
+            uint16_t channel;
+        } wlan_status;
+        struct {
+            uint8_t  idx;       /* 0=mlan0, 1=mlan1 — DUAL routes via this */
+            int8_t   snr;
+            int8_t   rssi;
+            uint8_t  mac[6];    /* new AP MAC */
+            uint16_t channel;
+        } roaming;
+        struct {
+            uint8_t  idx;       /* 0=mlan0, 1=mlan1 */
+            uint16_t reason_msg_id;
+            uint16_t result_code;
+            uint8_t  mac[6];    /* AP MAC at disconnect */
+        } ap_disconnect;
+        struct {
+            uint16_t congestion_id;
+            uint16_t current_val;
+        } fault_detect;
+        struct {
+            uint32_t cause;
+        } reset_notice;
     } u;
 } opcd_platform_evt_t;
 
-/* Single drained event delivered to opcd. Return non-zero to stop the drain;
- * drain_events() then returns that same non-zero value verbatim. */
+/* Single drained event delivered to opcd. Return semantics:
+ *    0 — continue draining
+ *   >0 — early-stop; drain_events() returns this exact positive value
+ *  Callbacks MUST NOT return a negative value. The negative space is
+ *  reserved for drain-layer failures (see drain_events). Implementations
+ *  that need richer signaling should encode it in ctx, not in the return. */
 typedef int (*opcd_platform_evt_cb)(const opcd_platform_evt_t *evt, void *ctx);
 
 /* vtable. All members non-NULL after init(); stub fills missing pieces with
  * "0/empty/ok" semantics so opcd never has to NULL-check. */
 typedef struct opcd_platform_ops {
-    /* Lifecycle. init() is allowed to fail (-errno); opcd will refuse to start.
-     * shutdown() must be both idempotent AND async-signal-safe (POSIX.1):
-     * implementations may only call functions on the AS-safe list — no
-     * fprintf, no malloc/free, no pthread mutexes, no mlanutl exec — because
-     * opcd may invoke it from a SIGTERM/SIGINT handler. State that cannot be
-     * torn down safely from a signal handler must be deferred to the main
-     * loop's post-signal cleanup path. */
+    /* Lifecycle. init() is allowed to fail (-errno); opcd will refuse to
+     * start. init() MAY block during driver probe (mlanutl, nl80211 family
+     * resolution), but implementations SHOULD bound the wait — opcd has no
+     * way to time-out a stuck init(). Suggested bound: 5 seconds.
+     *
+     * teardown() (renamed from shutdown — POSIX shutdown(2) ambiguity in
+     * files that include this header) must be both idempotent AND
+     * async-signal-safe (POSIX.1): implementations may only call functions
+     * on the AS-safe list — no fprintf, no malloc/free, no pthread mutexes,
+     * no mlanutl exec — because opcd may invoke it from a SIGTERM/SIGINT
+     * handler. State that cannot be torn down safely from a signal handler
+     * must be deferred to the main loop's post-signal cleanup path. */
     int  (*init)(void);
-    void (*shutdown)(void);
+    void (*teardown)(void);
 
     /* Identity / inventory (GetBasicInfo + GetDeviceInfo).
      * Strings are written NUL-terminated, truncated to cap (silent — no
      * overflow signal; callers that need overflow detection should size cap
      * larger than the expected maximum).
-     * get_eth_ipv4 writes the IPv4 address in **host byte order**, matching
-     * opcd_state_t::holder_ip and indication_recipient_ip. Callers serializing
-     * to the wire are responsible for htonl().
+     * get_eth_ipv4_host (named with _host suffix to make the byte order
+     * visible at every call site — easy to miss with bare get_eth_ipv4)
+     * writes the IPv4 address in host byte order, matching
+     * opcd_state_t::holder_ip and indication_recipient_ip. Callers
+     * serializing to the wire are responsible for htonl().
      * get_wlan_mac returns -ENODEV for idx outside [0, wlan_count). */
     int  (*get_eth_mac)(uint8_t mac[6]);
-    int  (*get_eth_ipv4)(uint32_t *ip_host);
+    int  (*get_eth_ipv4_host)(uint32_t *ip_host);
     int  (*get_wlan_mac)(int idx /*0=mlan0,1=mlan1*/, uint8_t mac[6]);
     int  (*get_firmware_version)(char *buf, size_t cap);
     int  (*get_hardware_version)(char *buf, size_t cap);
@@ -165,21 +196,30 @@ typedef struct opcd_platform_ops {
      * possible (e.g. stub) — opcd then skips registering it. drain_events
      * may be called even with fd=-1 and must simply return 0 in that case.
      * Otherwise drain_events returns:
-     *   0          — drained all queued events, cb returned 0 each time
-     *   <0         — drain failed before completing (-errno)
-     *   non-zero   — cb returned non-zero; that exact value is propagated
-     *                back so the caller can distinguish "stopped early" from
-     *                "drained clean". */
+     *    0  — drained all queued events, cb returned 0 each time
+     *   >0  — cb returned a positive value (early-stop); that exact value
+     *         is propagated back so the caller can identify the stop reason
+     *   <0  — drain-layer failure (-errno). Reserved for the drain
+     *         implementation only — callbacks MUST NOT use this space,
+     *         see opcd_platform_evt_cb. */
     int  (*event_fd)(void);
     int  (*drain_events)(opcd_platform_evt_cb cb, void *ctx);
 } opcd_platform_ops_t;
 
-/* Global accessor. Exactly one of platform_stub_register() /
- * platform_nxp_register() runs at startup (from opcd.c, behind a build-
- * time guard) and stashes the ops table here. Callers may cache the result. */
+/* Global accessor. Returns NULL until a registration function has run; the
+ * opcd boot path is expected to register exactly one implementation before
+ * any handler/indication code calls this. Callers in the main code path may
+ * therefore treat a NULL return as a fatal programming error and abort()
+ * rather than silently producing UB. Once non-NULL the implementation must
+ * NOT change identity at runtime — callers may cache the pointer. */
 const opcd_platform_ops_t *opcd_platform(void);
 
-/* Implementation registration — exported by the corresponding .c file. */
+/* Implementation registration — exported by the corresponding .c file.
+ * EXACTLY ONE of these must be linked AND called at opcd startup. Linking
+ * both yields a clean compile but the second register call silently
+ * clobbers the first; each .c file is expected to enforce mutual exclusion
+ * with a build-time guard (e.g. a unique linker symbol that conflicts on
+ * dual link). The header itself cannot enforce this. */
 void opcd_platform_stub_register(void);
 void opcd_platform_nxp_register(void);
 
