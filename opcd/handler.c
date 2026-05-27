@@ -186,8 +186,24 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             (void)plat->get_wlan_mac(0, ack.wlan1.mac);
             /* Ack carries a single essid field — DUAL always reports mlan0 */
             (void)plat->get_essid(0, ack.essid, sizeof ack.essid);
+            /* Runtime link readback — overwrites the radio-state portion of
+             * wlan{1,2}. Config-side fields (freq/channel/mode/bw) come from
+             * st->radio (set-radio cache) and are filled later. */
+            opcd_platform_link_t link;
+            if (plat->get_link(0, &link) == 0) {
+                memcpy(ack.wlan1.connect_ap_mac, link.bssid, 6);
+                ack.wlan1.snr    = link.snr;
+                ack.wlan1.rssi   = link.rssi;
+                ack.wlan1.status = link.associated ? 0x0001 : 0x0000;
+            }
             if (st->radio.station_type == OPC_STATION_DUAL) {
                 (void)plat->get_wlan_mac(1, ack.wlan2.mac);
+                if (plat->get_link(1, &link) == 0) {
+                    memcpy(ack.wlan2.connect_ap_mac, link.bssid, 6);
+                    ack.wlan2.snr    = link.snr;
+                    ack.wlan2.rssi   = link.rssi;
+                    ack.wlan2.status = link.associated ? 0x0001 : 0x0000;
+                }
             }
             (void)plat->get_caps(&caps);
             ack.ieee_11r  = caps.ieee_11r;
