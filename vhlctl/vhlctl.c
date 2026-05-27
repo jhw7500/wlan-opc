@@ -43,6 +43,26 @@ static const char *g_host       = "127.0.0.1";
 static int         g_port       = 50607;
 static int         g_timeout_ms = 2000;
 static uint16_t    g_seq        = 1;
+static bool        g_dump       = false;
+
+static void hex_dump(const char *label, const uint8_t *buf, size_t len)
+{
+    fprintf(stderr, "  [%s] len=%zu\n", label, len);
+    for (size_t i = 0; i < len; i += 16) {
+        fprintf(stderr, "    %04zx ", i);
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < len) fprintf(stderr, "%02x ", buf[i + j]);
+            else             fprintf(stderr, "   ");
+            if (j == 7) fprintf(stderr, " ");
+        }
+        fprintf(stderr, " |");
+        for (size_t j = 0; j < 16 && i + j < len; j++) {
+            uint8_t c = buf[i + j];
+            fputc((c >= 0x20 && c < 0x7f) ? c : '.', stderr);
+        }
+        fprintf(stderr, "|\n");
+    }
+}
 
 static uint16_t next_seq(void) { return g_seq++; }
 
@@ -112,6 +132,7 @@ static ssize_t send_recv(int fd, struct sockaddr_in *dst,
                          const uint8_t *tx, size_t tx_len,
                          uint8_t *rx, size_t rx_cap)
 {
+    if (g_dump) hex_dump("TX", tx, tx_len);
     if (sendto(fd, tx, tx_len, 0, (struct sockaddr *)dst, sizeof *dst) != (ssize_t)tx_len) {
         perror("sendto"); return -1;
     }
@@ -123,6 +144,7 @@ static ssize_t send_recv(int fd, struct sockaddr_in *dst,
             perror("recv");
         return -1;
     }
+    if (g_dump) hex_dump("RX", rx, (size_t)n);
     return n;
 }
 
@@ -420,6 +442,7 @@ static int cmd_listen(int argc, char **argv)
         uint8_t buf[OPC_FRAME_MAX];
         ssize_t n = recv(fd, buf, sizeof buf, 0);
         if (n < 0) { if (errno == EINTR) continue; perror("recv"); break; }
+        if (g_dump) hex_dump("IND", buf, (size_t)n);
         opc_header_t hdr;
         if (opc_frame_parse(buf, (size_t)n, &hdr, NULL, NULL) != 0) {
             fprintf(stderr, "  malformed frame %zd bytes\n", n); continue;
@@ -490,7 +513,7 @@ static int cmd_listen(int argc, char **argv)
 
 static void usage(void)
 {
-    fputs("usage: vhlctl [--host HOST] [--port PORT] [--timeout MS] SUBCOMMAND [args]\n"
+    fputs("usage: vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] SUBCOMMAND [args]\n"
           "subcommands:\n"
           "  login [--password PW]\n"
           "  logout\n"
@@ -516,6 +539,7 @@ int main(int argc, char **argv)
         if      (!strcmp(argv[idx], "--host")    && idx + 1 < argc) { g_host       = argv[idx + 1]; idx += 2; }
         else if (!strcmp(argv[idx], "--port")    && idx + 1 < argc) { g_port       = atoi(argv[idx + 1]); idx += 2; }
         else if (!strcmp(argv[idx], "--timeout") && idx + 1 < argc) { g_timeout_ms = atoi(argv[idx + 1]); idx += 2; }
+        else if (!strcmp(argv[idx], "--dump"))   { g_dump = true; idx += 1; }
         else if (!strcmp(argv[idx], "--help")) { usage(); return 0; }
         else break;
     }
