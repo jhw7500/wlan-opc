@@ -479,7 +479,7 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
      * search walks into the freq sub-object via brace depth. */
     if (out->associated &&
         json_integer_in_section(json, "channel_info", "noise", &ival) == 0 &&
-        ival >= INT8_MIN && ival <= 0) {
+        ival >= INT8_MIN && ival < 0) {   /* 0 = uninitialized driver field */
         int snr = (int)out->rssi - (int)ival;
         if (snr < INT8_MIN) snr = INT8_MIN;
         if (snr > INT8_MAX) snr = INT8_MAX;

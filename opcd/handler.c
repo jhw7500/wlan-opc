@@ -189,7 +189,7 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             /* Runtime link readback — overwrites the radio-state portion of
              * wlan{1,2}. Config-side fields (freq/channel/mode/bw) come from
              * st->radio (set-radio cache) and are filled later. */
-            opcd_platform_link_t link;
+            opcd_platform_link_t link = {0};
             if (plat->get_link(0, &link) == 0) {
                 memcpy(ack.wlan1.connect_ap_mac, link.bssid, 6);
                 ack.wlan1.snr    = link.snr;
