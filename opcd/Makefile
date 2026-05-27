@@ -18,4 +18,6 @@ opcd: $(OBJS) ../protocol/libopcproto.a
 
 .PHONY: clean
 clean:
-	rm -f $(OBJS) opcd
+	# Use wildcard so that switching PLATFORM does not leave stale
+	# platform_<other>.o behind ($(OBJS) only references the *current* PLATFORM).
+	rm -f *.o opcd
