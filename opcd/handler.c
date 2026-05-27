@@ -184,6 +184,7 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             (void)plat->get_eth_netmask_host(&ack.subnet_mask);
             (void)plat->get_eth_gateway_host(&ack.default_gateway);
             (void)plat->get_wlan_mac(0, ack.wlan1.mac);
+            /* Ack carries a single essid field — DUAL always reports mlan0 */
             (void)plat->get_essid(0, ack.essid, sizeof ack.essid);
             if (st->radio.station_type == OPC_STATION_DUAL) {
                 (void)plat->get_wlan_mac(1, ack.wlan2.mac);

@@ -231,24 +231,10 @@ static int nxp_get_eth_mac(uint8_t mac[6])
     return parse_mac_str(buf, mac);
 }
 
-static int nxp_get_eth_ipv4_host(uint32_t *ip_host)
-{
-    char *json = slurp_file(ETH0_LINK_JSON);
-    if (!json) { *ip_host = 0; return -errno; }
-    char buf[32] = {0};
-    int rc = json_string_value(json, "ip_address", buf, sizeof buf);
-    free(json);
-    if (rc != 0) { *ip_host = 0; return rc; }
-    struct in_addr a;
-    if (inet_pton(AF_INET, buf, &a) != 1) { *ip_host = 0; return -EINVAL; }
-    *ip_host = ntohl(a.s_addr);
-    return 0;
-}
-
-/* Helper for netmask/gateway — same source/format as ipv4 but key varies.
- * gateway is JSON null when unconfigured (`"gateway": null`); the parser
- * matches only quoted string values, so null silently returns -ENOENT.
- * Callers map that to "no gateway = 0", which matches best-effort policy. */
+/* Read one IPv4-typed field (ip_address/netmask/gateway) from eth0/link.json
+ * as a host-order uint32_t. gateway is JSON null when unconfigured; the
+ * string-matcher then returns -ENOENT and *out stays 0 — caller maps that
+ * to "no gateway" per best-effort policy. */
 static int nxp_get_eth_ipv4_field(const char *key, uint32_t *out_host)
 {
     char *json = slurp_file(ETH0_LINK_JSON);
@@ -261,6 +247,11 @@ static int nxp_get_eth_ipv4_field(const char *key, uint32_t *out_host)
     if (inet_pton(AF_INET, buf, &a) != 1) { *out_host = 0; return -EINVAL; }
     *out_host = ntohl(a.s_addr);
     return 0;
+}
+
+static int nxp_get_eth_ipv4_host(uint32_t *ip_host)
+{
+    return nxp_get_eth_ipv4_field("ip_address", ip_host);
 }
 
 static int nxp_get_eth_netmask_host(uint32_t *netmask_host)
