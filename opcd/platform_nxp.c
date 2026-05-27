@@ -246,7 +246,7 @@ static int nxp_get_eth_ipv4_host(uint32_t *ip_host)
 }
 
 /* ------------------------------------------------------------------ */
-/* Identity — WLAN (placeholder — lands in next PR)                   */
+/* Identity — WLAN (mlan0 / mlan1 via link.json)                      */
 /* ------------------------------------------------------------------ */
 
 static int nxp_get_wlan_count(void)
@@ -254,8 +254,15 @@ static int nxp_get_wlan_count(void)
     /* mlan0 is always present in a wlan-opc target. mlan1 is created by the
      * cantops wifi_init pipeline only when the interface is enabled in
      * /usr/local/etc/wifi_init_conf.json — its link.json existence is the
-     * canonical signal. */
-    return access(MLAN1_LINK_JSON, F_OK) == 0 ? 2 : 1;
+     * canonical signal.
+     *
+     * platform.h contract: only ENOENT (mlan1 disabled) is a known-good
+     * "single" result. Other access() errors (EACCES, EIO, ENOMEM, ...)
+     * mean the platform genuinely cannot query — surface them so the boot
+     * path treats them as fatal-at-startup. */
+    if (access(MLAN1_LINK_JSON, F_OK) == 0) return 2;
+    if (errno == ENOENT)                    return 1;
+    return -errno;
 }
 
 static int nxp_get_wlan_mac(int idx, uint8_t mac[6])
