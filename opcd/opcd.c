@@ -42,6 +42,49 @@
  * keeps the contract honest for future hot paths. */
 static void (*g_teardown)(void);
 
+/* Drain callback — translates a platform event to the corresponding
+ * indication frame. Returns 0 to keep draining (platform.h contract:
+ * negative reserved for drain-layer failure, positive for early-stop).
+ *
+ * The evt union carries an `idx` field (0=mlan0, 1=mlan1) for wlan_status /
+ * roaming / ap_disconnect, but the OPC indication spec (Rev 1.00 KO §3.4)
+ * has no wlan_id field in any of these frames, so idx is intentionally not
+ * propagated — VHL cannot distinguish wlan1 from wlan2 events at the
+ * protocol level. This is a spec limitation, not an opcd routing bug. */
+static int on_platform_event(const opcd_platform_evt_t *evt, void *ctx)
+{
+    opcd_state_t *st = ctx;
+    switch (evt->kind) {
+    case OPCD_PEVT_INIT_COMPLETE:
+        opcd_ind_init_complete(st, evt->u.init_complete.status);
+        break;
+    case OPCD_PEVT_WLAN_STATUS:
+        opcd_ind_wlan_status(st, evt->u.wlan_status.status,
+                                evt->u.wlan_status.channel);
+        break;
+    case OPCD_PEVT_ROAMING:
+        opcd_ind_roaming(st, evt->u.roaming.snr, evt->u.roaming.rssi,
+                            evt->u.roaming.mac, evt->u.roaming.channel);
+        break;
+    case OPCD_PEVT_AP_DISCONNECT:
+        opcd_ind_ap_disconnect(st, evt->u.ap_disconnect.reason_msg_id,
+                                  evt->u.ap_disconnect.result_code,
+                                  evt->u.ap_disconnect.mac);
+        break;
+    case OPCD_PEVT_FAULT_DETECT:
+        opcd_ind_fault_detect(st, evt->u.fault_detect.congestion_id,
+                                  evt->u.fault_detect.current_val);
+        break;
+    case OPCD_PEVT_RESET_NOTICE:
+        opcd_ind_reset_notice(st, evt->u.reset_notice.cause);
+        break;
+    case OPCD_PEVT_NONE:
+    default:
+        break;
+    }
+    return 0;
+}
+
 static void state_set_defaults(opcd_state_t *st)
 {
     memset(st, 0, sizeof *st);
@@ -213,10 +256,19 @@ int main(int argc, char **argv)
     epoll_ctl(ep, EPOLL_CTL_ADD, udp_fd,   &ev_udp);
     epoll_ctl(ep, EPOLL_CTL_ADD, sig_fd,   &ev_sig);
     epoll_ctl(ep, EPOLL_CTL_ADD, timer_fd, &ev_timer);
-    /* TODO: platform event_fd / drain_events epoll wiring lands in the next
-     * PR alongside indication.h idx fields. Stub returns event_fd()==-1 so
-     * no events arrive today; the contract documented in platform.h is
-     * temporarily under-fulfilled. */
+
+    /* Platform async events — registered only if the backend exposes a
+     * pollable fd. The stub returns -1 (no async events), so this branch
+     * is currently inert; nxp.c will produce a real fd from nl80211. */
+    int evt_fd = plat->event_fd();
+    if (evt_fd >= 0) {
+        struct epoll_event ev_evt = { .events = EPOLLIN, .data.fd = evt_fd };
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, evt_fd, &ev_evt) != 0) {
+            LOG("epoll_ctl(evt_fd=%d) failed: %s — platform events disabled",
+                evt_fd, strerror(errno));
+            evt_fd = -1;
+        }
+    }
 
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
@@ -246,6 +298,13 @@ int main(int argc, char **argv)
                     }
                 }
                 opcd_ind_tick(&st);
+            } else if (fd == evt_fd) {
+                /* Drain all queued platform events; on_platform_event
+                 * dispatches each to the corresponding indication. */
+                int drain_rc = plat->drain_events(on_platform_event, &st);
+                if (drain_rc < 0) {
+                    LOG("drain_events failed: %d", drain_rc);
+                }
             } else if (fd == udp_fd) {
                 while (1) {
                     struct sockaddr_in src;
