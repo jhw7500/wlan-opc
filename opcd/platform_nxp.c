@@ -30,10 +30,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "platform.h"
 
-#define ETH0_LINK_JSON  "/var/log/cantops/json/eth0/link.json"
+#define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
+#define MLAN0_LINK_JSON  "/var/log/cantops/json/mlan0/link.json"
+#define MLAN1_LINK_JSON  "/var/log/cantops/json/mlan1/link.json"
 
 /* Cap the file read to defend against accidentally pointing at a huge log. */
 #define LINK_JSON_MAX_BYTES (1u * 1024u * 1024u)
@@ -125,6 +128,66 @@ static int json_string_value(const char *json, const char *key,
     return 0;
 }
 
+/* Extract `"key": "VALUE"` confined to a `"section": { ... }` object body.
+ * Brace-depth tracking handles nested objects; this assumes cantops link.json
+ * never embeds `{`/`}` inside string values (verified against the eth0 /
+ * mlan0 / mlan1 schemas). Same prefix-match guard as json_string_value. */
+static int json_string_in_section(const char *json, const char *section,
+                                  const char *key, char *out, size_t cap)
+{
+    if (!json || !section || !key || !out || cap == 0) return -EINVAL;
+
+    char needle_sec[64];
+    int ns = snprintf(needle_sec, sizeof needle_sec, "\"%s\"", section);
+    if (ns < 0 || (size_t)ns >= sizeof needle_sec) return -EINVAL;
+
+    const char *sec = json;
+    while ((sec = strstr(sec, needle_sec)) != NULL) {
+        char a = sec[ns];
+        if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') break;
+        sec++;
+    }
+    if (!sec) return -ENOENT;
+
+    sec = strchr(sec, '{');
+    if (!sec) return -ENOENT;
+
+    char needle_key[64];
+    int nk = snprintf(needle_key, sizeof needle_key, "\"%s\"", key);
+    if (nk < 0 || (size_t)nk >= sizeof needle_key) return -EINVAL;
+
+    int depth = 1;
+    const char *p = sec + 1;
+    while (*p && depth > 0) {
+        if (*p == '{') {
+            depth++;
+        } else if (*p == '}') {
+            depth--;
+            if (depth == 0) break;
+        }
+        if (depth > 0 && strncmp(p, needle_key, (size_t)nk) == 0) {
+            char a = p[nk];
+            if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') {
+                const char *colon = strchr(p + nk, ':');
+                if (!colon) return -ENOENT;
+                colon++;
+                while (*colon == ' ' || *colon == '\t' ||
+                       *colon == '\n' || *colon == '\r') colon++;
+                if (*colon != '"') return -ENOENT;
+                colon++;
+                size_t i = 0;
+                while (*colon && *colon != '"' && i + 1 < cap) {
+                    out[i++] = *colon++;
+                }
+                out[i] = '\0';
+                return 0;
+            }
+        }
+        p++;
+    }
+    return -ENOENT;
+}
+
 static int parse_mac_str(const char *s, uint8_t mac[6])
 {
     unsigned v[6];
@@ -188,15 +251,27 @@ static int nxp_get_eth_ipv4_host(uint32_t *ip_host)
 
 static int nxp_get_wlan_count(void)
 {
-    /* SINGLE for now — DUAL handling lands with mlan1/link.json reader. */
-    return 1;
+    /* mlan0 is always present in a wlan-opc target. mlan1 is created by the
+     * cantops wifi_init pipeline only when the interface is enabled in
+     * /usr/local/etc/wifi_init_conf.json — its link.json existence is the
+     * canonical signal. */
+    return access(MLAN1_LINK_JSON, F_OK) == 0 ? 2 : 1;
 }
 
 static int nxp_get_wlan_mac(int idx, uint8_t mac[6])
 {
     if (idx < 0 || idx >= nxp_get_wlan_count()) return -ENODEV;
-    memset(mac, 0, 6);
-    return 0;
+    const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
+    char *json = slurp_file(path);
+    if (!json) { memset(mac, 0, 6); return -errno; }
+    char buf[32] = {0};
+    /* mlan link.json has `address` in two places (info, link); info holds
+     * the interface MAC (the device's own), link holds the AP's MAC under
+     * the same key. json_string_in_section disambiguates. */
+    int rc = json_string_in_section(json, "info", "address", buf, sizeof buf);
+    free(json);
+    if (rc != 0) { memset(mac, 0, 6); return rc; }
+    return parse_mac_str(buf, mac);
 }
 
 /* ------------------------------------------------------------------ */
