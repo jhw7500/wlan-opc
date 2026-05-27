@@ -33,9 +33,9 @@ workflows:
     description: "Issue triage and labeling"
 
   gemini-auto-review:
-    enabled: true
-    auto: true
-    description: "Automatic PR review with Gemini"
+    enabled: false
+    auto: false
+    description: "Automatic PR review with Gemini (disabled: GCP project denied access)"
 
   gemini-scheduled-triage:
     enabled: false
@@ -50,3 +50,14 @@ workflows:
     enabled: true
     auto: true
     description: "Claude automatic PR review"
+
+  # OpenCode workflows
+  opencode-auto-review:
+    enabled: false
+    auto: false
+    description: "OpenCode automatic PR review (disabled: opencode exit 1 — token/setup pending)"
+
+  # Repo automation helpers
+  bump-automation-ref:
+    enabled: false
+    description: "Auto-bump jhw7500/automation refs (disabled: GITHUB_TOKEN lacks 'workflows' permission)"
