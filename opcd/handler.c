@@ -167,8 +167,10 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             /* platform.h: opcd_platform() may return NULL before registration;
              * the dispatch path requires it to be non-NULL. Surface a missing
              * register call as abort() instead of NULL deref. Explicit check
-             * (not assert) survives -DNDEBUG release builds. */
+             * (not assert) survives -DNDEBUG release builds. Logged before
+             * abort() so a crash dump has triage context. */
             if (!plat) {
+                fprintf(stderr, "opcd: BUG: opcd_platform() returned NULL in dispatch\n");
                 abort();
             }
             opcd_platform_caps_t caps = {0};

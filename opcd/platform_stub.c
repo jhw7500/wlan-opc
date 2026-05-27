@@ -116,7 +116,10 @@ static int stub_get_caps(opcd_platform_caps_t *out)
 
 static int stub_get_link(int idx, opcd_platform_link_t *out)
 {
-    if (idx != 0) {
+    /* Same bounds form as stub_get_wlan_mac — kept identical so that bumping
+     * stub_get_wlan_count() in future cannot cause one accessor to succeed
+     * while the other returns -ENODEV. */
+    if (idx < 0 || idx >= stub_get_wlan_count()) {
         return -ENODEV;
     }
     memset(out, 0, sizeof *out);
@@ -188,8 +191,11 @@ static const opcd_platform_ops_t g_stub_ops = {
 
 /* Single global ops pointer. Defined here because this file owns the
  * registry; a future platform_nxp.c will be built mutually exclusive with
- * this file (see platform.h "EXACTLY ONE" note), so dup-symbol on g_ops
- * acts as the build-time guard. */
+ * this file (see platform.h "EXACTLY ONE" note). The build-time guard is
+ * the dup-symbol that would occur on opcd_platform() — both files define
+ * it with external linkage, so linking both yields a linker error.
+ * g_ops itself is static (internal linkage) and would NOT collide; do not
+ * rely on it as the guard. */
 static const opcd_platform_ops_t *g_ops;
 
 const opcd_platform_ops_t *opcd_platform(void)
