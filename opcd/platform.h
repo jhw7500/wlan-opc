@@ -237,17 +237,16 @@ typedef struct opcd_platform_ops {
 const opcd_platform_ops_t *opcd_platform(void);
 
 /* Implementation registration — exported by the corresponding .c file.
- * EXACTLY ONE of these must be linked AND called at opcd startup. Linking
- * both yields a clean compile but the second register call silently
- * clobbers the first; each .c file is expected to enforce mutual exclusion
- * with a build-time guard (e.g. a unique linker symbol that conflicts on
- * dual link). The header itself cannot enforce this.
+ * EXACTLY ONE platform_*.c file is linked into opcd; the symbol below
+ * resolves to that single implementation's registration function. Linking
+ * two platform_*.c files yields a duplicate-symbol link error on this
+ * function, which is the intentional build-time mutual-exclusion guard.
+ * Build selection is a Makefile concern (e.g. PLATFORM=stub|nxp).
  *
- * Implementations SHOULD also assert(g_ops == NULL) before writing the
- * global ops pointer, so that an accidental double-register at runtime
- * surfaces as an abort rather than a silent clobber. */
-void opcd_platform_stub_register(void);
-void opcd_platform_nxp_register(void);
+ * Implementations SHOULD assert(g_ops == NULL) before writing the global
+ * ops pointer so that an accidental double-call at runtime surfaces as an
+ * abort rather than a silent clobber. */
+void opcd_platform_register(void);
 
 #ifdef __cplusplus
 }

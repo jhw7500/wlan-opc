@@ -166,7 +166,7 @@ int main(int argc, char **argv)
     ensure_dirs(&st);
     state_load_from_disk(&st);
 
-    opcd_platform_stub_register();
+    opcd_platform_register();   /* backend resolved at link time — see Makefile PLATFORM */
     const opcd_platform_ops_t *plat = opcd_platform();
     if (!plat) {
         LOG("platform registration failed");

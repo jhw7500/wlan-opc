@@ -191,11 +191,11 @@ static const opcd_platform_ops_t g_stub_ops = {
 
 /* Single global ops pointer. Defined here because this file owns the
  * registry; a future platform_nxp.c will be built mutually exclusive with
- * this file (see platform.h "EXACTLY ONE" note). The build-time guard is
- * the dup-symbol that would occur on opcd_platform() — both files define
- * it with external linkage, so linking both yields a linker error.
- * g_ops itself is static (internal linkage) and would NOT collide; do not
- * rely on it as the guard. */
+ * this file (see platform.h "EXACTLY ONE" note). Both files define
+ * opcd_platform_register() and opcd_platform() with external linkage, so
+ * linking both yields a duplicate-symbol link error — that is the
+ * intentional build-time mutual-exclusion guard. g_ops itself is static
+ * (internal linkage) and would NOT collide; do not rely on it. */
 static const opcd_platform_ops_t *g_ops;
 
 const opcd_platform_ops_t *opcd_platform(void)
@@ -203,7 +203,7 @@ const opcd_platform_ops_t *opcd_platform(void)
     return g_ops;
 }
 
-void opcd_platform_stub_register(void)
+void opcd_platform_register(void)
 {
     /* Per platform.h: surface accidental double-register as abort, not
      * silent clobber. Explicit check (not assert) survives -DNDEBUG. */
