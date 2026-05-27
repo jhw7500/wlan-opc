@@ -366,9 +366,19 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
         } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_bw(req.wlan2.bandwidth)) {
             result = OPC_RESULT_NG; err = 0x0014;
         } else {
-            st->radio = req;
-            if (save_radio(st) != 0) {
-                result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+            const opcd_platform_ops_t *plat = opcd_platform();
+            if (!plat) {
+                fprintf(stderr, "opcd: BUG: opcd_platform() returned NULL in handle_set_radio_config\n");
+                abort();
+            }
+            if (plat->apply_radio_config(&req) != 0) {
+                /* regulation-class NG — platform refused the kernel change */
+                result = OPC_RESULT_NG; err = 0x0050;
+            } else {
+                st->radio = req;
+                if (save_radio(st) != 0) {
+                    result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+                }
             }
             session_touch(st);
         }
