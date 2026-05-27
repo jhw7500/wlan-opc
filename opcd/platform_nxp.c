@@ -42,30 +42,56 @@
 /* JSON value extraction (flat key — sufficient for eth0/link.json)   */
 /* ------------------------------------------------------------------ */
 
-/* Read entire file into a heap buffer; caller frees with free(). */
+/* Read entire file into a heap buffer; caller frees with free().
+ * On failure, errno is set to a meaningful value (preserved across fclose,
+ * which otherwise may clobber it; synthesized for non-syscall failures
+ * like the LINK_JSON_MAX_BYTES cap). */
 static char *slurp_file(const char *path)
 {
+    int saved_errno;
     FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0 || (unsigned long)sz > LINK_JSON_MAX_BYTES) {
+    if (!f) return NULL;       /* errno already set by fopen */
+    if (fseek(f, 0, SEEK_END) != 0) {
+        saved_errno = errno;
         fclose(f);
+        errno = saved_errno;
+        return NULL;
+    }
+    long sz = ftell(f);
+    if (sz < 0) {
+        saved_errno = errno;
+        fclose(f);
+        errno = saved_errno;
+        return NULL;
+    }
+    if ((unsigned long)sz > LINK_JSON_MAX_BYTES) {
+        fclose(f);
+        errno = EFBIG;          /* synthetic — cap violation has no syscall */
         return NULL;
     }
     rewind(f);
     char *buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
+    if (!buf) {
+        fclose(f);
+        errno = ENOMEM;
+        return NULL;
+    }
     size_t n = fread(buf, 1, (size_t)sz, f);
+    saved_errno = errno;        /* fread may have set EIO etc. */
     fclose(f);
-    if (n != (size_t)sz) { free(buf); return NULL; }
+    if (n != (size_t)sz) {
+        free(buf);
+        errno = saved_errno ? saved_errno : EIO;
+        return NULL;
+    }
     buf[sz] = '\0';
     return buf;
 }
 
-/* Extract a quoted string value for `"key": "VALUE"`. Only safe when the
- * key is unique within the file (true for top-level eth0/link.json keys).
- * Returns 0 on success and a NUL-terminated `out`. */
+/* Extract a quoted string value for `"key": "VALUE"`. Safe across keys that
+ * are prefixes of each other ("mac" vs "mac_address") because the match
+ * requires the character after the closing quote to be a colon or JSON
+ * whitespace. Returns 0 on success with NUL-terminated `out`. */
 static int json_string_value(const char *json, const char *key,
                              char *out, size_t cap)
 {
@@ -73,12 +99,22 @@ static int json_string_value(const char *json, const char *key,
     char needle[64];
     int n = snprintf(needle, sizeof needle, "\"%s\"", key);
     if (n < 0 || (size_t)n >= sizeof needle) return -EINVAL;
-    const char *p = strstr(json, needle);
+
+    const char *p = json;
+    while ((p = strstr(p, needle)) != NULL) {
+        char after = p[n];
+        if (after == ':' || after == ' ' || after == '\t' ||
+            after == '\n' || after == '\r') {
+            break;
+        }
+        p++;    /* prefix match like "mac" inside "mac_address" — keep searching */
+    }
     if (!p) return -ENOENT;
+
     p = strchr(p + n, ':');
     if (!p) return -ENOENT;
     p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     if (*p != '"') return -ENOENT;
     p++;
     size_t i = 0;
