@@ -300,10 +300,16 @@ int main(int argc, char **argv)
                 opcd_ind_tick(&st);
             } else if (fd == evt_fd) {
                 /* Drain all queued platform events; on_platform_event
-                 * dispatches each to the corresponding indication. */
+                 * dispatches each to the corresponding indication.
+                 * On drain-layer failure, remove the fd from epoll so a
+                 * level-triggered EPOLLIN does not spin the loop logging
+                 * the same error on every iteration. */
                 int drain_rc = plat->drain_events(on_platform_event, &st);
                 if (drain_rc < 0) {
-                    LOG("drain_events failed: %d", drain_rc);
+                    LOG("drain_events failed (rc=%d) — disabling platform events",
+                        drain_rc);
+                    epoll_ctl(ep, EPOLL_CTL_DEL, evt_fd, NULL);
+                    evt_fd = -1;
                 }
             } else if (fd == udp_fd) {
                 while (1) {
