@@ -492,7 +492,26 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
 
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
-    (void)cfg;
+    /* TODO: invoke dist/wlan/usr/local/scripts/wifi.sh for real frequency
+     * change + wpa_supplicant restart. */
+    if (cfg->station_type == OPC_STATION_DUAL) {
+        fprintf(stderr,
+                "opcd: nxp_apply_radio_config: station=DUAL priority_ch=%u "
+                "w1(freq=%u ch=0x%04x mode=%u bw=%u) "
+                "w2(freq=%u ch=0x%04x mode=%u bw=%u)\n",
+                cfg->priority_ch,
+                cfg->wlan1.freq_mhz, cfg->wlan1.channel,
+                cfg->wlan1.mode, cfg->wlan1.bandwidth,
+                cfg->wlan2.freq_mhz, cfg->wlan2.channel,
+                cfg->wlan2.mode, cfg->wlan2.bandwidth);
+    } else {
+        fprintf(stderr,
+                "opcd: nxp_apply_radio_config: station=SINGLE priority_ch=%u "
+                "w1(freq=%u ch=0x%04x mode=%u bw=%u)\n",
+                cfg->priority_ch,
+                cfg->wlan1.freq_mhz, cfg->wlan1.channel,
+                cfg->wlan1.mode, cfg->wlan1.bandwidth);
+    }
     return 0;
 }
 
