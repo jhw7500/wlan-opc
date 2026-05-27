@@ -188,6 +188,83 @@ static int json_string_in_section(const char *json, const char *section,
     return -ENOENT;
 }
 
+/* Same as json_string_in_section but extracts a JSON integer
+ * (`"key": -42` form, no quotes). */
+static int json_integer_in_section(const char *json, const char *section,
+                                   const char *key, long *out)
+{
+    if (!json || !section || !key || !out) return -EINVAL;
+
+    char needle_sec[64];
+    int ns = snprintf(needle_sec, sizeof needle_sec, "\"%s\"", section);
+    if (ns < 0 || (size_t)ns >= sizeof needle_sec) return -EINVAL;
+
+    const char *sec = json;
+    while ((sec = strstr(sec, needle_sec)) != NULL) {
+        char a = sec[ns];
+        if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') break;
+        sec++;
+    }
+    if (!sec) return -ENOENT;
+    sec = strchr(sec, '{');
+    if (!sec) return -ENOENT;
+
+    char needle_key[64];
+    int nk = snprintf(needle_key, sizeof needle_key, "\"%s\"", key);
+    if (nk < 0 || (size_t)nk >= sizeof needle_key) return -EINVAL;
+
+    int depth = 1;
+    const char *p = sec + 1;
+    while (*p && depth > 0) {
+        if (*p == '{')       depth++;
+        else if (*p == '}') { depth--; if (depth == 0) break; }
+        if (depth > 0 && strncmp(p, needle_key, (size_t)nk) == 0) {
+            char a = p[nk];
+            if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') {
+                const char *colon = strchr(p + nk, ':');
+                if (!colon) return -ENOENT;
+                colon++;
+                while (*colon == ' ' || *colon == '\t' ||
+                       *colon == '\n' || *colon == '\r') colon++;
+                /* digit or sign — numeric literal */
+                char *endp = NULL;
+                long v = strtol(colon, &endp, 10);
+                if (endp == colon) return -EINVAL;
+                *out = v;
+                return 0;
+            }
+        }
+        p++;
+    }
+    return -ENOENT;
+}
+
+/* Parse "-66 dBm" / "-66dBm" into an int8 (signed dBm). */
+static int parse_signed_dbm(const char *s, int8_t *out)
+{
+    int v;
+    if (sscanf(s, "%d", &v) != 1) return -EINVAL;
+    if (v < INT8_MIN) v = INT8_MIN;
+    if (v > INT8_MAX) v = INT8_MAX;
+    *out = (int8_t)v;
+    return 0;
+}
+
+/* Parse "20 MHz" / "40 MHz" / "80 MHz" / "160 MHz" to OPC_BANDWIDTH_*. */
+static int parse_width_to_bw(const char *s, uint8_t *out)
+{
+    int mhz;
+    if (sscanf(s, "%d", &mhz) != 1) return -EINVAL;
+    switch (mhz) {
+    case 20:  *out = OPC_BANDWIDTH_20;  return 0;
+    case 40:  *out = OPC_BANDWIDTH_40;  return 0;
+    case 80:  *out = OPC_BANDWIDTH_80;  return 0;
+    case 160: *out = OPC_BANDWIDTH_160; return 0;
+    case 320: *out = OPC_BANDWIDTH_320; return 0;
+    default:  return -EINVAL;
+    }
+}
+
 static int parse_mac_str(const char *s, uint8_t mac[6])
 {
     unsigned v[6];
@@ -361,7 +438,55 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
 {
     if (idx < 0 || idx >= nxp_get_wlan_count()) return -ENODEV;
     memset(out, 0, sizeof *out);
-    out->associated = false;
+
+    const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
+    char *json = slurp_file(path);
+    if (!json) return -errno;
+
+    char buf[64] = {0};
+    long ival = 0;
+
+    /* info.freq / info.channel — operating frequency/channel */
+    if (json_integer_in_section(json, "info", "freq", &ival) == 0 &&
+        ival > 0 && ival <= UINT16_MAX) {
+        out->freq_mhz = (uint16_t)ival;
+    }
+    if (json_integer_in_section(json, "info", "channel", &ival) == 0 &&
+        ival >= 0 && ival <= UINT16_MAX) {
+        out->channel = (uint16_t)ival;
+    }
+
+    /* info.width → OPC_BANDWIDTH_* */
+    if (json_string_in_section(json, "info", "width", buf, sizeof buf) == 0) {
+        uint8_t bw;
+        if (parse_width_to_bw(buf, &bw) == 0) out->bandwidth = bw;
+    }
+
+    /* link.address — AP MAC. Presence also signals associated. */
+    if (json_string_in_section(json, "link", "address", buf, sizeof buf) == 0 &&
+        parse_mac_str(buf, out->bssid) == 0) {
+        out->associated = true;
+    }
+
+    /* link.signal_avg "-66 dBm" → rssi */
+    if (json_string_in_section(json, "link", "signal_avg", buf, sizeof buf) == 0) {
+        (void)parse_signed_dbm(buf, &out->rssi);
+    }
+
+    /* channel_info.<freq>.noise → snr = rssi - noise.
+     * channel_info is keyed by the operating freq (dynamic), but `noise`
+     * is unique within channel_info for the active channel. The nested
+     * search walks into the freq sub-object via brace depth. */
+    if (out->associated &&
+        json_integer_in_section(json, "channel_info", "noise", &ival) == 0 &&
+        ival >= INT8_MIN && ival < 0) {   /* 0 = uninitialized driver field */
+        int snr = (int)out->rssi - (int)ival;
+        if (snr < INT8_MIN) snr = INT8_MIN;
+        if (snr > INT8_MAX) snr = INT8_MAX;
+        out->snr = (int8_t)snr;
+    }
+
+    free(json);
     return 0;
 }
 
