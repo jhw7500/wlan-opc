@@ -53,15 +53,17 @@ typedef struct opcd_platform_caps {
 /* Steady-state link snapshot used to fill GetDeviceInformation per-WLAN fields
  * and as the seed for Roaming Indication payloads. Field semantics match the
  * OPC protocol; freq_mhz=0 / channel=0 mean "no association".
- * rssi/snr naming matches opc_wlan_radio_state_t and opcd_ind_roaming params. */
+ * snr/rssi naming AND order match opc_wlan_radio_state_t (commands.h),
+ * opcd_platform_evt_t.u.roaming (below), and the opcd_ind_roaming(snr, rssi)
+ * signature in indication.h. */
 typedef struct opcd_platform_link {
     uint16_t freq_mhz;
     uint16_t channel;
     uint8_t  mode;        /* OPC_WLAN_MODE_*    */
     uint8_t  bandwidth;   /* OPC_BANDWIDTH_*    */
     uint8_t  bssid[6];    /* zeros when not associated */
-    int8_t   rssi;        /* dBm                */
     int8_t   snr;         /* dB                 */
+    int8_t   rssi;        /* dBm                */
     bool     associated;
 } opcd_platform_link_t;
 
@@ -132,7 +134,9 @@ typedef struct opcd_platform_ops {
      * (1 for SINGLE-station builds, 2 for DUAL). Callers must NOT assume the
      * station_type field implies count; a misconfigured target may report a
      * lower count than station_type suggests, in which case higher idx values
-     * return -ENODEV. */
+     * return -ENODEV. Returns -errno if the platform itself cannot query the
+     * driver — opcd treats this as fatal at startup, since station_type
+     * negotiation requires a known interface count. */
     int  (*get_wlan_count)(void);
 
     /* Steady-state link readback. idx 0/1 = mlan0/mlan1.
@@ -152,9 +156,9 @@ typedef struct opcd_platform_ops {
     int  (*apply_ip_change)(const opc_ipcfg_entry_t *slot);
 
     /* Deterministic reset notice → soft reboot ack path.
-     * opcd already calls exit(0) after Ack to leverage Restart=always; this
-     * hook lets the platform pre-emptively quiesce the radio so the next
-     * boot is clean. May be a no-op. */
+     * opcd exits cleanly after Ack (main returns 0; systemd Restart=always
+     * handles the reboot). This hook lets the platform pre-emptively quiesce
+     * the radio so the next boot is clean. May be a no-op. */
     int  (*prepare_reset)(void);
 
     /* Event multiplexing. event_fd() returns -1 if no async events are
