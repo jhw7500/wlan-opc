@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,8 +163,9 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
              * a failed platform call leaves a zero/empty field rather than
              * failing the whole Ack — GetDeviceInfo on a partly-readable
              * device is more useful than NG. Returns are (void)-cast to
-             * make the intent explicit (Claude review PR #3). */
+             * make the intent explicit. */
             const opcd_platform_ops_t *plat = opcd_platform();
+            assert(plat != NULL);
             opcd_platform_caps_t caps = {0};
             (void)plat->get_manufacture_date(&ack.manufacture);
             (void)plat->get_shipment_date(&ack.shipment);

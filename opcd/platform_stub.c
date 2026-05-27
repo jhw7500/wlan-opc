@@ -48,7 +48,12 @@ static int stub_get_eth_ipv4_host(uint32_t *ip_host)
     return 0;
 }
 
-static int stub_get_wlan_count(void); /* fwd */
+static int stub_get_wlan_count(void)
+{
+    /* SINGLE — see platform.h note: stub MUST return >=1 even though it
+     * has no real hardware to enumerate. opcd treats count=0 as fatal. */
+    return 1;
+}
 
 static int stub_get_wlan_mac(int idx, uint8_t mac[6])
 {
@@ -108,13 +113,6 @@ static int stub_get_caps(opcd_platform_caps_t *out)
 /* ------------------------------------------------------------------ */
 /* Link                                                               */
 /* ------------------------------------------------------------------ */
-
-static int stub_get_wlan_count(void)
-{
-    /* SINGLE — see platform.h note: stub MUST return >=1 even though it
-     * has no real hardware to enumerate. opcd treats count=0 as fatal. */
-    return 1;
-}
 
 static int stub_get_link(int idx, opcd_platform_link_t *out)
 {

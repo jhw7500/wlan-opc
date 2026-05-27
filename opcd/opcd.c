@@ -197,6 +197,10 @@ int main(int argc, char **argv)
     epoll_ctl(ep, EPOLL_CTL_ADD, udp_fd,   &ev_udp);
     epoll_ctl(ep, EPOLL_CTL_ADD, sig_fd,   &ev_sig);
     epoll_ctl(ep, EPOLL_CTL_ADD, timer_fd, &ev_timer);
+    /* TODO: platform event_fd / drain_events epoll wiring lands in the next
+     * PR alongside indication.h idx fields. Stub returns event_fd()==-1 so
+     * no events arrive today; the contract documented in platform.h is
+     * temporarily under-fulfilled. */
 
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
@@ -258,7 +262,7 @@ int main(int argc, char **argv)
 
     if (st.should_reset) {
         LOG("reset requested — exiting (systemd will restart)");
-        plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
+        (void)plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
     }
     if (g_teardown) g_teardown();
     close(udp_fd);
