@@ -175,6 +175,7 @@ int main(int argc, char **argv)
     g_teardown = plat->teardown;
     if (plat->get_wlan_count() < 1) {
         LOG("platform reports zero WLAN interfaces — refusing to start");
+        g_teardown();
         return 1;
     }
 
@@ -257,7 +258,7 @@ int main(int argc, char **argv)
 
     if (st.should_reset) {
         LOG("reset requested — exiting (systemd will restart)");
-        if (plat->prepare_reset) plat->prepare_reset();
+        plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
     }
     if (g_teardown) g_teardown();
     close(udp_fd);

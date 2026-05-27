@@ -48,9 +48,11 @@ static int stub_get_eth_ipv4_host(uint32_t *ip_host)
     return 0;
 }
 
+static int stub_get_wlan_count(void); /* fwd */
+
 static int stub_get_wlan_mac(int idx, uint8_t mac[6])
 {
-    if (idx < 0 || idx >= 1) {
+    if (idx < 0 || idx >= stub_get_wlan_count()) {
         return -ENODEV;
     }
     memset(mac, 0, 6);
