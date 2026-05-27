@@ -1,7 +1,7 @@
 SUBDIRS := protocol opcd vhlctl
 
-CC  ?= aarch64-linux-gnu-gcc
-AR  ?= aarch64-linux-gnu-ar
+CC  = aarch64-linux-gnu-gcc
+AR  = aarch64-linux-gnu-ar
 export CC AR
 
 .PHONY: all clean check $(SUBDIRS)

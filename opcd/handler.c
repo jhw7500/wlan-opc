@@ -279,6 +279,20 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
     return 0;
 }
 
+static bool valid_wlan_mode(uint8_t m)
+{
+    return m == OPC_WLAN_MODE_11A || m == OPC_WLAN_MODE_11B ||
+           m == OPC_WLAN_MODE_11G || m == OPC_WLAN_MODE_11N ||
+           m == OPC_WLAN_MODE_11AC || m == OPC_WLAN_MODE_11AX;
+}
+
+static bool valid_wlan_bw(uint8_t b)
+{
+    return b == OPC_BANDWIDTH_20 || b == OPC_BANDWIDTH_40 ||
+           b == OPC_BANDWIDTH_80 || b == OPC_BANDWIDTH_160 ||
+           b == OPC_BANDWIDTH_80_80 || b == OPC_BANDWIDTH_320;
+}
+
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
@@ -292,6 +306,14 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         if (req.station_type != OPC_STATION_SINGLE && req.station_type != OPC_STATION_DUAL) {
             result = OPC_RESULT_NG; err = 0x0010;
+        } else if (!valid_wlan_mode(req.wlan1.mode)) {
+            result = OPC_RESULT_NG; err = 0x0013;
+        } else if (!valid_wlan_bw(req.wlan1.bandwidth)) {
+            result = OPC_RESULT_NG; err = 0x0014;
+        } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_mode(req.wlan2.mode)) {
+            result = OPC_RESULT_NG; err = 0x0013;
+        } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_bw(req.wlan2.bandwidth)) {
+            result = OPC_RESULT_NG; err = 0x0014;
         } else {
             st->radio = req;
             if (save_radio(st) != 0) {
