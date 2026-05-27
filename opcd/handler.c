@@ -7,6 +7,7 @@
 
 #include "handler.h"
 #include "indication.h"
+#include "platform.h"
 #include "store.h"
 
 /* ---- session helpers ---- */
@@ -153,12 +154,27 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             ack.vendor_code     = st->conf.vendor_code;
             ack.product_code    = st->conf.product_code;
             ack.product_subcode = st->conf.product_subcode;
-            /* Platform stub fields — real values come from the NXP driver later. */
-            ack.manufacture     = (opc_date_t){ .year = 2026, .month = 2, .day = 28 };
-            ack.shipment        = (opc_date_t){ .year = 2026, .month = 3, .day = 15 };
-            strncpy(ack.firmware_version, "wlan-opc-0.1.0", sizeof ack.firmware_version - 1);
-            strncpy(ack.hardware_version, "NXP88W9098",     sizeof ack.hardware_version - 1);
-            strncpy(ack.serial_number,    "SN-STUB-0001",   sizeof ack.serial_number - 1);
+            /* Platform layer fills inventory/identity fields. Stub returns
+             * the same canned values handler.c used to hardcode; future
+             * platform_nxp.c will return real driver-sourced values. */
+            const opcd_platform_ops_t *plat = opcd_platform();
+            plat->get_manufacture_date(&ack.manufacture);
+            plat->get_shipment_date(&ack.shipment);
+            plat->get_firmware_version(ack.firmware_version, sizeof ack.firmware_version);
+            plat->get_hardware_version(ack.hardware_version, sizeof ack.hardware_version);
+            plat->get_serial_number(ack.serial_number, sizeof ack.serial_number);
+            plat->get_eth_mac(ack.ethernet_mac);
+            plat->get_eth_ipv4_host(&ack.ip_address);
+            plat->get_wlan_mac(0, ack.wlan1.mac);
+            if (st->radio.station_type == OPC_STATION_DUAL) {
+                plat->get_wlan_mac(1, ack.wlan2.mac);
+            }
+            opcd_platform_caps_t caps;
+            plat->get_caps(&caps);
+            ack.ieee_11r  = caps.ieee_11r;
+            ack.ieee_11ai = caps.ieee_11ai;
+            ack.ieee_11k  = caps.ieee_11k;
+            ack.ieee_11v  = caps.ieee_11v;
             session_touch(st);
             ack.device_status = st->boot_status;
             ack.station_type  = st->radio.station_type;

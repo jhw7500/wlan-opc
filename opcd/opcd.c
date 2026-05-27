@@ -32,9 +32,15 @@
 #include "handler.h"
 #include "indication.h"
 #include "opcd_state.h"
+#include "platform.h"
 #include "store.h"
 
 #define LOG(fmt, ...) fprintf(stderr, "opcd: " fmt "\n", ##__VA_ARGS__)
+
+/* Cached teardown function pointer for AS-safe signal-handler access — see
+ * platform.h. Although opcd uses signalfd (not raw handlers) today, this
+ * keeps the contract honest for future hot paths. */
+static void (*g_teardown)(void);
 
 static void state_set_defaults(opcd_state_t *st)
 {
@@ -159,6 +165,19 @@ int main(int argc, char **argv)
 
     ensure_dirs(&st);
     state_load_from_disk(&st);
+
+    opcd_platform_stub_register();
+    const opcd_platform_ops_t *plat = opcd_platform();
+    if (!plat || plat->init() != 0) {
+        LOG("platform init failed");
+        return 1;
+    }
+    g_teardown = plat->teardown;
+    if (plat->get_wlan_count() < 1) {
+        LOG("platform reports zero WLAN interfaces — refusing to start");
+        return 1;
+    }
+
     st.boot_status = OPC_DEVICE_READY;
     LOG("starting on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
 
@@ -238,7 +257,9 @@ int main(int argc, char **argv)
 
     if (st.should_reset) {
         LOG("reset requested — exiting (systemd will restart)");
+        if (plat->prepare_reset) plat->prepare_reset();
     }
+    if (g_teardown) g_teardown();
     close(udp_fd);
     close(sig_fd);
     close(timer_fd);
