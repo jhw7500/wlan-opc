@@ -1,0 +1,113 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'protocol/**'
+      - 'opcd/**'
+      - 'vhlctl/**'
+      - 'Makefile'
+      - '.github/workflows/build-test.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'protocol/**'
+      - 'opcd/**'
+      - 'vhlctl/**'
+      - 'Makefile'
+      - '.github/workflows/build-test.yml'
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Run even if disabled'
+        type: boolean
+        default: false
+
+jobs:
+  check-enabled:
+    name: Check if enabled
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - name: Check workflow config
+        id: check
+        uses: ./.github/actions/check-workflow-enabled
+        with:
+          workflow-name: build-test
+          force-run: ${{ github.event.inputs.force_run || 'false' }}
+
+  build:
+    name: Build (arm64 cross) + host codec tests
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            file
+
+      - name: Host codec round-trip tests (`make check`)
+        run: |
+          set -euo pipefail
+          make check
+
+      - name: Clean before cross-compile
+        run: make clean
+
+      - name: Cross-compile (default = aarch64)
+        run: |
+          set -euo pipefail
+          make
+          test -f protocol/libopcproto.a
+          test -f opcd/opcd
+          test -f vhlctl/vhlctl
+
+      - name: Verify arm64 binaries
+        run: |
+          set -euo pipefail
+          file opcd/opcd vhlctl/vhlctl protocol/libopcproto.a
+          file opcd/opcd    | grep -q 'ARM aarch64'
+          file vhlctl/vhlctl | grep -q 'ARM aarch64'
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: wlan-opc-arm64
+          path: |
+            opcd/opcd
+            vhlctl/vhlctl
+            protocol/libopcproto.a
+          if-no-files-found: error
+          retention-days: 7
+
+  skipped:
+    name: Workflow Skipped
+    needs: check-enabled
+    if: needs.check-enabled.outputs.enabled != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notice
+        run: |
+          echo "::notice::build-test workflow is disabled in .github/workflow-config.yml"
+          echo "## Workflow Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "build-test is disabled in workflow-config.yml" >> $GITHUB_STEP_SUMMARY
