@@ -10,10 +10,10 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "platform.h"
@@ -200,7 +200,9 @@ const opcd_platform_ops_t *opcd_platform(void)
 void opcd_platform_stub_register(void)
 {
     /* Per platform.h: surface accidental double-register as abort, not
-     * silent clobber. */
-    assert(g_ops == NULL);
+     * silent clobber. Explicit check (not assert) survives -DNDEBUG. */
+    if (g_ops != NULL) {
+        abort();
+    }
     g_ops = &g_stub_ops;
 }

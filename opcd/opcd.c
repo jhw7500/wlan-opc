@@ -168,8 +168,16 @@ int main(int argc, char **argv)
 
     opcd_platform_stub_register();
     const opcd_platform_ops_t *plat = opcd_platform();
-    if (!plat || plat->init() != 0) {
+    if (!plat) {
+        LOG("platform registration failed");
+        return 1;
+    }
+    if (plat->init() != 0) {
         LOG("platform init failed");
+        /* teardown is idempotent and must tolerate partial init — call it
+         * unconditionally so a partially-acquired netlink socket / fd does
+         * not leak across a systemd restart loop. */
+        plat->teardown();
         return 1;
     }
     g_teardown = plat->teardown;
@@ -183,13 +191,21 @@ int main(int argc, char **argv)
     LOG("starting on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
 
     int udp_fd = open_udp_socket(st.conf.udp_port);
-    if (udp_fd < 0) return 1;
+    if (udp_fd < 0) { g_teardown(); return 1; }
     st.udp_fd = udp_fd;
 
     int sig_fd   = open_signalfd();
     int timer_fd = open_timerfd_1s();
     int ep       = epoll_create1(EPOLL_CLOEXEC);
-    if (sig_fd < 0 || timer_fd < 0 || ep < 0) { LOG("setup failed"); return 1; }
+    if (sig_fd < 0 || timer_fd < 0 || ep < 0) {
+        LOG("setup failed");
+        close(udp_fd);
+        if (sig_fd   >= 0) close(sig_fd);
+        if (timer_fd >= 0) close(timer_fd);
+        if (ep       >= 0) close(ep);
+        g_teardown();
+        return 1;
+    }
 
     struct epoll_event ev_udp   = { .events = EPOLLIN, .data.fd = udp_fd };
     struct epoll_event ev_sig   = { .events = EPOLLIN, .data.fd = sig_fd };
