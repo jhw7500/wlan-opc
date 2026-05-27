@@ -51,13 +51,11 @@ workflows:
     auto: true
     description: "Claude automatic PR review"
 
-  # OpenCode workflows
-  opencode-auto-review:
-    enabled: false
-    auto: false
-    description: "OpenCode automatic PR review (disabled: opencode exit 1 — token/setup pending)"
-
   # Repo automation helpers
   bump-automation-ref:
     enabled: false
     description: "Auto-bump jhw7500/automation refs (disabled: GITHUB_TOKEN lacks 'workflows' permission)"
+
+# Removed workflows (workflow yml deleted, listed here for change tracking):
+# - opencode-auto-review: opencode CLI exit 1 + enabled-toggle 무시 → 워크플로우 파일 자체 제거 (필요 시 driver-v2에서 다시 가져오기)
+# - auto-rereview-request: `fatal: not a git repository` (checkout 누락) → 워크플로우 파일 자체 제거
