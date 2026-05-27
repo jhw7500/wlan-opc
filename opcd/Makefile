@@ -4,7 +4,11 @@ CFLAGS  += -I../protocol
 LDFLAGS += -L../protocol
 LDLIBS  += -lopcproto
 
-OBJS := opcd.o store.o handler.o indication.o platform_stub.o
+# Platform backend selection — exactly one platform_<PLATFORM>.c is linked.
+# Override on the command line: `make PLATFORM=nxp` once platform_nxp.c lands.
+PLATFORM ?= stub
+
+OBJS := opcd.o store.o handler.o indication.o platform_$(PLATFORM).o
 
 opcd: $(OBJS) ../protocol/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
@@ -14,4 +18,6 @@ opcd: $(OBJS) ../protocol/libopcproto.a
 
 .PHONY: clean
 clean:
-	rm -f $(OBJS) opcd
+	# Use wildcard so that switching PLATFORM does not leave stale
+	# platform_<other>.o behind ($(OBJS) only references the *current* PLATFORM).
+	rm -f *.o opcd
