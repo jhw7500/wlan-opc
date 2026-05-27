@@ -4,7 +4,7 @@ CFLAGS  += -I../protocol
 LDFLAGS += -L../protocol
 LDLIBS  += -lopcproto
 
-OBJS := opcd.o store.o handler.o indication.o
+OBJS := opcd.o store.o handler.o indication.o platform_stub.o
 
 opcd: $(OBJS) ../protocol/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
