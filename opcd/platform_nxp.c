@@ -245,6 +245,34 @@ static int nxp_get_eth_ipv4_host(uint32_t *ip_host)
     return 0;
 }
 
+/* Helper for netmask/gateway — same source/format as ipv4 but key varies.
+ * gateway is JSON null when unconfigured (`"gateway": null`); the parser
+ * matches only quoted string values, so null silently returns -ENOENT.
+ * Callers map that to "no gateway = 0", which matches best-effort policy. */
+static int nxp_get_eth_ipv4_field(const char *key, uint32_t *out_host)
+{
+    char *json = slurp_file(ETH0_LINK_JSON);
+    if (!json) { *out_host = 0; return -errno; }
+    char buf[32] = {0};
+    int rc = json_string_value(json, key, buf, sizeof buf);
+    free(json);
+    if (rc != 0) { *out_host = 0; return rc; }
+    struct in_addr a;
+    if (inet_pton(AF_INET, buf, &a) != 1) { *out_host = 0; return -EINVAL; }
+    *out_host = ntohl(a.s_addr);
+    return 0;
+}
+
+static int nxp_get_eth_netmask_host(uint32_t *netmask_host)
+{
+    return nxp_get_eth_ipv4_field("netmask", netmask_host);
+}
+
+static int nxp_get_eth_gateway_host(uint32_t *gateway_host)
+{
+    return nxp_get_eth_ipv4_field("gateway", gateway_host);
+}
+
 /* ------------------------------------------------------------------ */
 /* Identity — WLAN (mlan0 / mlan1 via link.json)                      */
 /* ------------------------------------------------------------------ */
@@ -279,6 +307,19 @@ static int nxp_get_wlan_mac(int idx, uint8_t mac[6])
     free(json);
     if (rc != 0) { memset(mac, 0, 6); return rc; }
     return parse_mac_str(buf, mac);
+}
+
+static int nxp_get_essid(int idx, char *buf, size_t cap)
+{
+    if (idx < 0 || idx >= nxp_get_wlan_count()) return -ENODEV;
+    if (cap == 0) return -EINVAL;
+    buf[0] = '\0';
+    const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
+    char *json = slurp_file(path);
+    if (!json) return -errno;
+    int rc = json_string_in_section(json, "info", "ssid", buf, cap);
+    free(json);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -371,7 +412,10 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .teardown              = nxp_teardown,
     .get_eth_mac           = nxp_get_eth_mac,
     .get_eth_ipv4_host     = nxp_get_eth_ipv4_host,
+    .get_eth_netmask_host  = nxp_get_eth_netmask_host,
+    .get_eth_gateway_host  = nxp_get_eth_gateway_host,
     .get_wlan_mac          = nxp_get_wlan_mac,
+    .get_essid             = nxp_get_essid,
     .get_firmware_version  = nxp_get_firmware_version,
     .get_hardware_version  = nxp_get_hardware_version,
     .get_serial_number     = nxp_get_serial_number,

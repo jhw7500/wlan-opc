@@ -48,6 +48,18 @@ static int stub_get_eth_ipv4_host(uint32_t *ip_host)
     return 0;
 }
 
+static int stub_get_eth_netmask_host(uint32_t *netmask_host)
+{
+    *netmask_host = 0;
+    return 0;
+}
+
+static int stub_get_eth_gateway_host(uint32_t *gateway_host)
+{
+    *gateway_host = 0;
+    return 0;
+}
+
 static int stub_get_wlan_count(void)
 {
     /* SINGLE — see platform.h note: stub MUST return >=1 even though it
@@ -61,6 +73,14 @@ static int stub_get_wlan_mac(int idx, uint8_t mac[6])
         return -ENODEV;
     }
     memset(mac, 0, 6);
+    return 0;
+}
+
+static int stub_get_essid(int idx, char *buf, size_t cap)
+{
+    if (idx < 0 || idx >= stub_get_wlan_count()) return -ENODEV;
+    if (cap == 0) return -EINVAL;
+    buf[0] = '\0';
     return 0;
 }
 
@@ -173,7 +193,10 @@ static const opcd_platform_ops_t g_stub_ops = {
     .teardown              = stub_teardown,
     .get_eth_mac           = stub_get_eth_mac,
     .get_eth_ipv4_host     = stub_get_eth_ipv4_host,
+    .get_eth_netmask_host  = stub_get_eth_netmask_host,
+    .get_eth_gateway_host  = stub_get_eth_gateway_host,
     .get_wlan_mac          = stub_get_wlan_mac,
+    .get_essid             = stub_get_essid,
     .get_firmware_version  = stub_get_firmware_version,
     .get_hardware_version  = stub_get_hardware_version,
     .get_serial_number     = stub_get_serial_number,

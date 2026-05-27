@@ -175,7 +175,15 @@ typedef struct opcd_platform_ops {
      * get_wlan_mac returns -ENODEV for idx outside [0, wlan_count). */
     int  (*get_eth_mac)(uint8_t mac[6]);
     int  (*get_eth_ipv4_host)(uint32_t *ip_host);
+    /* netmask / gateway: same byte-order convention as get_eth_ipv4_host —
+     * host order; serializer is responsible for htonl(). gateway returns 0
+     * (host order) when unconfigured. */
+    int  (*get_eth_netmask_host)(uint32_t *netmask_host);
+    int  (*get_eth_gateway_host)(uint32_t *gateway_host);
     int  (*get_wlan_mac)(int idx /*0=mlan0,1=mlan1*/, uint8_t mac[6]);
+    /* SSID string for the indexed WLAN interface. NUL-terminated, silently
+     * truncated to cap. Empty string when not associated. */
+    int  (*get_essid)(int idx, char *buf, size_t cap);
     int  (*get_firmware_version)(char *buf, size_t cap);
     int  (*get_hardware_version)(char *buf, size_t cap);
     int  (*get_serial_number)(char *buf, size_t cap);
