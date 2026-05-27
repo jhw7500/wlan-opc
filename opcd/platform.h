@@ -81,6 +81,14 @@ typedef enum opcd_platform_evt_kind {
     OPCD_PEVT_RESET_NOTICE,      /* watchdog / fault driven reset (T9)     */
 } opcd_platform_evt_kind_t;
 
+/* OPCD_PEVT_WLAN_STATUS.status values. Defined here (not just in
+ * platform_stub.c / platform_nxp.c) so the two implementations cannot
+ * silently diverge on encoding. */
+#define OPCD_WLAN_STATUS_DOWN            0   /* link administratively down or carrier loss */
+#define OPCD_WLAN_STATUS_UP              1   /* link up, awaiting association              */
+#define OPCD_WLAN_STATUS_ASSOCIATED      2   /* associated with an AP                      */
+#define OPCD_WLAN_STATUS_CHANNEL_CHANGE  3   /* operating channel changed (DFS/CSA)        */
+
 typedef struct opcd_platform_evt {
     opcd_platform_evt_kind_t kind;
     union {
@@ -124,7 +132,12 @@ typedef struct opcd_platform_evt {
 typedef int (*opcd_platform_evt_cb)(const opcd_platform_evt_t *evt, void *ctx);
 
 /* vtable. All members non-NULL after init(); stub fills missing pieces with
- * "0/empty/ok" semantics so opcd never has to NULL-check. */
+ * "0/empty/ok" semantics so opcd never has to NULL-check.
+ *
+ * Exception: get_wlan_count() must return >=1 even in the stub — opcd
+ * treats 0 as a fatal-at-startup condition (zero WLAN interfaces
+ * contradicts every station_type). The stub conventionally returns 1
+ * (SINGLE). */
 typedef struct opcd_platform_ops {
     /* Lifecycle. init() is allowed to fail (-errno); opcd will refuse to
      * start. init() MAY block during driver probe (mlanutl, nl80211 family
