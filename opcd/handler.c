@@ -7,6 +7,7 @@
 
 #include "handler.h"
 #include "indication.h"
+#include "inventory.h"
 #include "platform.h"
 #include "store.h"
 
@@ -124,10 +125,11 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
     if (opc_get_basic_info_req_unpack(frame, flen) != 0) {
         /* Spec says this must always answer — best effort with current state. */
     }
+    const opcd_inventory_t *inv = opcd_inventory();
     opc_get_basic_info_ack_t ack = {
-        .vendor_code     = st->conf.vendor_code,
-        .product_code    = st->conf.product_code,
-        .product_subcode = st->conf.product_subcode,
+        .vendor_code     = inv->vendor_code,
+        .product_code    = inv->product_code,
+        .product_subcode = inv->product_subcode,
         .device_status   = st->boot_status,
         .station_type    = st->radio.station_type ? st->radio.station_type
                                                   : st->conf.default_station_type,
@@ -151,18 +153,14 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
         if (st->indication_enabled) {
             result = OPC_RESULT_NG; err = OPC_ERR_INDICATION_SETTING_VIOLATION;
         } else {
-            ack.vendor_code     = st->conf.vendor_code;
-            ack.product_code    = st->conf.product_code;
-            ack.product_subcode = st->conf.product_subcode;
-            /* Platform layer fills inventory/identity fields. Stub returns
-             * the same canned values handler.c used to hardcode; future
-             * platform_nxp.c will return real driver-sourced values.
-             *
-             * Return-value policy: best-effort. ack was memset(0) above, so
-             * a failed platform call leaves a zero/empty field rather than
+            /* Static identity (vendor/product/hardware/serial/dates/caps)
+             * comes from /usr/local/opc/etc/device_info.json via inventory.h.
+             * Live-queried fields (firmware version, ntp server, MAC/IP, link
+             * state) come from the platform vtable. ack was memset(0) above,
+             * so any failed lookup leaves an empty/zero field rather than
              * failing the whole Ack — GetDeviceInfo on a partly-readable
-             * device is more useful than NG. Returns are (void)-cast to
-             * make the intent explicit. */
+             * device is more useful than NG. */
+            const opcd_inventory_t   *inv  = opcd_inventory();
             const opcd_platform_ops_t *plat = opcd_platform();
             /* platform.h: opcd_platform() may return NULL before registration;
              * the dispatch path requires it to be non-NULL. Surface a missing
@@ -173,12 +171,17 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                 fprintf(stderr, "opcd: BUG: opcd_platform() returned NULL in dispatch\n");
                 abort();
             }
-            opcd_platform_caps_t caps = {0};
-            (void)plat->get_manufacture_date(&ack.manufacture);
-            (void)plat->get_shipment_date(&ack.shipment);
+            ack.vendor_code     = inv->vendor_code;
+            ack.product_code    = inv->product_code;
+            ack.product_subcode = inv->product_subcode;
+            ack.manufacture     = inv->manufacture_date;
+            ack.shipment        = inv->shipment_date;
+            memcpy(ack.hardware_version, inv->hardware_version,
+                   sizeof ack.hardware_version);
+            memcpy(ack.serial_number,    inv->serial_number,
+                   sizeof ack.serial_number);
             (void)plat->get_firmware_version(ack.firmware_version, sizeof ack.firmware_version);
-            (void)plat->get_hardware_version(ack.hardware_version, sizeof ack.hardware_version);
-            (void)plat->get_serial_number(ack.serial_number, sizeof ack.serial_number);
+            (void)plat->get_ntp_server(&ack.ntp_server);
             (void)plat->get_eth_mac(ack.ethernet_mac);
             (void)plat->get_eth_ipv4_host(&ack.ip_address);
             (void)plat->get_eth_netmask_host(&ack.subnet_mask);
@@ -227,11 +230,10 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                     }
                 }
             }
-            (void)plat->get_caps(&caps);
-            ack.ieee_11r  = caps.ieee_11r;
-            ack.ieee_11ai = caps.ieee_11ai;
-            ack.ieee_11k  = caps.ieee_11k;
-            ack.ieee_11v  = caps.ieee_11v;
+            ack.ieee_11r  = inv->ieee_11r;
+            ack.ieee_11ai = inv->ieee_11ai;
+            ack.ieee_11k  = inv->ieee_11k;
+            ack.ieee_11v  = inv->ieee_11v;
             session_touch(st);
             ack.device_status = st->boot_status;
             ack.station_type  = st->radio.station_type;
