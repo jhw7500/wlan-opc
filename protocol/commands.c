@@ -534,11 +534,9 @@ ssize_t opc_set_radio_config_req_pack(uint8_t *frame, size_t cap, uint16_t seq_n
     body[8]  = in->wlan1.mode;
     body[9]  = in->wlan1.bandwidth;
     /* body[10..11] reserve */
-    /* WLAN#2: spec reverses to "CH then FREQ" (T13 — sender follows spec literal,
-     * so use the same order on the wire but expose a single FREQ/CH struct to
-     * callers; receivers must apply the same swap). */
-    opc_be16_write(&body[12], in->wlan2.channel);
-    opc_be16_write(&body[14], in->wlan2.freq_mhz);
+    /* WLAN#2: symmetric with WLAN#1 (FREQ then CH) per vendor clarification. */
+    opc_be16_write(&body[12], in->wlan2.freq_mhz);
+    opc_be16_write(&body[14], in->wlan2.channel);
     body[16] = in->wlan2.mode;
     body[17] = in->wlan2.bandwidth;
     /* body[18..19] reserve */
@@ -563,8 +561,8 @@ int opc_set_radio_config_req_unpack(const uint8_t *frame, size_t frame_len,
     out->wlan1.channel    = opc_be16_read(&body[6]);
     out->wlan1.mode       = body[8];
     out->wlan1.bandwidth  = body[9];
-    out->wlan2.channel    = opc_be16_read(&body[12]);
-    out->wlan2.freq_mhz   = opc_be16_read(&body[14]);
+    out->wlan2.freq_mhz   = opc_be16_read(&body[12]);
+    out->wlan2.channel    = opc_be16_read(&body[14]);
     out->wlan2.mode       = body[16];
     out->wlan2.bandwidth  = body[17];
     return 0;
