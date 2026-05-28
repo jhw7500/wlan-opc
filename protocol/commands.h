@@ -255,11 +255,19 @@ int     opc_set_password_ack_unpack(const uint8_t *frame, size_t frame_len,
 #define OPC_SET_IP_CONFIG_LIST_BODY_MAX  (20 * OPC_IPCFG_ENTRY_LEN)   /* 1280 */
 #define OPC_SET_IP_CONFIG_LIST_REQ_LENGTH(n)  (56 + (n) * OPC_IPCFG_ENTRY_LEN)
 
-/* Boundary-flag values per spec page 22 (see docs/proto-todo.md T2). */
-#define OPC_LIST_BOUNDARY_CONTINUE   0x0000
-#define OPC_LIST_BOUNDARY_START      0x0001
+/* Boundary-flag values per spec page 24 (field description).
+ *
+ * Spec ambiguity: page 22 (body description) lists START=0x0001 and
+ * CONTINUE=0x0000, while page 24 (field description) lists START=0x0000
+ * and CONTINUE=0x0001. The vendor confirmed the page-24 field
+ * description as authoritative.
+ *
+ * START_END (page-22 body 0x0003) is absent from the field description
+ * and has been dropped — atomic single-frame commit is no longer
+ * supported; callers must send a START frame followed by an END frame. */
+#define OPC_LIST_BOUNDARY_START      0x0000
+#define OPC_LIST_BOUNDARY_CONTINUE   0x0001
 #define OPC_LIST_BOUNDARY_END        0x0002
-#define OPC_LIST_BOUNDARY_START_END  0x0003
 
 typedef struct opc_ipcfg_entry {
     uint16_t boundary_flag;
