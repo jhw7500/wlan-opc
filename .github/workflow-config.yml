@@ -7,7 +7,7 @@
 # - auto: PR 생성 시 자동 실행 여부 (없으면 해당 없음, 수동 트리거는 enabled만 체크)
 
 # Shared workflow version pin for jhw7500/automation.
-automation_ref: v1.28
+automation_ref: v1.29
 
 workflows:
   # Repo-specific
@@ -59,3 +59,7 @@ workflows:
 # Removed workflows (workflow yml deleted, listed here for change tracking):
 # - opencode-auto-review: opencode CLI exit 1 + enabled-toggle 무시 → 워크플로우 파일 자체 제거 (필요 시 driver-v2에서 다시 가져오기)
 # - auto-rereview-request: `fatal: not a git repository` (checkout 누락) → 워크플로우 파일 자체 제거
+
+# === Shared Settings ===
+claude:
+  model: "claude-sonnet-4-6"
