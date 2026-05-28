@@ -59,11 +59,14 @@ typedef struct opcd_platform_caps {
 typedef struct opcd_platform_link {
     uint16_t freq_mhz;
     uint16_t channel;
-    uint8_t  mode;        /* OPC_WLAN_MODE_*    */
-    uint8_t  bandwidth;   /* OPC_BANDWIDTH_*    */
-    uint8_t  bssid[6];    /* zeros when not associated */
-    int8_t   snr;         /* dB                 */
-    int8_t   rssi;        /* dBm                */
+    uint8_t  mode;            /* OPC_WLAN_MODE_*; 0 = unknown/legacy   */
+    uint8_t  bandwidth;       /* OPC_BANDWIDTH_*; only valid if
+                               * bandwidth_valid (BANDWIDTH_20 == 0
+                               * collides with the zero-init default) */
+    bool     bandwidth_valid; /* bandwidth holds a real driver value   */
+    uint8_t  bssid[6];        /* zeros when not associated */
+    int8_t   snr;             /* dB                 */
+    int8_t   rssi;            /* dBm                */
     bool     associated;
 } opcd_platform_link_t;
 

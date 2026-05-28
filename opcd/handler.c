@@ -187,14 +187,28 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             /* Ack carries a single essid field — DUAL always reports mlan0 */
             (void)plat->get_essid(0, ack.essid, sizeof ack.essid);
             /* Runtime link readback — overwrites the radio-state portion of
-             * wlan{1,2}. Config-side fields (freq/channel/mode/bw) come from
-             * st->radio (set-radio cache) and are filled later. */
+             * wlan{1,2}. mode/bandwidth are taken from the live link when
+             * available; freq/channel still come from the set-radio cache
+             * (set below). mode and bandwidth are tracked separately because
+             * legacy associations (11a/b/g) report mode=0 (no HE-/VHT-/MCS
+             * prefix in the bitrate), and bandwidth uses a valid flag because
+             * BANDWIDTH_20 == 0 cannot be distinguished from a missing field. */
             opcd_platform_link_t link = {0};
+            bool w1_mode_live = false, w1_bw_live = false;
+            bool w2_mode_live = false, w2_bw_live = false;
             if (plat->get_link(0, &link) == 0) {
                 memcpy(ack.wlan1.connect_ap_mac, link.bssid, 6);
                 ack.wlan1.snr    = link.snr;
                 ack.wlan1.rssi   = link.rssi;
                 ack.wlan1.status = link.associated ? 0x0001 : 0x0000;
+                if (link.associated && link.mode != 0) {
+                    ack.wlan1.mode = link.mode;
+                    w1_mode_live = true;
+                }
+                if (link.associated && link.bandwidth_valid) {
+                    ack.wlan1.bandwidth = link.bandwidth;
+                    w1_bw_live = true;
+                }
             }
             if (st->radio.station_type == OPC_STATION_DUAL) {
                 (void)plat->get_wlan_mac(1, ack.wlan2.mac);
@@ -203,6 +217,14 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                     ack.wlan2.snr    = link.snr;
                     ack.wlan2.rssi   = link.rssi;
                     ack.wlan2.status = link.associated ? 0x0001 : 0x0000;
+                    if (link.associated && link.mode != 0) {
+                        ack.wlan2.mode = link.mode;
+                        w2_mode_live = true;
+                    }
+                    if (link.associated && link.bandwidth_valid) {
+                        ack.wlan2.bandwidth = link.bandwidth;
+                        w2_bw_live = true;
+                    }
                 }
             }
             (void)plat->get_caps(&caps);
@@ -216,13 +238,13 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             ack.priority_ch   = st->radio.priority_ch;
             ack.wlan1.freq_mhz  = st->radio.wlan1.freq_mhz;
             ack.wlan1.channel   = st->radio.wlan1.channel;
-            ack.wlan1.mode      = st->radio.wlan1.mode;
-            ack.wlan1.bandwidth = st->radio.wlan1.bandwidth;
+            if (!w1_mode_live) ack.wlan1.mode      = st->radio.wlan1.mode;
+            if (!w1_bw_live)   ack.wlan1.bandwidth = st->radio.wlan1.bandwidth;
             if (st->radio.station_type == OPC_STATION_DUAL) {
                 ack.wlan2.freq_mhz  = st->radio.wlan2.freq_mhz;
                 ack.wlan2.channel   = st->radio.wlan2.channel;
-                ack.wlan2.mode      = st->radio.wlan2.mode;
-                ack.wlan2.bandwidth = st->radio.wlan2.bandwidth;
+                if (!w2_mode_live) ack.wlan2.mode      = st->radio.wlan2.mode;
+                if (!w2_bw_live)   ack.wlan2.bandwidth = st->radio.wlan2.bandwidth;
             }
         }
     }
