@@ -10,7 +10,7 @@
  *   basic-info
  *   device-info
  *   set-password --old PW --new PW
- *   set-ip-list  --slot N --flag start|cont|end|start_end
+ *   set-ip-list  --slot N --flag start|cont|end
  *                --ip A.B.C.D --mask A.B.C.D --gw A.B.C.D --ntp A.B.C.D --essid NAME
  *   change-ip    --slot N
  *   set-radio    --station single|dual
@@ -289,7 +289,7 @@ static int cmd_set_password(int argc, char **argv)
 
 static int cmd_set_ip_list(int argc, char **argv)
 {
-    const char *flag_s  = opt_value(argc, argv, "--flag",  "start_end");
+    const char *flag_s  = opt_value(argc, argv, "--flag",  "start");
     const char *slot_s  = opt_value(argc, argv, "--slot",  "1");
     const char *ip_s    = opt_value(argc, argv, "--ip",    "192.168.1.10");
     const char *mask_s  = opt_value(argc, argv, "--mask",  "255.255.255.0");
@@ -300,7 +300,10 @@ static int cmd_set_ip_list(int argc, char **argv)
     if      (!strcmp(flag_s, "start"))     flag = OPC_LIST_BOUNDARY_START;
     else if (!strcmp(flag_s, "cont"))      flag = OPC_LIST_BOUNDARY_CONTINUE;
     else if (!strcmp(flag_s, "end"))       flag = OPC_LIST_BOUNDARY_END;
-    else                                   flag = OPC_LIST_BOUNDARY_START_END;
+    else {
+        fprintf(stderr, "set-ip-list: --flag must be start|cont|end (got \"%s\")\n", flag_s);
+        return 2;
+    }
     opc_set_ip_config_list_req_t req; memset(&req, 0, sizeof req);
     req.entry_count = 1;
     req.entries[0].boundary_flag    = flag;
@@ -520,7 +523,7 @@ static void usage(void)
           "  basic-info\n"
           "  device-info\n"
           "  set-password --old PW --new PW\n"
-          "  set-ip-list  --slot N --flag start|cont|end|start_end\n"
+          "  set-ip-list  --slot N --flag start|cont|end\n"
           "               --ip A.B.C.D --mask A.B.C.D --gw A.B.C.D --ntp A.B.C.D --essid NAME\n"
           "  change-ip    --slot N\n"
           "  set-radio    --station single|dual\n"
