@@ -25,7 +25,7 @@ $(SUBDIRS):
 check:
 	$(MAKE) -C protocol CC=cc AR=ar
 	$(MAKE) -C protocol/tests CC=cc check
-	$(MAKE) -C opcd      CC=cc inventory.o json_util.o ntp_parse.o
+	$(MAKE) -C opcd      CC=cc inventory.o json_util.o ntp_parse.o snapshot.o
 	$(MAKE) -C opcd/tests CC=cc check
 
 clean:

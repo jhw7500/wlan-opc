@@ -9,8 +9,9 @@ LDLIBS  += -lopcproto
 # target-specific).
 OPCD_OBJS_INVENTORY := ../inventory.o ../json_util.o
 OPCD_OBJS_NTP       := ../ntp_parse.o
+OPCD_OBJS_SNAPSHOT  := ../snapshot.o
 
-TESTS := test_inventory test_ntp_parse
+TESTS := test_inventory test_ntp_parse test_snapshot
 
 all: $(TESTS)
 
@@ -19,6 +20,9 @@ test_inventory: test_inventory.o $(OPCD_OBJS_INVENTORY) ../../protocol/libopcpro
 
 test_ntp_parse: test_ntp_parse.o $(OPCD_OBJS_NTP)
 	$(CC) $(CFLAGS) -o $@ test_ntp_parse.o $(OPCD_OBJS_NTP)
+
+test_snapshot: test_snapshot.o $(OPCD_OBJS_SNAPSHOT) ../../protocol/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(LDFLAGS) $(LDLIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
