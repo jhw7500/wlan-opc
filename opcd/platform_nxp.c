@@ -25,11 +25,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "platform.h"
@@ -37,6 +41,12 @@
 #define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
 #define MLAN0_LINK_JSON  "/var/log/cantops/json/mlan0/link.json"
 #define MLAN1_LINK_JSON  "/var/log/cantops/json/mlan1/link.json"
+#define WIFI_SH          "/usr/local/scripts/wifi.sh"
+/* platform.h requires a bounded short timeout for apply_radio_config.
+ * Budget 900 ms (not 1000) leaves ~100 ms slack for inter-call overhead
+ * in DUAL mode (per-call timeout = TIMEOUT_MS/2 = 450 ms × 2 = 900 ms). */
+#define WIFI_SH_TIMEOUT_MS 900
+#define WIFI_SH_POLL_MS    10
 
 /* Cap the file read to defend against accidentally pointing at a huge log. */
 #define LINK_JSON_MAX_BYTES (1u * 1024u * 1024u)
@@ -490,10 +500,96 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
     return 0;
 }
 
+/* Run "wifi.sh <iface> freq <mhz>" synchronously. wifi.sh only rewrites
+ * scan_freq= / freq_list= in wpa_supplicant-<iface>.conf — fast (~ms) and
+ * comfortably within the OPC 1-second response budget. wpa_supplicant
+ * restart is intentionally NOT triggered here so the active link is not
+ * dropped on every Set-Radio; the operator triggers reconnect explicitly. */
+static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_ms)
+{
+    char freq_buf[8];
+    snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "opcd: nxp_apply_radio_config: fork failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        execl(WIFI_SH, "wifi.sh", iface, "freq", freq_buf, (char *)NULL);
+        /* execl returned: fprintf is not async-signal-safe post-fork.
+         * Diagnose via write() so the parent's "status=0x7f00" is
+         * distinguishable from wifi.sh itself returning 127. */
+        static const char msg[] =
+            "opcd: nxp_apply_radio_config: execl " WIFI_SH " failed\n";
+        (void)!write(STDERR_FILENO, msg, sizeof msg - 1);
+        _exit(127);
+    }
+
+    /* Bounded wait: poll with WNOHANG + monotonic deadline. wifi.sh freq is
+     * awk + install_0644_sync (normally ms), but backing-store stalls (SD
+     * card / NFS fsync) could block indefinitely. platform.h's "bounded
+     * short timeout" contract requires we cap and SIGKILL on overrun. */
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int status = 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) break;
+        if (r < 0 && errno != EINTR) {
+            /* opcd installs no SIGCHLD handler / SIG_IGN, so this is
+             * unreachable for our own forked pid under the current model.
+             * Still SIGKILL+reap defensively so a future signal-handling
+             * change cannot cause this branch to leak the child. */
+            fprintf(stderr, "opcd: nxp_apply_radio_config: waitpid failed: %s\n",
+                    strerror(errno));
+            kill(pid, SIGKILL);
+            pid_t wr;
+            while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
+            if (wr < 0) {
+                fprintf(stderr,
+                        "opcd: nxp_apply_radio_config: defensive reap failed: %s\n",
+                        strerror(errno));
+            }
+            return -1;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec  - start.tv_sec)  * 1000L
+                        + (now.tv_nsec - start.tv_nsec) / 1000000L;
+        if (elapsed_ms >= timeout_ms) {
+            fprintf(stderr,
+                    "opcd: nxp_apply_radio_config: wifi.sh %s freq %u timed out after %ldms, sending SIGKILL\n",
+                    iface, freq_mhz, elapsed_ms);
+            kill(pid, SIGKILL);
+            /* Reap so the SIGKILL'd child is not left as a zombie. */
+            pid_t wr;
+            while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
+            if (wr < 0) {
+                fprintf(stderr,
+                        "opcd: nxp_apply_radio_config: waitpid reap after SIGKILL failed: %s\n",
+                        strerror(errno));
+            }
+            return -1;
+        }
+        /* Cap the sleep so the last poll never overruns the deadline.
+         * Without this, child can live up to timeout_ms + POLL_MS. */
+        long remain_ms = timeout_ms - elapsed_ms;
+        long sleep_ms  = (remain_ms < WIFI_SH_POLL_MS) ? remain_ms : WIFI_SH_POLL_MS;
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = sleep_ms * 1000L * 1000L };
+        nanosleep(&ts, NULL);
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr,
+                "opcd: nxp_apply_radio_config: wifi.sh %s freq %u failed (status=0x%x)\n",
+                iface, freq_mhz, (unsigned)status);
+        return -1;
+    }
+    return 0;
+}
+
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
-    /* TODO: invoke dist/wlan/usr/local/scripts/wifi.sh for real frequency
-     * change + wpa_supplicant restart. */
     if (cfg->station_type == OPC_STATION_DUAL) {
         fprintf(stderr,
                 "opcd: nxp_apply_radio_config: station=DUAL priority_ch=%u "
@@ -511,6 +607,35 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
                 cfg->priority_ch,
                 cfg->wlan1.freq_mhz, cfg->wlan1.channel,
                 cfg->wlan1.mode, cfg->wlan1.bandwidth);
+    }
+
+    /* Share the 1s regulation budget across both apply calls in DUAL so the
+     * worst-case wall-clock stays within platform.h's contract. */
+    const long per_call_ms = (cfg->station_type == OPC_STATION_DUAL)
+                             ? WIFI_SH_TIMEOUT_MS / 2
+                             : WIFI_SH_TIMEOUT_MS;
+
+    /* freq_mhz == 0 means "no association" per OPC spec — skip apply, leave
+     * wpa_supplicant.conf untouched. Mode / bandwidth mapping is deferred to
+     * a follow-up PR; this PR only wires the wpa_supplicant freq list. */
+    if (cfg->wlan1.freq_mhz != 0) {
+        if (run_wifi_sh_freq("mlan0", cfg->wlan1.freq_mhz, per_call_ms) != 0) return -1;
+    }
+    if (cfg->station_type == OPC_STATION_DUAL && cfg->wlan2.freq_mhz != 0) {
+        /* Make the partial-apply state visible in the journal so a post-NG
+         * triage shows whether mlan0 was already reconfigured.
+         * Ternary safe: an mlan0 failure would have early-returned above,
+         * so wlan1.freq_mhz==0 here means an intentional skip, not error. */
+        fprintf(stderr,
+                "opcd: nxp_apply_radio_config: %s; now applying mlan1 freq=%u\n",
+                cfg->wlan1.freq_mhz != 0 ? "mlan0 freq already applied"
+                                         : "mlan0 skipped (freq=0)",
+                cfg->wlan2.freq_mhz);
+        /* DUAL partial-apply risk: if mlan0 succeeded above, an mlan1
+         * failure here leaves the two wpa_supplicant confs out of sync.
+         * Caller gets NG (0x0050); recovery is the operator re-issuing
+         * Set-Radio. End-to-end idempotency is the reconnect PR's job. */
+        if (run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms) != 0) return -1;
     }
     return 0;
 }
