@@ -36,20 +36,6 @@ extern "C" {
  * opcd code only sees this header.
  */
 
-/* Capability advertisement for GetDeviceInformation (proto-todo:T5).
- * Each field is 0 (unsupported) or 1 (supported), as the spec encodes them.
- *
- * Field order intentionally matches opc_get_device_info_ack_t in
- * protocol/commands.h (r / ai / k / v) so that bulk-copy code paths cannot
- * silently swap bits. Code that mirrors fields must still use named
- * assignments — this layout is a defense-in-depth, not a license. */
-typedef struct opcd_platform_caps {
-    uint8_t ieee_11r;     /* Fast BSS Transition  */
-    uint8_t ieee_11ai;    /* Fast Initial Link    */
-    uint8_t ieee_11k;     /* RRM                  */
-    uint8_t ieee_11v;     /* BSS Transition Mgmt  */
-} opcd_platform_caps_t;
-
 /* Steady-state link snapshot used to fill GetDeviceInformation per-WLAN fields
  * and as the seed for Roaming Indication payloads. Field semantics match the
  * OPC protocol; freq_mhz=0 / channel=0 mean "no association".
@@ -187,12 +173,14 @@ typedef struct opcd_platform_ops {
     /* SSID string for the indexed WLAN interface. NUL-terminated, silently
      * truncated to cap. Empty string when not associated. */
     int  (*get_essid)(int idx, char *buf, size_t cap);
+    /* Live-queried fields. Static identity (hardware version / serial /
+     * manufacture+shipment date / capability bits / vendor+product codes)
+     * lives in inventory.h, not on this vtable. */
     int  (*get_firmware_version)(char *buf, size_t cap);
-    int  (*get_hardware_version)(char *buf, size_t cap);
-    int  (*get_serial_number)(char *buf, size_t cap);
-    int  (*get_manufacture_date)(opc_date_t *out);
-    int  (*get_shipment_date)(opc_date_t *out);
-    int  (*get_caps)(opcd_platform_caps_t *out);
+    /* IPv4 NTP server in host byte order; 0 when unconfigured or when the
+     * platform cannot determine it (e.g. timesyncd.conf carries a hostname
+     * rather than a literal IP). */
+    int  (*get_ntp_server)(uint32_t *server_host);
 
     /* Returns the number of WLAN interfaces the platform actually exposes
      * (1 for SINGLE-station builds, 2 for DUAL). Callers must NOT assume the

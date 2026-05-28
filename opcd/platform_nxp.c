@@ -25,18 +25,22 @@
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "platform.h"
+#include "json_util.h"
+#include "ntp_parse.h"
 
 #define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
 #define MLAN0_LINK_JSON  "/var/log/cantops/json/mlan0/link.json"
@@ -47,207 +51,6 @@
  * in DUAL mode (per-call timeout = TIMEOUT_MS/2 = 450 ms × 2 = 900 ms). */
 #define WIFI_SH_TIMEOUT_MS 900
 #define WIFI_SH_POLL_MS    10
-
-/* Cap the file read to defend against accidentally pointing at a huge log. */
-#define LINK_JSON_MAX_BYTES (1u * 1024u * 1024u)
-
-/* ------------------------------------------------------------------ */
-/* JSON value extraction (flat key — sufficient for eth0/link.json)   */
-/* ------------------------------------------------------------------ */
-
-/* Read entire file into a heap buffer; caller frees with free().
- * On failure, errno is set to a meaningful value (preserved across fclose,
- * which otherwise may clobber it; synthesized for non-syscall failures
- * like the LINK_JSON_MAX_BYTES cap). */
-static char *slurp_file(const char *path)
-{
-    int saved_errno;
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;       /* errno already set by fopen */
-    if (fseek(f, 0, SEEK_END) != 0) {
-        saved_errno = errno;
-        fclose(f);
-        errno = saved_errno;
-        return NULL;
-    }
-    long sz = ftell(f);
-    if (sz < 0) {
-        saved_errno = errno;
-        fclose(f);
-        errno = saved_errno;
-        return NULL;
-    }
-    if ((unsigned long)sz > LINK_JSON_MAX_BYTES) {
-        fclose(f);
-        errno = EFBIG;          /* synthetic — cap violation has no syscall */
-        return NULL;
-    }
-    rewind(f);
-    char *buf = malloc((size_t)sz + 1);
-    if (!buf) {
-        fclose(f);
-        errno = ENOMEM;
-        return NULL;
-    }
-    size_t n = fread(buf, 1, (size_t)sz, f);
-    saved_errno = errno;        /* fread may have set EIO etc. */
-    fclose(f);
-    if (n != (size_t)sz) {
-        free(buf);
-        errno = saved_errno ? saved_errno : EIO;
-        return NULL;
-    }
-    buf[sz] = '\0';
-    return buf;
-}
-
-/* Extract a quoted string value for `"key": "VALUE"`. Safe across keys that
- * are prefixes of each other ("mac" vs "mac_address") because the match
- * requires the character after the closing quote to be a colon or JSON
- * whitespace. Returns 0 on success with NUL-terminated `out`. */
-static int json_string_value(const char *json, const char *key,
-                             char *out, size_t cap)
-{
-    if (!json || !key || !out || cap == 0) return -EINVAL;
-    char needle[64];
-    int n = snprintf(needle, sizeof needle, "\"%s\"", key);
-    if (n < 0 || (size_t)n >= sizeof needle) return -EINVAL;
-
-    const char *p = json;
-    while ((p = strstr(p, needle)) != NULL) {
-        char after = p[n];
-        if (after == ':' || after == ' ' || after == '\t' ||
-            after == '\n' || after == '\r') {
-            break;
-        }
-        p++;    /* prefix match like "mac" inside "mac_address" — keep searching */
-    }
-    if (!p) return -ENOENT;
-
-    p = strchr(p + n, ':');
-    if (!p) return -ENOENT;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != '"') return -ENOENT;
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"' && i + 1 < cap) {
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
-    return 0;
-}
-
-/* Extract `"key": "VALUE"` confined to a `"section": { ... }` object body.
- * Brace-depth tracking handles nested objects; this assumes cantops link.json
- * never embeds `{`/`}` inside string values (verified against the eth0 /
- * mlan0 / mlan1 schemas). Same prefix-match guard as json_string_value. */
-static int json_string_in_section(const char *json, const char *section,
-                                  const char *key, char *out, size_t cap)
-{
-    if (!json || !section || !key || !out || cap == 0) return -EINVAL;
-
-    char needle_sec[64];
-    int ns = snprintf(needle_sec, sizeof needle_sec, "\"%s\"", section);
-    if (ns < 0 || (size_t)ns >= sizeof needle_sec) return -EINVAL;
-
-    const char *sec = json;
-    while ((sec = strstr(sec, needle_sec)) != NULL) {
-        char a = sec[ns];
-        if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') break;
-        sec++;
-    }
-    if (!sec) return -ENOENT;
-
-    sec = strchr(sec, '{');
-    if (!sec) return -ENOENT;
-
-    char needle_key[64];
-    int nk = snprintf(needle_key, sizeof needle_key, "\"%s\"", key);
-    if (nk < 0 || (size_t)nk >= sizeof needle_key) return -EINVAL;
-
-    int depth = 1;
-    const char *p = sec + 1;
-    while (*p && depth > 0) {
-        if (*p == '{') {
-            depth++;
-        } else if (*p == '}') {
-            depth--;
-            if (depth == 0) break;
-        }
-        if (depth > 0 && strncmp(p, needle_key, (size_t)nk) == 0) {
-            char a = p[nk];
-            if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') {
-                const char *colon = strchr(p + nk, ':');
-                if (!colon) return -ENOENT;
-                colon++;
-                while (*colon == ' ' || *colon == '\t' ||
-                       *colon == '\n' || *colon == '\r') colon++;
-                if (*colon != '"') return -ENOENT;
-                colon++;
-                size_t i = 0;
-                while (*colon && *colon != '"' && i + 1 < cap) {
-                    out[i++] = *colon++;
-                }
-                out[i] = '\0';
-                return 0;
-            }
-        }
-        p++;
-    }
-    return -ENOENT;
-}
-
-/* Same as json_string_in_section but extracts a JSON integer
- * (`"key": -42` form, no quotes). */
-static int json_integer_in_section(const char *json, const char *section,
-                                   const char *key, long *out)
-{
-    if (!json || !section || !key || !out) return -EINVAL;
-
-    char needle_sec[64];
-    int ns = snprintf(needle_sec, sizeof needle_sec, "\"%s\"", section);
-    if (ns < 0 || (size_t)ns >= sizeof needle_sec) return -EINVAL;
-
-    const char *sec = json;
-    while ((sec = strstr(sec, needle_sec)) != NULL) {
-        char a = sec[ns];
-        if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') break;
-        sec++;
-    }
-    if (!sec) return -ENOENT;
-    sec = strchr(sec, '{');
-    if (!sec) return -ENOENT;
-
-    char needle_key[64];
-    int nk = snprintf(needle_key, sizeof needle_key, "\"%s\"", key);
-    if (nk < 0 || (size_t)nk >= sizeof needle_key) return -EINVAL;
-
-    int depth = 1;
-    const char *p = sec + 1;
-    while (*p && depth > 0) {
-        if (*p == '{')       depth++;
-        else if (*p == '}') { depth--; if (depth == 0) break; }
-        if (depth > 0 && strncmp(p, needle_key, (size_t)nk) == 0) {
-            char a = p[nk];
-            if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') {
-                const char *colon = strchr(p + nk, ':');
-                if (!colon) return -ENOENT;
-                colon++;
-                while (*colon == ' ' || *colon == '\t' ||
-                       *colon == '\n' || *colon == '\r') colon++;
-                /* digit or sign — numeric literal */
-                char *endp = NULL;
-                long v = strtol(colon, &endp, 10);
-                if (endp == colon) return -EINVAL;
-                *out = v;
-                return 0;
-            }
-        }
-        p++;
-    }
-    return -ENOENT;
-}
 
 /* Parse "-66 dBm" / "-66dBm" into an int8 (signed dBm). */
 static int parse_signed_dbm(const char *s, int8_t *out)
@@ -330,10 +133,10 @@ static void nxp_teardown(void)
 
 static int nxp_get_eth_mac(uint8_t mac[6])
 {
-    char *json = slurp_file(ETH0_LINK_JSON);
+    char *json = opc_json_slurp_file(ETH0_LINK_JSON);
     if (!json) { memset(mac, 0, 6); return -errno; }
     char buf[32] = {0};
-    int rc = json_string_value(json, "mac_address", buf, sizeof buf);
+    int rc = opc_json_string(json, "mac_address", buf, sizeof buf);
     free(json);
     if (rc != 0) { memset(mac, 0, 6); return rc; }
     return parse_mac_str(buf, mac);
@@ -345,10 +148,10 @@ static int nxp_get_eth_mac(uint8_t mac[6])
  * to "no gateway" per best-effort policy. */
 static int nxp_get_eth_ipv4_field(const char *key, uint32_t *out_host)
 {
-    char *json = slurp_file(ETH0_LINK_JSON);
+    char *json = opc_json_slurp_file(ETH0_LINK_JSON);
     if (!json) { *out_host = 0; return -errno; }
     char buf[32] = {0};
-    int rc = json_string_value(json, key, buf, sizeof buf);
+    int rc = opc_json_string(json, key, buf, sizeof buf);
     free(json);
     if (rc != 0) { *out_host = 0; return rc; }
     struct in_addr a;
@@ -396,13 +199,13 @@ static int nxp_get_wlan_mac(int idx, uint8_t mac[6])
 {
     if (idx < 0 || idx >= nxp_get_wlan_count()) return -ENODEV;
     const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
-    char *json = slurp_file(path);
+    char *json = opc_json_slurp_file(path);
     if (!json) { memset(mac, 0, 6); return -errno; }
     char buf[32] = {0};
     /* mlan link.json has `address` in two places (info, link); info holds
      * the interface MAC (the device's own), link holds the AP's MAC under
      * the same key. json_string_in_section disambiguates. */
-    int rc = json_string_in_section(json, "info", "address", buf, sizeof buf);
+    int rc = opc_json_string_section(json, "info", "address", buf, sizeof buf);
     free(json);
     if (rc != 0) { memset(mac, 0, 6); return rc; }
     return parse_mac_str(buf, mac);
@@ -414,9 +217,9 @@ static int nxp_get_essid(int idx, char *buf, size_t cap)
     if (cap == 0) return -EINVAL;
     buf[0] = '\0';
     const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
-    char *json = slurp_file(path);
+    char *json = opc_json_slurp_file(path);
     if (!json) return -errno;
-    int rc = json_string_in_section(json, "info", "ssid", buf, cap);
+    int rc = opc_json_string_section(json, "info", "ssid", buf, cap);
     free(json);
     return rc;
 }
@@ -434,31 +237,125 @@ static int nxp_copy_string(char *buf, size_t cap, const char *src)
     return 0;
 }
 
+/* dpkg-query result cache. Populated lazily on the first
+ * nxp_get_firmware_version() call after opcd boot. Empty string means
+ * "not yet queried OR dpkg-query failed" — the caller cannot tell the
+ * difference, which is fine because both yield the same empty wire field. */
+#define WLAN_PROC_PKG       "wlan-proc"
+#define DPKG_QUERY_BIN      "/usr/bin/dpkg-query"
+#define FW_CACHE_LEN        OPC_VERSION_FIELD_LEN
+static char  g_fw_cache[FW_CACHE_LEN];
+static bool  g_fw_cache_ready;
+
+/* Run `dpkg-query -W -f='${Version}' wlan-proc` once and copy stdout into
+ * g_fw_cache (truncated to fit). Stays silent on every failure mode — the
+ * empty cache string is the documented "unknown" response. fork+exec rather
+ * than popen() so we can give the child a bounded close-on-exec pipe and
+ * waitpid() it deterministically. */
+static void nxp_refresh_fw_cache(void)
+{
+    g_fw_cache_ready = true;
+    g_fw_cache[0] = '\0';
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return;
+    /* CLOEXEC on the parent's read end so a later exec() in opcd cannot
+     * leak the descriptor. The child's write end is closed manually below. */
+    int fl = fcntl(pipefd[0], F_GETFD);
+    if (fl != -1) (void)fcntl(pipefd[0], F_SETFD, fl | FD_CLOEXEC);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        return;
+    }
+    if (pid == 0) {
+        /* child */
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        close(pipefd[1]);
+        /* silence stderr — dpkg-query prints "no packages found matching"
+         * to stderr when wlan-proc is absent (e.g. dev image), and that
+         * noise should not pollute opcd's own log stream. */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execl(DPKG_QUERY_BIN, "dpkg-query",
+              "-W", "-f=${Version}", WLAN_PROC_PKG, (char *)NULL);
+        _exit(127);
+    }
+    /* parent */
+    close(pipefd[1]);
+
+    char buf[FW_CACHE_LEN];
+    size_t off = 0;
+    ssize_t n;
+    while (off + 1 < sizeof buf &&
+           (n = read(pipefd[0], buf + off, sizeof buf - 1 - off)) > 0) {
+        off += (size_t)n;
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    /* Bounded wait — dpkg-query is in-memory I/O on the package DB, normally
+     * tens of ms. Use a deadline poll so a wedged child cannot stall init. */
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += 2;       /* 2s budget for cold dpkg DB */
+    for (;;) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) break;
+        if (r < 0)   break;     /* ECHILD / EINTR — give up cleanly */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec  > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            kill(pid, SIGKILL);
+            (void)waitpid(pid, &status, 0);
+            return;
+        }
+        struct timespec sl = { .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000 };
+        nanosleep(&sl, NULL);
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return;
+    if (off == 0) return;
+
+    /* dpkg-query may end the version with a trailing newline depending on
+     * stdio buffering — trim it. */
+    while (off > 0 && (buf[off-1] == '\n' || buf[off-1] == '\r' ||
+                       buf[off-1] == ' '  || buf[off-1] == '\t')) {
+        off--;
+    }
+    if (off == 0) return;
+    if (off >= sizeof g_fw_cache) off = sizeof g_fw_cache - 1;
+    memcpy(g_fw_cache, buf, off);
+    g_fw_cache[off] = '\0';
+}
+
 static int nxp_get_firmware_version(char *buf, size_t cap)
-{ return nxp_copy_string(buf, cap, "wlan-opc-0.1.0"); }
-
-static int nxp_get_hardware_version(char *buf, size_t cap)
-{ return nxp_copy_string(buf, cap, "NXP88W9098"); }
-
-static int nxp_get_serial_number(char *buf, size_t cap)
-{ return nxp_copy_string(buf, cap, "SN-STUB-0001"); }
-
-static int nxp_get_manufacture_date(opc_date_t *out)
 {
-    out->year = 2026; out->month = 2; out->day = 28;
-    return 0;
+    if (!g_fw_cache_ready) nxp_refresh_fw_cache();
+    return nxp_copy_string(buf, cap, g_fw_cache);
 }
 
-static int nxp_get_shipment_date(opc_date_t *out)
-{
-    out->year = 2026; out->month = 3; out->day = 15;
-    return 0;
-}
+#define TIMESYNCD_CONF  "/etc/systemd/timesyncd.conf"
 
-static int nxp_get_caps(opcd_platform_caps_t *out)
+static int nxp_get_ntp_server(uint32_t *server_host)
 {
-    memset(out, 0, sizeof *out);
-    return 0;
+    *server_host = 0;
+    char *body = opc_json_slurp_file(TIMESYNCD_CONF);
+    /* opc_json_slurp_file is misnamed for the use case but does exactly
+     * what we want: read the whole file into a heap buffer with a 1MB cap.
+     * timesyncd.conf is well under 4KB. */
+    if (!body) return -errno;
+
+    int rc = -ENOENT;
+    char *save = NULL;
+    for (char *ln = strtok_r(body, "\n", &save); ln;
+         ln = strtok_r(NULL, "\n", &save)) {
+        if (opc_ntp_parse_line(ln, server_host) == 0) { rc = 0; break; }
+    }
+    free(body);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -471,24 +368,24 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
     memset(out, 0, sizeof *out);
 
     const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
-    char *json = slurp_file(path);
+    char *json = opc_json_slurp_file(path);
     if (!json) return -errno;
 
     char buf[64] = {0};
     long ival = 0;
 
     /* info.freq / info.channel — operating frequency/channel */
-    if (json_integer_in_section(json, "info", "freq", &ival) == 0 &&
+    if (opc_json_integer_section(json, "info", "freq", &ival) == 0 &&
         ival > 0 && ival <= UINT16_MAX) {
         out->freq_mhz = (uint16_t)ival;
     }
-    if (json_integer_in_section(json, "info", "channel", &ival) == 0 &&
+    if (opc_json_integer_section(json, "info", "channel", &ival) == 0 &&
         ival >= 0 && ival <= UINT16_MAX) {
         out->channel = (uint16_t)ival;
     }
 
     /* link.address — AP MAC. Presence also signals associated. */
-    if (json_string_in_section(json, "link", "address", buf, sizeof buf) == 0 &&
+    if (opc_json_string_section(json, "link", "address", buf, sizeof buf) == 0 &&
         parse_mac_str(buf, out->bssid) == 0) {
         out->associated = true;
     }
@@ -498,7 +395,7 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
      * associated=false. Only set on successful parse — OPC_BANDWIDTH_20==0
      * collides with the zero-init default. */
     if (out->associated &&
-        json_string_in_section(json, "info", "width", buf, sizeof buf) == 0) {
+        opc_json_string_section(json, "info", "width", buf, sizeof buf) == 0) {
         uint8_t bw;
         if (parse_width_to_bw(buf, &bw) == 0) {
             out->bandwidth = bw;
@@ -510,18 +407,18 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
      * so a stale driver bitrate from a prior session cannot leak a non-zero
      * mode while we report associated=false. Falls back to rx_bitrate. */
     if (out->associated &&
-        json_string_in_section(json, "link", "tx_bitrate", buf, sizeof buf) == 0) {
+        opc_json_string_section(json, "link", "tx_bitrate", buf, sizeof buf) == 0) {
         uint8_t mode;
         if (parse_bitrate_to_mode(buf, &mode) == 0) out->mode = mode;
     }
     if (out->associated && out->mode == 0 &&
-        json_string_in_section(json, "link", "rx_bitrate", buf, sizeof buf) == 0) {
+        opc_json_string_section(json, "link", "rx_bitrate", buf, sizeof buf) == 0) {
         uint8_t mode;
         if (parse_bitrate_to_mode(buf, &mode) == 0) out->mode = mode;
     }
 
     /* link.signal_avg "-66 dBm" → rssi */
-    if (json_string_in_section(json, "link", "signal_avg", buf, sizeof buf) == 0) {
+    if (opc_json_string_section(json, "link", "signal_avg", buf, sizeof buf) == 0) {
         (void)parse_signed_dbm(buf, &out->rssi);
     }
 
@@ -530,7 +427,7 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
      * is unique within channel_info for the active channel. The nested
      * search walks into the freq sub-object via brace depth. */
     if (out->associated &&
-        json_integer_in_section(json, "channel_info", "noise", &ival) == 0 &&
+        opc_json_integer_section(json, "channel_info", "noise", &ival) == 0 &&
         ival >= INT8_MIN && ival < 0) {   /* 0 = uninitialized driver field */
         int snr = (int)out->rssi - (int)ival;
         if (snr < INT8_MIN) snr = INT8_MIN;
@@ -719,11 +616,7 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .get_wlan_mac          = nxp_get_wlan_mac,
     .get_essid             = nxp_get_essid,
     .get_firmware_version  = nxp_get_firmware_version,
-    .get_hardware_version  = nxp_get_hardware_version,
-    .get_serial_number     = nxp_get_serial_number,
-    .get_manufacture_date  = nxp_get_manufacture_date,
-    .get_shipment_date     = nxp_get_shipment_date,
-    .get_caps              = nxp_get_caps,
+    .get_ntp_server        = nxp_get_ntp_server,
     .get_wlan_count        = nxp_get_wlan_count,
     .get_link              = nxp_get_link,
     .apply_radio_config    = nxp_apply_radio_config,
