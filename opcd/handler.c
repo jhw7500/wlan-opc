@@ -299,22 +299,34 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                 result = OPC_RESULT_NG; err = 0x0010;   /* slot # out of range */
                 break;
             }
+            uint16_t flag = e->boundary_flag;
+            if (flag == OPC_LIST_BOUNDARY_START) {
+                /* Fresh sequence: drop any stale staging from a prior
+                 * incomplete cycle before recording this entry. */
+                memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
+                st->ip_list_staging_active = true;
+            }
+
             uint16_t slot = (uint16_t)(e->list_number - 1);
             st->ip_list_staging.slots[slot] = *e;
             st->ip_list_staging.present[slot] = 1;
 
-            uint16_t flag = e->boundary_flag;
-            if (flag == OPC_LIST_BOUNDARY_START || flag == OPC_LIST_BOUNDARY_START_END) {
-                st->ip_list_staging_active = true;
-            }
-            if (flag == OPC_LIST_BOUNDARY_END || flag == OPC_LIST_BOUNDARY_START_END) {
-                /* Commit staging atomically. */
-                st->ip_list = st->ip_list_staging;
-                if (save_ip_list(st) != 0) {
-                    result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+            if (flag == OPC_LIST_BOUNDARY_END) {
+                if (st->ip_list_staging_active) {
+                    /* Commit staging atomically. */
+                    st->ip_list = st->ip_list_staging;
+                    if (save_ip_list(st) != 0) {
+                        result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+                    }
+                    st->ip_list_staging_active = false;
+                    memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
+                } else {
+                    /* Lone END (no prior START in this session). Spec defines
+                     * no NG for this; skip commit so a stale staging buffer
+                     * cannot be flushed to NVM. */
+                    fprintf(stderr,
+                            "opcd: SetIPConfigList: END without prior START — commit skipped\n");
                 }
-                st->ip_list_staging_active = false;
-                memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
             }
         }
         session_touch(st);
