@@ -275,6 +275,27 @@ static int parse_width_to_bw(const char *s, uint8_t *out)
     }
 }
 
+/* Parse iw-style bitrate string prefix to OPC_WLAN_MODE_*.
+ *   "258.0 MBit/s HE-MCS 10 HE-NSS 2 ..."   → 11AX  (HE- prefix)
+ *   "433.3 MBit/s VHT-MCS 9 ..."            → 11AC  (VHT- prefix)
+ *   "144.4 MBit/s MCS 15 short GI ..."      → 11N   (iw emits no HT- prefix)
+ *   plain "54 MBit/s"                       → legacy (caller leaves mode=0)
+ *   "... EHT-MCS ..." (802.11be)            → -EINVAL: no OPC enum yet;
+ *                                              caller falls back to cache.
+ *
+ * Order is defensive: in current iw output "HE-MCS" / "VHT-MCS" have no
+ * space between "-" and "M", so the bare " MCS " check would not misfire
+ * today. Checking the explicit HE-/VHT- prefixes first future-proofs
+ * against driver variants that might emit a standalone " MCS " token
+ * alongside HE/VHT fields. */
+static int parse_bitrate_to_mode(const char *s, uint8_t *out)
+{
+    if (strstr(s, " HE-")  != NULL) { *out = OPC_WLAN_MODE_11AX; return 0; }
+    if (strstr(s, " VHT-") != NULL) { *out = OPC_WLAN_MODE_11AC; return 0; }
+    if (strstr(s, " MCS ") != NULL) { *out = OPC_WLAN_MODE_11N;  return 0; }
+    return -EINVAL;
+}
+
 static int parse_mac_str(const char *s, uint8_t mac[6])
 {
     unsigned v[6];
@@ -466,16 +487,37 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
         out->channel = (uint16_t)ival;
     }
 
-    /* info.width → OPC_BANDWIDTH_* */
-    if (json_string_in_section(json, "info", "width", buf, sizeof buf) == 0) {
-        uint8_t bw;
-        if (parse_width_to_bw(buf, &bw) == 0) out->bandwidth = bw;
-    }
-
     /* link.address — AP MAC. Presence also signals associated. */
     if (json_string_in_section(json, "link", "address", buf, sizeof buf) == 0 &&
         parse_mac_str(buf, out->bssid) == 0) {
         out->associated = true;
+    }
+
+    /* info.width → OPC_BANDWIDTH_*. Parsed only when associated so a stale
+     * driver-cached width cannot leak bandwidth_valid=true while we report
+     * associated=false. Only set on successful parse — OPC_BANDWIDTH_20==0
+     * collides with the zero-init default. */
+    if (out->associated &&
+        json_string_in_section(json, "info", "width", buf, sizeof buf) == 0) {
+        uint8_t bw;
+        if (parse_width_to_bw(buf, &bw) == 0) {
+            out->bandwidth = bw;
+            out->bandwidth_valid = true;
+        }
+    }
+
+    /* link.tx_bitrate prefix → OPC_WLAN_MODE_*. Parsed only when associated
+     * so a stale driver bitrate from a prior session cannot leak a non-zero
+     * mode while we report associated=false. Falls back to rx_bitrate. */
+    if (out->associated &&
+        json_string_in_section(json, "link", "tx_bitrate", buf, sizeof buf) == 0) {
+        uint8_t mode;
+        if (parse_bitrate_to_mode(buf, &mode) == 0) out->mode = mode;
+    }
+    if (out->associated && out->mode == 0 &&
+        json_string_in_section(json, "link", "rx_bitrate", buf, sizeof buf) == 0) {
+        uint8_t mode;
+        if (parse_bitrate_to_mode(buf, &mode) == 0) out->mode = mode;
     }
 
     /* link.signal_avg "-66 dBm" → rssi */
