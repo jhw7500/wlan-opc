@@ -9,8 +9,9 @@ LDLIBS  += -lopcproto
 # target-specific).
 OPCD_OBJS_INVENTORY := ../inventory.o ../json_util.o
 OPCD_OBJS_NTP       := ../ntp_parse.o
+OPCD_OBJS_JSON      := ../json_util.o
 
-TESTS := test_inventory test_ntp_parse
+TESTS := test_inventory test_ntp_parse test_json_util
 
 all: $(TESTS)
 
@@ -19,6 +20,9 @@ test_inventory: test_inventory.o $(OPCD_OBJS_INVENTORY) ../../protocol/libopcpro
 
 test_ntp_parse: test_ntp_parse.o $(OPCD_OBJS_NTP)
 	$(CC) $(CFLAGS) -o $@ test_ntp_parse.o $(OPCD_OBJS_NTP)
+
+test_json_util: test_json_util.o $(OPCD_OBJS_JSON)
+	$(CC) $(CFLAGS) -o $@ test_json_util.o $(OPCD_OBJS_JSON)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

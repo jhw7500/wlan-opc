@@ -150,6 +150,23 @@ static const char *find_section_body(const char *json, const char *section)
     return sec + 1;
 }
 
+/* Advance past a JSON string literal starting at `p` (which must point at
+ * the opening quote). Handles backslash-escape (e.g. `\"`) so values like
+ * `"essid": "weird}name"` cannot confuse brace-depth tracking. Returns
+ * the position immediately after the closing quote, or end of buffer if
+ * input is malformed. */
+static const char *skip_json_string(const char *p)
+{
+    if (*p != '"') return p;
+    p++;
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) p += 2;
+        else                    p++;
+    }
+    if (*p == '"') p++;
+    return p;
+}
+
 int opc_json_string_section(const char *json, const char *section,
                             const char *key, char *out, size_t cap)
 {
@@ -161,12 +178,15 @@ int opc_json_string_section(const char *json, const char *section,
     int nk = snprintf(needle_key, sizeof needle_key, "\"%s\"", key);
     if (nk < 0 || (size_t)nk >= sizeof needle_key) return -EINVAL;
 
+    /* Key match must happen outside any string literal — otherwise an
+     * SSID like `"essid": "\"signal\": 0"` could spoof a key. The scan
+     * tries a key match at the current byte first; then, on a `"` we
+     * atomically skip the whole literal (escape-aware) so its contents
+     * never participate in either brace-depth tracking or key matching. */
     int depth = 1;
     const char *p = body;
     while (*p && depth > 0) {
-        if (*p == '{') depth++;
-        else if (*p == '}') { depth--; if (depth == 0) break; }
-        if (depth > 0 && strncmp(p, needle_key, (size_t)nk) == 0) {
+        if (strncmp(p, needle_key, (size_t)nk) == 0) {
             char a = p[nk];
             if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') {
                 const char *v = advance_to_value(p + nk);
@@ -174,6 +194,9 @@ int opc_json_string_section(const char *json, const char *section,
                 return copy_quoted_value(v, out, cap);
             }
         }
+        if (*p == '"') { p = skip_json_string(p); continue; }
+        if (*p == '{') { depth++; p++; continue; }
+        if (*p == '}') { depth--; if (depth == 0) break; p++; continue; }
         p++;
     }
     return -ENOENT;
@@ -193,9 +216,7 @@ int opc_json_integer_section(const char *json, const char *section,
     int depth = 1;
     const char *p = body;
     while (*p && depth > 0) {
-        if (*p == '{') depth++;
-        else if (*p == '}') { depth--; if (depth == 0) break; }
-        if (depth > 0 && strncmp(p, needle_key, (size_t)nk) == 0) {
+        if (strncmp(p, needle_key, (size_t)nk) == 0) {
             char a = p[nk];
             if (a == ':' || a == ' ' || a == '\t' || a == '\n' || a == '\r') {
                 const char *v = advance_to_value(p + nk);
@@ -207,6 +228,9 @@ int opc_json_integer_section(const char *json, const char *section,
                 return 0;
             }
         }
+        if (*p == '"') { p = skip_json_string(p); continue; }
+        if (*p == '{') { depth++; p++; continue; }
+        if (*p == '}') { depth--; if (depth == 0) break; p++; continue; }
         p++;
     }
     return -ENOENT;

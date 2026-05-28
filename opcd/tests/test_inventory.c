@@ -136,6 +136,45 @@ int main(void)
     unlink(p5);
     free(p5);
 
+    /* --- Case 6: numeric overflow / trailing-junk rejection. ---------- */
+    /* Save inventory snapshot before the strict-parse cases — they should
+     * NOT mutate the previously-recovered vendor_code (0x11223344). */
+    uint32_t vendor_snapshot = opcd_inventory()->vendor_code;
+
+    /* 6a: vendor_code > UINT32_MAX rejected. */
+    const char *overflow =
+        "{ \"vendor_code\": \"0x100000000\" }\n";
+    char *p6a = write_temp(overflow);
+    ASSERT(p6a != NULL, "temp file 6a created");
+    ASSERT(opcd_inventory_load(p6a) != 0,
+           "vendor_code > UINT32_MAX rejected");
+    ASSERT(opcd_inventory()->vendor_code == vendor_snapshot,
+           "overflow leaves vendor_code unchanged");
+    unlink(p6a);
+    free(p6a);
+
+    /* 6b: product_code > 0xFFFF rejected. */
+    const char *p16_overflow =
+        "{ \"product_code\": \"0x10000\" }\n";
+    char *p6b = write_temp(p16_overflow);
+    ASSERT(p6b != NULL, "temp file 6b created");
+    ASSERT(opcd_inventory_load(p6b) != 0,
+           "product_code > 0xFFFF rejected");
+    unlink(p6b);
+    free(p6b);
+
+    /* 6c: trailing garbage after hex literal rejected. */
+    const char *trailing =
+        "{ \"vendor_code\": \"0xFE03garbage\" }\n";
+    char *p6c = write_temp(trailing);
+    ASSERT(p6c != NULL, "temp file 6c created");
+    ASSERT(opcd_inventory_load(p6c) != 0,
+           "trailing junk after hex literal rejected");
+    ASSERT(opcd_inventory()->vendor_code == vendor_snapshot,
+           "trailing junk leaves vendor_code unchanged");
+    unlink(p6c);
+    free(p6c);
+
     if (failures == 0) {
         fprintf(stdout, "all inventory tests passed\n");
         return 0;

@@ -1,7 +1,7 @@
 /*
  * Inventory loader for /usr/local/opc/etc/device_info.json.
  *
- * JSON shape (see installer/etc/device_info.json for the canonical example):
+ * JSON shape (see etc/device_info.json for the canonical example):
  *
  *   {
  *     "vendor_code":      "0x00902CFB",
@@ -44,14 +44,18 @@ const opcd_inventory_t *opcd_inventory(void)
 }
 
 /* Parse "0x00902CFB" / "9434363" / "0o12" → unsigned long. Returns 0 on
- * success. strtoul base=0 honours the C-style prefix. */
+ * success. strtoul base=0 honours the C-style prefix.
+ *
+ * Strict: the entire string must be consumed. `"0xFE03garbage"` is rejected
+ * rather than silently parsed as 0xFE03 — operators authoring this file by
+ * hand should learn about typos at boot, not from a downstream symptom. */
 static int parse_unsigned(const char *s, unsigned long *out)
 {
     if (!s || !*s) return -EINVAL;
     char *endp = NULL;
     errno = 0;
     unsigned long v = strtoul(s, &endp, 0);
-    if (errno != 0 || endp == s) return -EINVAL;
+    if (errno != 0 || endp == s || *endp != '\0') return -EINVAL;
     *out = v;
     return 0;
 }
@@ -73,16 +77,9 @@ static int parse_date(const char *s, opc_date_t *out)
     return 0;
 }
 
-/* Extract a quoted string into `out`. Truncation is silent (consistent with
- * the rest of opcd's string-field policy). Returns 0 on success, negative
- * if the key is missing or unreadable. */
-static int load_string(const char *json, const char *key,
-                       char *out, size_t cap)
-{
-    return opc_json_string(json, key, out, cap);
-}
-
-/* Load a quoted hex/decimal field into an unsigned 32-bit code. */
+/* Load a quoted hex/decimal field into an unsigned 32-bit code. Values that
+ * exceed UINT32_MAX are rejected so silent truncation cannot hide an
+ * authoring error on 64-bit hosts. */
 static int load_code32(const char *json, const char *key, uint32_t *out)
 {
     char buf[32] = {0};
@@ -90,6 +87,7 @@ static int load_code32(const char *json, const char *key, uint32_t *out)
     if (rc != 0) return rc;
     unsigned long v = 0;
     if (parse_unsigned(buf, &v) != 0) return -EINVAL;
+    if (v > UINT32_MAX) return -EINVAL;
     *out = (uint32_t)v;
     return 0;
 }
@@ -141,25 +139,24 @@ int opcd_inventory_load(const char *path)
         recovered++;
 
     /* Read directly into the destination so the loader does not need an
-     * intermediate buffer or strncpy with its truncation warning quirks.
-     * load_string truncates silently to the destination capacity. */
-    if (load_string(json, "hardware_version", scratch.hardware_version,
-                    sizeof scratch.hardware_version) == 0) {
+     * intermediate buffer. opc_json_string truncates silently to cap. */
+    if (opc_json_string(json, "hardware_version", scratch.hardware_version,
+                        sizeof scratch.hardware_version) == 0) {
         recovered++;
     }
-    if (load_string(json, "serial_number", scratch.serial_number,
-                    sizeof scratch.serial_number) == 0) {
+    if (opc_json_string(json, "serial_number", scratch.serial_number,
+                        sizeof scratch.serial_number) == 0) {
         recovered++;
     }
-    char sbuf[16] = {0};
-
-    memset(sbuf, 0, sizeof sbuf);
-    if (load_string(json, "manufacture_date", sbuf, sizeof sbuf) == 0 &&
+    /* Dates parse via a small stack buffer — the wire format is opc_date_t
+     * (year+month+day), not a string. Sized for "YYYY-MM-DD\0" plus a
+     * little slack for accidental whitespace. */
+    char sbuf[16];
+    if (opc_json_string(json, "manufacture_date", sbuf, sizeof sbuf) == 0 &&
         parse_date(sbuf, &scratch.manufacture_date) == 0) {
         recovered++;
     }
-    memset(sbuf, 0, sizeof sbuf);
-    if (load_string(json, "shipment_date", sbuf, sizeof sbuf) == 0 &&
+    if (opc_json_string(json, "shipment_date", sbuf, sizeof sbuf) == 0 &&
         parse_date(sbuf, &scratch.shipment_date) == 0) {
         recovered++;
     }

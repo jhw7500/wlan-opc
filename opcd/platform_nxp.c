@@ -22,6 +22,7 @@
  * mlan0/link.json (with duplicate `address` keys in info/link) arrives.
  */
 
+#define _GNU_SOURCE        /* pipe2(2) */
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
@@ -247,22 +248,36 @@ static int nxp_copy_string(char *buf, size_t cap, const char *src)
 static char  g_fw_cache[FW_CACHE_LEN];
 static bool  g_fw_cache_ready;
 
+/* Compare two monotonic timespecs; returns true if `a` is at or past `b`. */
+static bool ts_at_or_past(const struct timespec *a, const struct timespec *b)
+{
+    if (a->tv_sec  > b->tv_sec)  return true;
+    if (a->tv_sec  < b->tv_sec)  return false;
+    return a->tv_nsec >= b->tv_nsec;
+}
+
 /* Run `dpkg-query -W -f='${Version}' wlan-proc` once and copy stdout into
  * g_fw_cache (truncated to fit). Stays silent on every failure mode — the
  * empty cache string is the documented "unknown" response. fork+exec rather
  * than popen() so we can give the child a bounded close-on-exec pipe and
- * waitpid() it deterministically. */
+ * waitpid() it deterministically.
+ *
+ * Robustness: the parent never blocks on read(). pipefd[0] is set
+ * non-blocking up front, and a single select()+read()+waitpid() loop
+ * polls both the pipe and the child against a 2s monotonic deadline.
+ * If the child wedges without ever closing stdout, the deadline triggers
+ * SIGKILL — the original blocking read() loop could not reach the
+ * waitpid timeout in that scenario. */
 static void nxp_refresh_fw_cache(void)
 {
     g_fw_cache_ready = true;
     g_fw_cache[0] = '\0';
 
+    /* pipe2(O_CLOEXEC) closes both ends across any future exec() in opcd.
+     * O_CLOEXEC on the *child's* write end is dropped by dup2() below,
+     * which is the standard pattern for redirecting stdout to a pipe. */
     int pipefd[2];
-    if (pipe(pipefd) != 0) return;
-    /* CLOEXEC on the parent's read end so a later exec() in opcd cannot
-     * leak the descriptor. The child's write end is closed manually below. */
-    int fl = fcntl(pipefd[0], F_GETFD);
-    if (fl != -1) (void)fcntl(pipefd[0], F_SETFD, fl | FD_CLOEXEC);
+    if (pipe2(pipefd, O_CLOEXEC) != 0) return;
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -285,37 +300,65 @@ static void nxp_refresh_fw_cache(void)
     }
     /* parent */
     close(pipefd[1]);
+    /* Non-blocking read: a child that wedges without writing must not
+     * stall the parent inside read(2). Errors from F_SETFL are ignored —
+     * the worst case is a blocking read, which the deadline below still
+     * times out via SIGKILL on the child (closing the pipe and waking
+     * read), but defence in depth is cheap. */
+    int fl = fcntl(pipefd[0], F_GETFL);
+    if (fl != -1) (void)fcntl(pipefd[0], F_SETFL, fl | O_NONBLOCK);
 
-    char buf[FW_CACHE_LEN];
-    size_t off = 0;
-    ssize_t n;
-    while (off + 1 < sizeof buf &&
-           (n = read(pipefd[0], buf + off, sizeof buf - 1 - off)) > 0) {
-        off += (size_t)n;
-    }
-    close(pipefd[0]);
-
-    int status = 0;
-    /* Bounded wait — dpkg-query is in-memory I/O on the package DB, normally
-     * tens of ms. Use a deadline poll so a wedged child cannot stall init. */
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += 2;       /* 2s budget for cold dpkg DB */
-    for (;;) {
-        pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) break;
-        if (r < 0)   break;     /* ECHILD / EINTR — give up cleanly */
+
+    char buf[FW_CACHE_LEN];
+    size_t off = 0;
+    bool pipe_eof = false;
+    int status = 0;
+    bool child_reaped = false;
+    bool killed = false;
+
+    while (!(pipe_eof && child_reaped)) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
-        if (now.tv_sec  > deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            kill(pid, SIGKILL);
-            (void)waitpid(pid, &status, 0);
-            return;
+        if (ts_at_or_past(&now, &deadline)) {
+            if (!killed) { kill(pid, SIGKILL); killed = true; }
+            /* After SIGKILL we still must reap to avoid a zombie; allow a
+             * blocking waitpid because the child has been signalled. */
+            if (!child_reaped) { (void)waitpid(pid, &status, 0); child_reaped = true; }
+            break;
         }
+
+        /* Drain whatever is ready on the pipe without blocking. */
+        if (!pipe_eof && off + 1 < sizeof buf) {
+            ssize_t n = read(pipefd[0], buf + off, sizeof buf - 1 - off);
+            if (n > 0) {
+                off += (size_t)n;
+                continue;     /* prefer to drain before sleeping */
+            }
+            if (n == 0) pipe_eof = true;
+            else if (errno != EAGAIN && errno != EINTR) pipe_eof = true;
+        }
+        /* Pipe full? Treat as EOF so we stop polling. */
+        if (off + 1 >= sizeof buf) pipe_eof = true;
+
+        if (!child_reaped) {
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            if (r == pid)      child_reaped = true;
+            else if (r < 0)    { child_reaped = true; status = 0; }
+        }
+        if (pipe_eof && child_reaped) break;
+
+        /* Short sleep, but cap to time remaining so we never overshoot the
+         * deadline. 10 ms is a balance: short enough that dpkg-query (~tens
+         * of ms warm) finishes in 1–2 ticks, long enough not to busy-spin. */
         struct timespec sl = { .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000 };
         nanosleep(&sl, NULL);
     }
+    close(pipefd[0]);
+
+    if (killed) return;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return;
     if (off == 0) return;
 
