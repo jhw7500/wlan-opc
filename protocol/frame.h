@@ -14,13 +14,14 @@ extern "C" {
 /*
  * Build a complete OPC frame (header + body) in `frame`.
  *
- * The 64-byte common header is zero-filled in the reserve area (bytes 8..63)
+ * The 60-byte common header is zero-filled in the reserve area (bytes 8..59)
  * and the header fields are written big-endian per spec.
  *
  * `length_field` is the literal value placed in the header's Length field.
- * NOTE: the spec is internally inconsistent about how Length is computed
- * (see docs/proto-todo.md T3, T10, T11). Per-command helpers in commands.h
- * pass the spec-literal value for their command.
+ * Per spec Rev1.00 (vendor clarification): Length = total_frame_bytes - 4,
+ * i.e. it excludes the first 4 bytes (protocol version + command type +
+ * req/indication id). Per-command helpers in commands.h compute this
+ * automatically via OPC_*_REQ_LENGTH / OPC_*_ACK_LENGTH macros.
  *
  * Returns total frame size (OPC_HEADER_SIZE + body_len) on success,
  * or -1 on invalid argument / insufficient capacity.
@@ -35,7 +36,7 @@ ssize_t opc_frame_build(uint8_t *frame, size_t cap,
  *   - Copies header fields into *hdr_out.
  *   - Sets *body_out (may be NULL to skip) to point inside `frame` (no copy).
  *   - Sets *body_len_out (may be NULL to skip) to the remaining bytes after
- *     the 64-byte header.
+ *     the 60-byte header.
  *
  * Returns 0 on success, -1 on insufficient input / argument error.
  */

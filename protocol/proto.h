@@ -1,28 +1,40 @@
 #ifndef WLAN_OPC_PROTO_H
 #define WLAN_OPC_PROTO_H
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 
 /*
  * Wire-format constants for the VHL ↔ wireless-board UDP/IP common-control
- * protocol (spec Rev1.00, 2026-05-25).
+ * protocol (spec Rev1.00, 2026-05-25), with vendor clarification applied.
  *
  * - All multi-byte integers on the wire are big-endian.
- * - Every frame starts with a 64-byte common header. Bytes 8..63 are reserve
- *   and MUST be transmitted as zero.
- * - The header `length` field reports the payload length only (header excluded).
+ * - Every frame starts with a 60-byte common header. Bytes 8..59 are
+ *   reserve and MUST be transmitted as zero.
+ * - The header `length` field carries (total_frame_bytes - 4): the first
+ *   4 bytes (protocol version + command type + req/indication id) are
+ *   excluded from the length count.
+ *   Exception: empty-body commands (Logout, Reset, GetBasicInfo and
+ *   GetDeviceInfo requests) carry Length=0 on the wire per spec literal,
+ *   not the 56 that the (total-4) formula would otherwise produce.
+ *   See OPC_LOGOUT_REQ_LENGTH and siblings in commands.h.
  *
- * TODO(spec-inconsistency): the spec text says "Length max 1416 B" but also
- * "UDP payload max 1424 B" with a 64-byte header — those numbers do not agree.
- * We use the geometric maximum 1424 - 64 = 1360 B as the effective payload
- * cap. Tracked in wlan-package/docs/proto-todo.md.
+ * Sizing: header 60 + payload max 1360 = frame max 1420; the length cap
+ * is 1420 - 4 = 1416 B, matching the spec text exactly.
  */
 #define OPC_PROTOCOL_VERSION  0x01
 
-#define OPC_HEADER_SIZE       64
+#define OPC_HEADER_SIZE       60
 #define OPC_PAYLOAD_MAX       1360
-#define OPC_FRAME_MAX         1424
+#define OPC_FRAME_MAX         1420
+
+/* Sizing invariant: header + payload exactly fills the frame. A future
+ * tweak to one of these without updating the others would silently
+ * desync wire-format consumers; surface it at compile time instead.
+ * static_assert from <assert.h> is portable to both C11 and C++11. */
+static_assert(OPC_HEADER_SIZE + OPC_PAYLOAD_MAX == OPC_FRAME_MAX,
+              "OPC_HEADER_SIZE + OPC_PAYLOAD_MAX must equal OPC_FRAME_MAX");
 
 /* CommandType (header byte 1). */
 #define OPC_CMD_REQUEST       0x01

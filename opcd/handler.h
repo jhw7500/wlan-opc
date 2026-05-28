@@ -14,7 +14,7 @@ extern "C" {
 /*
  * Dispatch an inbound UDP frame to the right per-command handler.
  *
- * `frame`/`frame_len`     — inbound bytes (must contain at least a 64B header)
+ * `frame`/`frame_len`     — inbound bytes (must contain at least a 60B header)
  * `client_ip`             — host-order source IPv4 of the sender
  * `client_port`           — host-order source UDP port
  * `resp`/`resp_cap`       — buffer for the outgoing Ack/response frame
