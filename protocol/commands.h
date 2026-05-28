@@ -329,11 +329,12 @@ int     opc_change_ip_address_ack_unpack(const uint8_t *frame, size_t frame_len,
 /* ========================================================================
  * 0x1004 — SetRadioConfig
  *
- * Body offset layout (20 B):
+ * Body offset layout (20 B). WLAN#1 and WLAN#2 are now symmetric
+ * (FREQ first, CH second) per vendor clarification of the spec.
  *    0   Station Type(2) + Priority CH(2)
  *    4   WLAN#1 FREQ(2) + WLAN#1 CH(2)
  *    8   WLAN#1 Mode(1) + WLAN#1 BW(1) + reserve(2)
- *   12   WLAN#2 CH(2)   + WLAN#2 FREQ(2)        ← spec orders CH first then FREQ here (T13)
+ *   12   WLAN#2 FREQ(2) + WLAN#2 CH(2)
  *   16   WLAN#2 Mode(1) + WLAN#2 BW(1) + reserve(2)
  * ======================================================================== */
 
