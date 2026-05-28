@@ -131,7 +131,7 @@ int     opc_get_basic_info_ack_unpack(const uint8_t *frame, size_t frame_len,
  * 0x0002 — GetDeviceInformation
  *
  * Largest response payload in the spec. Body layout (offsets are body-relative,
- * i.e. add 64 to get the in-frame absolute offset):
+ * i.e. add OPC_HEADER_SIZE to get the in-frame absolute offset):
  *   0   Result(2) + ErrorCause(2)
  *   4   VendorCode(4)
  *   8   ProductCode(2) + ProductSubcode(2)

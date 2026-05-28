@@ -40,7 +40,7 @@ int opc_header_pack(uint8_t *buf, const opc_header_t *hdr)
     opc_be16_write(&buf[2], hdr->req_indication_id);
     opc_be16_write(&buf[4], hdr->sequence_number);
     opc_be16_write(&buf[6], hdr->length);
-    /* bytes 8..63 are reserve and remain zero */
+    /* bytes 8..59 are reserve and remain zero */
     return 0;
 }
 
