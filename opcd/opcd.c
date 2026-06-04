@@ -304,9 +304,7 @@ int main(int argc, char **argv)
                     clock_gettime(CLOCK_MONOTONIC, &ts);
                     if (ts.tv_sec >= st.idle_deadline) {
                         LOG("idle auto-logout (holder=0x%08X)", st.holder_ip);
-                        st.logged_in   = false;
-                        st.boot_status = OPC_DEVICE_READY;
-                        opcd_ind_init_complete(&st, OPC_INIT_STATE_LOGGED_OUT);
+                        opcd_session_logout(&st);
                     }
                 }
                 opcd_ind_tick(&st);

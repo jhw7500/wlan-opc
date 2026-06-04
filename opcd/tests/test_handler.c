@@ -87,6 +87,50 @@ static uint16_t do_set_password(opcd_state_t *st, uint32_t cip,
     return ack.result;
 }
 
+/* Pack a Logout request, dispatch it, return the ack result code. */
+static uint16_t do_logout(opcd_state_t *st, uint32_t cip)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_logout_req_pack(frame, sizeof frame, 4);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_logout_ack_t ack;
+    if (opc_logout_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    return ack.result;
+}
+
+/* Pack a SetIndicationConfig request, dispatch it, return the ack result code.
+ * recipient_ip is host byte order. */
+static uint16_t do_set_indication(opcd_state_t *st, uint32_t cip,
+                                  uint32_t recipient_ip_host, uint16_t port,
+                                  uint8_t info_bits, uint8_t period)
+{
+    opc_set_indication_config_req_t req;
+    memset(&req, 0, sizeof req);
+    req.recipient_ip   = recipient_ip_host;
+    req.recipient_port = port;
+    req.info_bits      = info_bits;
+    req.period_seconds = period;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_indication_config_req_pack(frame, sizeof frame, 3, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_indication_config_ack_t ack;
+    if (opc_set_indication_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    return ack.result;
+}
+
 int main(void)
 {
     const uint32_t CIP = 0x7f000001;   /* 127.0.0.1, host order */
@@ -129,6 +173,55 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK, "set-password: valid new password accepted");
     ASSERT(strcmp(st.password, "NewSecret123") == 0,
            "set-password: password updated");
+
+    /* ---- P1: SEC-002 indication session-lifetime + recipient validation ---- */
+
+    /* 6. logout stops indication (reflector window bounded to the session). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_indication(&st, CIP, 0xC0A80063 /*192.168.0.99*/, 6000,
+                          OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_OK && st.indication_enabled,
+           "set-indication unicast: enabled");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "logout ok");
+    ASSERT(!st.indication_enabled, "logout stops indication");
+
+    /* 7. dispatch idle auto-logout also stops indication. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    (void)do_set_indication(&st, CIP, 0xC0A80063, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    st.idle_deadline = 1;   /* force the deadline into the past */
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT); /* dispatch idle check fires first */
+    ASSERT(!st.indication_enabled, "idle-logout stops indication");
+
+    /* 8-10. set-indication rejects non-unicast recipients. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_indication(&st, CIP, 0xE0000001 /*224.0.0.1*/, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_NG && !st.indication_enabled, "set-indication rejects multicast");
+    r = do_set_indication(&st, CIP, 0xFFFFFFFF, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_NG && !st.indication_enabled, "set-indication rejects broadcast");
+    r = do_set_indication(&st, CIP, 0x00000000, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_NG && !st.indication_enabled, "set-indication rejects 0.0.0.0");
+
+    /* 11. set-indication accepts an arbitrary unicast recipient (spec line 751). */
+    r = do_set_indication(&st, CIP, 0x0A0A0A0A /*10.10.10.10*/, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_OK && st.indication_enabled, "set-indication accepts unicast");
+
+    /* ---- P1: ARCH-003 pack return value checked ---- */
+
+    /* 12. A failed ack pack (resp buffer too small) yields rlen 0, not -1. */
+    {
+        opc_login_req_t lr;
+        memset(&lr, 0, sizeof lr);
+        strncpy(lr.password, OPC_PASSWORD_DEFAULT, sizeof lr.password - 1);
+        uint8_t lf[OPC_FRAME_MAX];
+        ssize_t lfn = opc_login_req_pack(lf, sizeof lf, 1, &lr);
+        uint8_t tiny[4];
+        ssize_t rlen = 999;
+        (void)opcd_dispatch(&st, lf, (size_t)lfn, CIP, 5000, tiny, sizeof tiny, &rlen);
+        ASSERT(rlen == 0, "emit_ack: failed ack pack yields rlen 0");
+    }
 
     unlink(g_pw_path);
 
