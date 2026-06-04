@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "commands.h"
+#include "ids.h"
 #include "indications.h"
 
 static const char *g_host       = "127.0.0.1";
@@ -69,15 +70,24 @@ static uint16_t next_seq(void) { return g_seq++; }
 static const char *result_str(uint16_t r) { return r == OPC_RESULT_OK ? "OK" : "NG"; }
 static const char *err_str(uint16_t e)
 {
+    /* Canonical names live in protocol/ids.h. The OPC spec overloads 0x0010
+     * across four command-specific meanings, so this value→string map can only
+     * label it generically — interpret 0x0010 by the command that returned it. */
     switch (e) {
     case 0x0000: return "none";
     case 0x0001: return "login-violation";
     case 0x0002: return "login-condition";
     case 0x0003: return "packet-size";
     case 0x0004: return "nvram";
-    case 0x0010: return "0x0010 (indication-setting/pw-mismatch/slot-range)";
-    case 0x0011: return "0x0011 (slot-empty)";
-    case 0x0012: return "0x0012 (ip-change-conflict)";
+    /* 0x0010 is spec-overloaded across four meanings (see ids.h), so it cannot
+     * map to a single named constant — keep the literal with a combined label.
+     * The unambiguous values below use their ids.h names. */
+    case 0x0010:                     return "0x0010 (indication-violation/pw-mismatch/slot-range/station-type)";
+    case OPC_ERR_SLOT_EMPTY:         return "0x0011 (slot-empty)";
+    case OPC_ERR_IP_CHANGE_CONFLICT: return "0x0012 (ip-change-conflict)";
+    case OPC_ERR_RADIO_MODE:         return "0x0013 (radio-mode)";
+    case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
+    case OPC_ERR_RADIO_APPLY:        return "0x0050 (radio-apply)";
     default:     return "other";
     }
 }

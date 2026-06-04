@@ -77,7 +77,24 @@
 #define OPC_INIT_STATE_LOGGED_IN        0x00000003
 #define OPC_INIT_STATE_LOGGED_OUT       0x00000004
 
-/* Command-specific error causes used by multiple handlers. */
-#define OPC_ERR_INDICATION_SETTING_VIOLATION  0x0010
+/* Command-specific error causes (0x0010+). The OPC spec fixes these wire
+ * values, and several distinct meanings necessarily share 0x0010 — the named
+ * aliases below disambiguate the call sites while preserving the exact byte on
+ * the wire. A receiver must use the command context to interpret a 0x0010:
+ * the same value means indication-violation, password-mismatch, slot-range,
+ * or invalid-station-type depending on which command produced it. This
+ * overload is a spec limitation, not something opcd can fix unilaterally. */
+#define OPC_ERR_INDICATION_SETTING_VIOLATION  0x0010  /* GetDeviceInfo while indication enabled */
+#define OPC_ERR_PASSWORD_MISMATCH             0x0010  /* Login/SetPassword: wrong or empty password */
+#define OPC_ERR_SLOT_RANGE                    0x0010  /* SetIpConfigList/ChangeIpAddress: slot # out of range */
+#define OPC_ERR_STATION_TYPE                  0x0010  /* SetRadioConfig: invalid station_type */
+#define OPC_ERR_SLOT_EMPTY                    0x0011  /* ChangeIpAddress: target slot empty */
+#define OPC_ERR_IP_CHANGE_CONFLICT            0x0012  /* ChangeIpAddress during in-progress list update */
+#define OPC_ERR_RADIO_MODE                    0x0013  /* SetRadioConfig: invalid WLAN mode */
+#define OPC_ERR_RADIO_BW                      0x0014  /* SetRadioConfig: invalid WLAN bandwidth */
+#define OPC_ERR_RADIO_APPLY                   0x0050  /* SetRadioConfig: platform refused the change */
+
+/* Reset cause (Reset ack / ResetNotice indication). */
+#define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */
 
 #endif /* WLAN_OPC_IDS_H */
