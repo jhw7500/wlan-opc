@@ -18,7 +18,7 @@ OPC 제어 프로토콜은 **사양상 암호화·메시지 인증이 없는 평
 | ID | 한계 | 현재 완화 | 상태 |
 |----|------|-----------|------|
 | SEC-001 | 로그인 세션을 UDP 소스 IP만으로 식별(`holder_ip == client_ip`). 소스 IP 스푸핑으로 기존 세션 탈취 가능. 요청별 시퀀스/논스 검증 없음(`sequence_number`는 에코만). | 신뢰망 전제. (세션 토큰/시퀀스 윈도우는 사양 확장 필요 — 미적용) | 문서화 |
-| 비밀번호 | 컴파일 기본값 `"MyPassword"`(공개 저장소에 노출). | **빈 비밀번호는 인증 거부**(login·set-password 양쪽). 운영 최초에 기본값을 변경할 것. | 부분 완화 |
+| 비밀번호 | 컴파일 기본값 `"MyPassword"`가 공개 저장소에 노출 — **장치의 실제 노출은 이 기본 자격증명**. 별개로, 빈 비밀번호를 만들 수 있는 코드 경로(`set-password`로 빈 비번 설정)가 잠재 버그였음. | **빈 비밀번호 인증 거부**(login·set-password 양쪽)로 코드 경로 차단. **기본 비밀번호는 운영 최초에 반드시 변경**(이게 실제 위험). | 부분 완화 |
 | SEC-002 | `SetIndicationConfig`의 indication 수신 IP/포트를 검증 없이 수용 → 인증 후 데몬을 주기 UDP 리플렉터로 악용 가능. | 신뢰망 전제. (수신자를 holder IP로 제한하는 P1 항목 예정) | 미적용(P1) |
 | SEC-004 | `GetBasicInformation`이 인증 없이, malformed 요청에도 응답 → device 식별 + login-state oracle. | 사양상 discovery 요구. (login-state 비노출·rate-limit은 P1) | 미적용(P1) |
 | ARCH-001 | ErrorCause `0x0010`이 와이어상 4가지 의미(indication-violation / password-mismatch / slot-range / station-type)로 중복. | **사양 고정 값** — 변경 불가. `protocol/ids.h`에 의미별 명명상수로 정리하고 다의성을 명시. 수신측은 **명령 컨텍스트로 해석**. | 문서화 |
@@ -28,6 +28,7 @@ OPC 제어 프로토콜은 **사양상 암호화·메시지 인증이 없는 평
 - **빈 비밀번호 로그인 거부**: 저장된 비밀번호가 빈 문자열이면 어떤 로그인도 NG(미프로비저닝 = 인증 거부, fail-closed). `opcd/handler.c::handle_login`.
 - **빈 새 비밀번호 설정 거부**: `SetPassword`의 새 비밀번호가 비어 있으면 NG, 저장하지 않음. `opcd/handler.c::handle_set_password`.
 - **부트스트랩**: 기본값 `"MyPassword"`는 비어있지 않으므로 최초 로그인 가능. 운영 배치 시 즉시 변경 권장.
+- **빈 비밀번호 vs 기본 비밀번호 (정정)**: 빈 비밀번호 차단은 *잠재 코드 경로*를 닫는 방어다 — 장치가 빈 비밀번호 상태였던 것이 아니다. (`vhlctl login` 무인자는 기본 `"MyPassword"`를 보내므로, 그 OK 응답을 빈 비번 통과로 오인하기 쉽다. 명시적 `login --password ''`는 NG.) **운영상 실제 위험은 알려진 기본 비밀번호이며, 최초 배치 시 반드시 변경해야 한다.**
 - 비범위(향후 검토): 강제 변경 흐름, 복잡도 정책, 해시 저장.
 
 ## 취약점 보고
