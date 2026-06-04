@@ -9,6 +9,7 @@
 #include "indication.h"
 #include "inventory.h"
 #include "platform.h"
+#include "snapshot.h"
 #include "store.h"
 
 /* ---- session helpers ---- */
@@ -253,6 +254,9 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
     ack.result      = result;
     ack.error_cause = err;
     *rlen = opc_get_device_info_ack_pack(resp, rcap, seq, &ack);
+    /* Side-channel snapshot for external monitoring. Best-effort: a failed
+     * write does not change the wire response we just packed. */
+    (void)opcd_snapshot_publish(&ack, OPCD_SNAPSHOT_PATH);
     return 0;
 }
 

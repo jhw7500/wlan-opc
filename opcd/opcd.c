@@ -34,6 +34,7 @@
 #include "inventory.h"
 #include "opcd_state.h"
 #include "platform.h"
+#include "snapshot.h"
 #include "store.h"
 
 #define LOG(fmt, ...) fprintf(stderr, "opcd: " fmt "\n", ##__VA_ARGS__)
@@ -111,6 +112,12 @@ static void state_load_from_disk(opcd_state_t *st)
      * an operator can still talk to a freshly-imaged device and inspect
      * status. opcd_inventory_load() emits its own stderr warning. */
     (void)opcd_inventory_load(st->paths.device_info);
+
+    /* Best-effort: create the tmpfs snapshot directory so per-response
+     * device-info JSON dumps under /dev/shm/opcd/ have a place to land.
+     * Failure here is non-fatal — snapshots are an external observation
+     * side channel, not a protocol dependency. */
+    (void)opcd_snapshot_init(OPCD_SNAPSHOT_DIR);
 
     char pw_buf[128] = {0};
     ssize_t n = opc_store_read_all(st->paths.password, pw_buf, sizeof pw_buf - 1);
