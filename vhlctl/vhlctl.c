@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "commands.h"
+#include "ids.h"
 #include "indications.h"
 
 static const char *g_host       = "127.0.0.1";
@@ -78,12 +79,15 @@ static const char *err_str(uint16_t e)
     case 0x0002: return "login-condition";
     case 0x0003: return "packet-size";
     case 0x0004: return "nvram";
-    case 0x0010: return "0x0010 (indication-violation/pw-mismatch/slot-range/station-type)";
-    case 0x0011: return "0x0011 (slot-empty)";
-    case 0x0012: return "0x0012 (ip-change-conflict)";
-    case 0x0013: return "0x0013 (radio-mode)";
-    case 0x0014: return "0x0014 (radio-bw)";
-    case 0x0050: return "0x0050 (radio-apply)";
+    /* 0x0010 is spec-overloaded across four meanings (see ids.h), so it cannot
+     * map to a single named constant — keep the literal with a combined label.
+     * The unambiguous values below use their ids.h names. */
+    case 0x0010:                     return "0x0010 (indication-violation/pw-mismatch/slot-range/station-type)";
+    case OPC_ERR_SLOT_EMPTY:         return "0x0011 (slot-empty)";
+    case OPC_ERR_IP_CHANGE_CONFLICT: return "0x0012 (ip-change-conflict)";
+    case OPC_ERR_RADIO_MODE:         return "0x0013 (radio-mode)";
+    case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
+    case OPC_ERR_RADIO_APPLY:        return "0x0050 (radio-apply)";
     default:     return "other";
     }
 }

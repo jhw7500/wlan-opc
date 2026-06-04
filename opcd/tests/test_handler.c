@@ -90,7 +90,9 @@ static uint16_t do_set_password(opcd_state_t *st, uint32_t cip,
 int main(void)
 {
     const uint32_t CIP = 0x7f000001;   /* 127.0.0.1, host order */
-    snprintf(g_pw_path, sizeof g_pw_path, "/tmp/test_handler_pw_%d", (int)getpid());
+    /* CWD-relative, not /tmp: avoids the predictable-shared-path symlink class
+     * (CWE-377). `make check` runs this in opcd/tests/, a build-owned dir. */
+    snprintf(g_pw_path, sizeof g_pw_path, "test_handler_pw_%d.tmp", (int)getpid());
     unlink(g_pw_path);
 
     opcd_state_t st;
