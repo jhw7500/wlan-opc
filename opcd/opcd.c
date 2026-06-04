@@ -31,6 +31,7 @@
 #include "../protocol/codec.h"
 #include "handler.h"
 #include "indication.h"
+#include "inventory.h"
 #include "opcd_state.h"
 #include "platform.h"
 #include "store.h"
@@ -89,16 +90,14 @@ static void state_set_defaults(opcd_state_t *st)
 {
     memset(st, 0, sizeof *st);
     st->conf.udp_port             = OPC_DEFAULT_UDP_PORT;
-    st->conf.vendor_code          = 0x00902CFB;
-    st->conf.product_code         = 0xFE03;
-    st->conf.product_subcode      = 0x0001;
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
-    st->paths.conf      = OPC_PATH_CONF;
-    st->paths.password  = OPC_PATH_PASSWORD;
-    st->paths.ip_list   = OPC_PATH_IPLIST;
-    st->paths.radio     = OPC_PATH_RADIO;
-    st->paths.temp_dir  = OPC_PATH_TEMP;
+    st->paths.conf        = OPC_PATH_CONF;
+    st->paths.password    = OPC_PATH_PASSWORD;
+    st->paths.ip_list     = OPC_PATH_IPLIST;
+    st->paths.radio       = OPC_PATH_RADIO;
+    st->paths.device_info = OPC_PATH_DEVICE_INFO;
+    st->paths.temp_dir    = OPC_PATH_TEMP;
     strncpy(st->password, OPC_PASSWORD_DEFAULT, sizeof st->password - 1);
     st->radio.station_type = OPC_STATION_SINGLE;
     st->udp_fd     = -1;
@@ -107,6 +106,12 @@ static void state_set_defaults(opcd_state_t *st)
 
 static void state_load_from_disk(opcd_state_t *st)
 {
+    /* Inventory file is read-only and tolerant of failure: a missing file
+     * yields a zero-initialised inventory rather than refusing to boot, so
+     * an operator can still talk to a freshly-imaged device and inspect
+     * status. opcd_inventory_load() emits its own stderr warning. */
+    (void)opcd_inventory_load(st->paths.device_info);
+
     char pw_buf[128] = {0};
     ssize_t n = opc_store_read_all(st->paths.password, pw_buf, sizeof pw_buf - 1);
     if (n > 0) {
