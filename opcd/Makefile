@@ -8,7 +8,7 @@ LDLIBS  += -lopcproto
 # Override on the command line: `make PLATFORM=nxp` once platform_nxp.c lands.
 PLATFORM ?= stub
 
-OBJS := opcd.o store.o handler.o indication.o json_util.o inventory.o ntp_parse.o platform_$(PLATFORM).o
+OBJS := opcd.o store.o handler.o indication.o json_util.o inventory.o ntp_parse.o snapshot.o platform_$(PLATFORM).o
 
 opcd: $(OBJS) ../protocol/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
