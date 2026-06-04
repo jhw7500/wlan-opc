@@ -80,8 +80,13 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_VIOLATION;
     } else if (st->logged_in && st->holder_ip != ip) {
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_CONDITION;
+    } else if (st->password[0] == '\0') {
+        /* Empty stored password is "not provisioned" — it must never
+         * authenticate. Without this, strncmp("", "") == 0 lets an empty
+         * login in (the live-device hole). Fail closed. */
+        result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
     } else if (strncmp(req.password, st->password, sizeof st->password - 1) != 0) {
-        result = OPC_RESULT_NG; err = 0x0010;   /* password mismatch */
+        result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
     } else {
         st->logged_in   = true;
         st->holder_ip   = ip;
@@ -271,12 +276,16 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
     if (opc_set_password_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
+        size_t newlen = strnlen(req.new_password, sizeof st->password - 1);
         if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0) {
-            result = OPC_RESULT_NG; err = 0x0010;
+            result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
+        } else if (newlen == 0) {
+            /* Refuse an empty new password — that is how the unauthenticated
+             * empty-login state became reachable. Reject at the source. */
+            result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else {
-            size_t n = strnlen(req.new_password, sizeof st->password - 1);
             memset(st->password, 0, sizeof st->password);
-            memcpy(st->password, req.new_password, n);
+            memcpy(st->password, req.new_password, newlen);
             if (save_password(st) != 0) {
                 result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
             }
@@ -302,7 +311,7 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
         for (size_t i = 0; i < req.entry_count; i++) {
             const opc_ipcfg_entry_t *e = &req.entries[i];
             if (e->list_number < 1 || e->list_number > OPC_IPCFG_LIST_MAX_SLOTS) {
-                result = OPC_RESULT_NG; err = 0x0010;   /* slot # out of range */
+                result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
                 break;
             }
             uint16_t flag = e->boundary_flag;
@@ -354,11 +363,11 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         if (st->ip_list_staging_active) {
-            result = OPC_RESULT_NG; err = 0x0012;        /* IP-change conflict during list update */
+            result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
         } else if (req.list_number < 1 || req.list_number > OPC_IPCFG_LIST_MAX_SLOTS) {
-            result = OPC_RESULT_NG; err = 0x0010;
+            result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
         } else if (!st->ip_list.present[req.list_number - 1]) {
-            result = OPC_RESULT_NG; err = 0x0011;        /* slot empty */
+            result = OPC_RESULT_NG; err = OPC_ERR_SLOT_EMPTY;
         } else {
             st->ip_change_pending = true;
             st->ip_change_list_no = req.list_number;
@@ -396,15 +405,15 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         if (req.station_type != OPC_STATION_SINGLE && req.station_type != OPC_STATION_DUAL) {
-            result = OPC_RESULT_NG; err = 0x0010;
+            result = OPC_RESULT_NG; err = OPC_ERR_STATION_TYPE;
         } else if (!valid_wlan_mode(req.wlan1.mode)) {
-            result = OPC_RESULT_NG; err = 0x0013;
+            result = OPC_RESULT_NG; err = OPC_ERR_RADIO_MODE;
         } else if (!valid_wlan_bw(req.wlan1.bandwidth)) {
-            result = OPC_RESULT_NG; err = 0x0014;
+            result = OPC_RESULT_NG; err = OPC_ERR_RADIO_BW;
         } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_mode(req.wlan2.mode)) {
-            result = OPC_RESULT_NG; err = 0x0013;
+            result = OPC_RESULT_NG; err = OPC_ERR_RADIO_MODE;
         } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_bw(req.wlan2.bandwidth)) {
-            result = OPC_RESULT_NG; err = 0x0014;
+            result = OPC_RESULT_NG; err = OPC_ERR_RADIO_BW;
         } else {
             const opcd_platform_ops_t *plat = opcd_platform();
             if (!plat) {
@@ -413,7 +422,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             }
             if (plat->apply_radio_config(&req) != 0) {
                 /* regulation-class NG — platform refused the kernel change */
-                result = OPC_RESULT_NG; err = 0x0050;
+                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
             } else {
                 st->radio = req;
                 if (save_radio(st) != 0) {
@@ -467,7 +476,7 @@ static int handle_reset(opcd_state_t *st, const uint8_t *frame, size_t flen,
     if (opc_reset_req_unpack(frame, flen) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        opcd_ind_reset_notice(st, 0x00000001);
+        opcd_ind_reset_notice(st, OPC_RESET_CAUSE_USER);
         st->should_reset = true;     /* main loop will exit(0) after sending ack */
     }
     opc_reset_ack_t ack = { .result = result, .error_cause = err };

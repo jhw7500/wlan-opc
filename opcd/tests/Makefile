@@ -11,8 +11,12 @@ OPCD_OBJS_INVENTORY := ../inventory.o ../json_util.o
 OPCD_OBJS_NTP       := ../ntp_parse.o
 OPCD_OBJS_JSON      := ../json_util.o
 OPCD_OBJS_SNAPSHOT  := ../snapshot.o
+# test_handler drives opcd_dispatch end-to-end, so it links the handler and
+# everything it depends on, with the host-only stub platform backend.
+OPCD_OBJS_HANDLER   := ../handler.o ../store.o ../indication.o ../inventory.o \
+                       ../json_util.o ../snapshot.o ../platform_stub.o
 
-TESTS := test_inventory test_ntp_parse test_json_util test_snapshot
+TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler
 
 all: $(TESTS)
 
@@ -27,6 +31,9 @@ test_json_util: test_json_util.o $(OPCD_OBJS_JSON)
 
 test_snapshot: test_snapshot.o $(OPCD_OBJS_SNAPSHOT) ../../protocol/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(LDFLAGS) $(LDLIBS)
+
+test_handler: test_handler.o $(OPCD_OBJS_HANDLER) ../../protocol/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ test_handler.o $(OPCD_OBJS_HANDLER) $(LDFLAGS) $(LDLIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
