@@ -139,11 +139,18 @@ static int open_client_socket(struct sockaddr_in *dst)
 }
 
 static ssize_t send_recv(int fd, struct sockaddr_in *dst,
-                         const uint8_t *tx, size_t tx_len,
+                         const uint8_t *tx, ssize_t tx_len,
                          uint8_t *rx, size_t rx_cap)
 {
-    if (g_dump) hex_dump("TX", tx, tx_len);
-    if (sendto(fd, tx, tx_len, 0, (struct sockaddr *)dst, sizeof *dst) != (ssize_t)tx_len) {
+    /* A negative tx_len means the request pack failed (capacity/arg). Guard
+     * here so callers can pass the raw pack result without casting -1 into a
+     * huge size_t that sendto would over-read (ARCH-003 / STYLE-005). */
+    if (tx_len < 0) {
+        fprintf(stderr, "request pack failed\n");
+        return -1;
+    }
+    if (g_dump) hex_dump("TX", tx, (size_t)tx_len);
+    if (sendto(fd, tx, (size_t)tx_len, 0, (struct sockaddr *)dst, sizeof *dst) != (ssize_t)tx_len) {
         perror("sendto"); return -1;
     }
     ssize_t n = recv(fd, rx, rx_cap, 0);
@@ -180,7 +187,7 @@ static int cmd_login(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_login_req_pack(tx, sizeof tx, next_seq(), &req);
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_login_ack_t ack;
@@ -196,7 +203,7 @@ static int cmd_logout(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_logout_req_pack(tx, sizeof tx, next_seq());
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_logout_ack_t ack;
@@ -212,7 +219,7 @@ static int cmd_basic_info(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_get_basic_info_req_pack(tx, sizeof tx, next_seq());
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_get_basic_info_ack_t ack;
@@ -235,7 +242,7 @@ static int cmd_device_info(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_get_device_info_req_pack(tx, sizeof tx, next_seq());
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_get_device_info_ack_t ack;
@@ -288,7 +295,7 @@ static int cmd_set_password(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_set_password_req_pack(tx, sizeof tx, next_seq(), &req);
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_set_password_ack_t ack;
@@ -327,7 +334,7 @@ static int cmd_set_ip_list(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_set_ip_config_list_req_pack(tx, sizeof tx, next_seq(), &req);
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_set_ip_config_list_ack_t ack;
@@ -347,7 +354,7 @@ static int cmd_change_ip(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_change_ip_address_req_pack(tx, sizeof tx, next_seq(), &req);
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_change_ip_address_ack_t ack;
@@ -384,7 +391,7 @@ static int cmd_set_radio(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_set_radio_config_req_pack(tx, sizeof tx, next_seq(), &req);
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_set_radio_config_ack_t ack;
@@ -411,7 +418,7 @@ static int cmd_set_indication(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_set_indication_config_req_pack(tx, sizeof tx, next_seq(), &req);
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_set_indication_config_ack_t ack;
@@ -429,7 +436,7 @@ static int cmd_reset(int argc, char **argv)
     if (fd < 0) return 2;
     uint8_t tx[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
     ssize_t tn = opc_reset_req_pack(tx, sizeof tx, next_seq());
-    ssize_t rn = send_recv(fd, &dst, tx, (size_t)tn, rx, sizeof rx);
+    ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
     opc_reset_ack_t ack;

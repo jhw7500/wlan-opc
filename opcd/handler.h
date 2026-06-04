@@ -30,6 +30,12 @@ int opcd_dispatch(opcd_state_t *st,
 /* After Logout response has been transmitted, apply any pending ChangeIp. */
 void opcd_apply_pending_ip_change(opcd_state_t *st);
 
+/* Single owner of session teardown: emits the final LOGGED_OUT indication,
+ * clears the login session, and stops the indication stream. Called from the
+ * explicit Logout handler, the dispatch idle check, and the main-loop timer
+ * idle check so all three paths share one set of side effects. */
+void opcd_session_logout(opcd_state_t *st);
+
 #ifdef __cplusplus
 }
 #endif
