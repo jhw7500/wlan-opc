@@ -95,38 +95,17 @@ static int stub_copy_string(char *buf, size_t cap, const char *src)
 
 static int stub_get_firmware_version(char *buf, size_t cap)
 {
-    return stub_copy_string(buf, cap, "wlan-opc-0.1.0");
+    /* Empty: stub has no package manager to query. The default-installed
+     * inventory.json still supplies vendor/product codes etc., but stays
+     * silent on the live firmware version so callers can distinguish a
+     * stub build from a real one. */
+    return stub_copy_string(buf, cap, "");
 }
 
-static int stub_get_hardware_version(char *buf, size_t cap)
+static int stub_get_ntp_server(uint32_t *server_host)
 {
-    return stub_copy_string(buf, cap, "NXP88W9098");
-}
-
-static int stub_get_serial_number(char *buf, size_t cap)
-{
-    return stub_copy_string(buf, cap, "SN-STUB-0001");
-}
-
-static int stub_get_manufacture_date(opc_date_t *out)
-{
-    out->year = 2026;
-    out->month = 2;
-    out->day = 28;
-    return 0;
-}
-
-static int stub_get_shipment_date(opc_date_t *out)
-{
-    out->year = 2026;
-    out->month = 3;
-    out->day = 15;
-    return 0;
-}
-
-static int stub_get_caps(opcd_platform_caps_t *out)
-{
-    memset(out, 0, sizeof *out);
+    /* No timesyncd in stub environment — return "unconfigured" (0). */
+    *server_host = 0;
     return 0;
 }
 
@@ -198,11 +177,7 @@ static const opcd_platform_ops_t g_stub_ops = {
     .get_wlan_mac          = stub_get_wlan_mac,
     .get_essid             = stub_get_essid,
     .get_firmware_version  = stub_get_firmware_version,
-    .get_hardware_version  = stub_get_hardware_version,
-    .get_serial_number     = stub_get_serial_number,
-    .get_manufacture_date  = stub_get_manufacture_date,
-    .get_shipment_date     = stub_get_shipment_date,
-    .get_caps              = stub_get_caps,
+    .get_ntp_server        = stub_get_ntp_server,
     .get_wlan_count        = stub_get_wlan_count,
     .get_link              = stub_get_link,
     .apply_radio_config    = stub_apply_radio_config,

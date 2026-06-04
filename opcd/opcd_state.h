@@ -12,12 +12,12 @@
 extern "C" {
 #endif
 
-/* Runtime configuration loaded from /usr/local/opc/etc/opc.conf. */
+/* Runtime configuration. Identity fields (vendor/product codes, hardware
+ * revision, serial, dates, capability bits) used to live here; they now
+ * live in inventory.h and are loaded from device_info.json at startup so
+ * operators can edit them without rebuilding opcd. */
 typedef struct opcd_conf {
     uint16_t udp_port;             /* default OPC_DEFAULT_UDP_PORT */
-    uint32_t vendor_code;          /* IEEE OUI */
-    uint16_t product_code;
-    uint16_t product_subcode;
     uint16_t default_station_type; /* OPC_STATION_SINGLE / DUAL */
     uint32_t login_idle_s;         /* configurable for tests (default OPC_LOGIN_IDLE_S) */
 } opcd_conf_t;
@@ -31,6 +31,7 @@ typedef struct opcd_paths {
     const char *password;
     const char *ip_list;
     const char *radio;
+    const char *device_info;
     const char *temp_dir;
 } opcd_paths_t;
 
@@ -39,6 +40,7 @@ typedef struct opcd_paths {
 #define OPC_PATH_PASSWORD    OPC_PATH_BASE "/password"
 #define OPC_PATH_IPLIST      OPC_PATH_BASE "/iplist.cfg"
 #define OPC_PATH_RADIO       OPC_PATH_BASE "/radio.conf"
+#define OPC_PATH_DEVICE_INFO OPC_PATH_BASE "/device_info.json"
 #define OPC_PATH_TEMP        OPC_PATH_BASE "/temp"
 
 /* 128 IP-config slots. */

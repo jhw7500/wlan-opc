@@ -1,0 +1,13 @@
+{
+    "vendor_code":      "0x00902CFB",
+    "product_code":     "0xFE03",
+    "product_subcode":  "0x0001",
+    "hardware_version": "HW-1.0.0",
+    "serial_number":    "SN-0000-0000",
+    "manufacture_date": "2026-02-28",
+    "shipment_date":    "2026-03-15",
+    "ieee_11r":  1,
+    "ieee_11ai": 1,
+    "ieee_11k":  1,
+    "ieee_11v":  1
+}
