@@ -19,6 +19,12 @@
  *     sent and opcd continues. A single stderr warning is emitted on first
  *     failure per process.
  *   - One-time mkdir at init lets the rest of the path stay write-once.
+ *   - Access model: the file is created world-readable (0644) under a 0755
+ *     dir by design. It holds only what GetDeviceInfo already exposes on the
+ *     wire (device identity, network config, MAC/ESSID) and the target is a
+ *     dedicated single-purpose appliance, so any local reader is trusted. If
+ *     this daemon is ever deployed alongside untrusted local services, tighten
+ *     to 0640 plus a dedicated group.
  */
 
 #include <stddef.h>

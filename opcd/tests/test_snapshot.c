@@ -181,23 +181,30 @@ int main(void)
 
     free(body);
 
-    /* JSON escaping regression: an essid carrying a double-quote and a
-     * backslash (both legal in an SSID) must not break the JSON. The raw %s
-     * emitter produced `"essid": "ap"x\y"` which is invalid; json_str() must
-     * render it as `ap\"x\\y`. */
+    /* JSON escaping regression: an essid carrying a double-quote, a backslash,
+     * and control characters (newline, tab) — all legal in an 802.11 SSID —
+     * must not break the JSON. The raw %s emitter produced `"essid": "ap"x\y"`
+     * which is invalid; json_str() must render quote/backslash with a leading
+     * backslash and control bytes as \u00XX (RFC 8259 §7). */
     opc_get_device_info_ack_t ack2 = ack;
-    strcpy(ack2.essid, "ap\"x\\y");
+    strcpy(ack2.essid, "ap\"x\\y\n\t");
     char esc_path[160];
     snprintf(esc_path, sizeof esc_path, "%s/escaped.json", tmp_dir);
     ASSERT(opcd_snapshot_publish(&ack2, esc_path) == 0,
-           "publish with quote+backslash essid");
+           "publish with quote+backslash+ctrl essid");
     char *eb = slurp(esc_path);
     ASSERT(eb != NULL, "escaped snapshot readable");
     if (eb) {
         ASSERT(strstr(eb, "ap\\\"x\\\\y") != NULL,
                "essid quote and backslash escaped");
+        ASSERT(strstr(eb, "\\u000a") != NULL,
+               "essid newline escaped as \\u000a");
+        ASSERT(strstr(eb, "\\u0009") != NULL,
+               "essid tab escaped as \\u0009");
         ASSERT(strstr(eb, "\"ap\"x") == NULL,
                "raw unescaped quote absent");
+        /* No literal control byte may survive in the output. */
+        ASSERT(strchr(eb, '\t') == NULL, "no raw tab in JSON output");
         free(eb);
     }
     unlink(esc_path);

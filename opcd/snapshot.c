@@ -23,6 +23,9 @@
 
 #include "snapshot.h"
 
+/* One-shot guard for the stderr warning. opcd's dispatch path is single-
+ * threaded, so a plain bool needs no synchronisation; if snapshot publishing
+ * is ever moved off the main thread this must become atomic. */
 static bool g_warn_emitted;
 
 static void warn_once(const char *path, const char *what, int err)
@@ -61,29 +64,42 @@ static const char *mac_str(const uint8_t mac[6], char buf[/*18*/])
     return buf;
 }
 
-/* Escape the two JSON-significant characters (" and \) in `in`, writing a
- * NUL-terminated result to `out`. Field values like essid are peer- or
- * operator-controlled and routinely contain quotes; emitting them raw via %s
- * would produce invalid JSON. Output is truncated to fit `cap` (worst case
- * each input byte expands to two). Returns `out` for use as a printf arg. */
+/* Escape `in` for embedding in a JSON string, writing a NUL-terminated result
+ * to `out`. Field values like essid are peer- or operator-controlled and may
+ * contain quotes, backslashes, or control bytes (all legal in an 802.11 SSID);
+ * emitting them raw via %s would produce invalid JSON. Per RFC 8259 §7 we
+ * escape `"`, `\`, and every control character U+0000–U+001F (as `\u00XX`).
+ * Output is truncated to fit `cap` (worst case each input byte expands to six).
+ * Returns `out` for use as a printf arg. */
 static const char *json_str(const char *in, char *out, size_t cap)
 {
+    static const char hex[] = "0123456789abcdef";
     size_t o = 0;
-    for (size_t i = 0; in[i] != '\0' && o + 2 < cap; i++) {
-        char c = in[i];
-        if (c == '"' || c == '\\') out[o++] = '\\';
-        out[o++] = c;
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            if (o + 2 >= cap) break;
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            if (o + 6 >= cap) break;
+            out[o++] = '\\'; out[o++] = 'u'; out[o++] = '0'; out[o++] = '0';
+            out[o++] = hex[(c >> 4) & 0x0F];
+            out[o++] = hex[c & 0x0F];
+        } else {
+            if (o + 1 >= cap) break;
+            out[o++] = (char)c;
+        }
     }
     out[o] = '\0';
     return out;
 }
 
-/* Emit one WLAN radio block. `idx` is 1 or 2; caller controls whether wlan2
- * is emitted (SINGLE-mode snapshots still write wlan2 because callers want a
- * stable schema — readers can tell SINGLE from the station_type field).
- * Emits no trailing comma or newline — write_json owns the separators so that
- * adding a field after wlan2 cannot silently produce trailing-comma JSON.
- * Returns 0 on success, -EIO on write failure. */
+/* Emit one WLAN radio block. `idx` is 1 or 2. Both blocks are always written
+ * (see write_json for the stable-schema rationale). Emits no trailing comma or
+ * newline — write_json owns the separators so that adding a field after wlan2
+ * cannot silently produce trailing-comma JSON. Returns 0, or -EIO on write
+ * failure. */
 static int emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
 {
     char macbuf[18], apbuf[18];
@@ -117,12 +133,14 @@ static int write_json(FILE *f, const opc_get_device_info_ack_t *ack)
 {
     char ipbuf[16], maskbuf[16], gwbuf[16], ntpbuf[16];
     char ethbuf[18];
-    /* Escaped copies of the operator-/peer-controlled string fields. Sized at
-     * 2x the source field (each byte may gain one escape backslash) + NUL. */
-    char fwbuf[2 * OPC_VERSION_FIELD_LEN];
-    char hwbuf[2 * OPC_VERSION_FIELD_LEN];
-    char snbuf[2 * OPC_SERIAL_FIELD_LEN];
-    char essidbuf[2 * OPC_ESSID_FIELD_LEN];
+    /* Escaped copies of the operator-/peer-controlled string fields. json_str's
+     * worst case is 6 output bytes per input byte (a control char -> "\u00XX"),
+     * so 6x the array size covers it; json_str NUL-terminates within `cap`, so
+     * no explicit +1 is needed. *_FIELD_LEN here is the source array size. */
+    char fwbuf[6 * OPC_VERSION_FIELD_LEN];
+    char hwbuf[6 * OPC_VERSION_FIELD_LEN];
+    char snbuf[6 * OPC_SERIAL_FIELD_LEN];
+    char essidbuf[6 * OPC_ESSID_FIELD_LEN];
 
     /* fetched_at: monotonic seconds since boot, NOT wall clock — the device
      * may have no time source synced yet. Tools that need wall clock can
@@ -228,8 +246,9 @@ int opcd_snapshot_publish(const opc_get_device_info_ack_t *ack,
     if (fflush(f) != 0 && rc == 0) rc = -errno;
     /* Force the bytes to the page cache before rename — readers that
      * stat() then read() must see the new contents. fsync is overkill on
-     * tmpfs (no underlying storage); fflush + close is enough. */
-    fclose(f);
+     * tmpfs (no underlying storage); fflush + close is enough. fclose can
+     * still surface a deferred write error, so capture it. */
+    if (fclose(f) != 0 && rc == 0) rc = -errno;
 
     if (rc != 0) {
         unlink(tmp);
