@@ -1,13 +1,14 @@
 # P0 보안 하드닝 설계
 
 - **작성일:** 2026-06-04
-- **근거:** `wlan-package/docs/review-report.md`(2026-06-02 종합 리뷰) 심층 분석 → P0 우선순위 + 라이브 장치(192.168.0.100) 테스트에서 확인된 빈 비밀번호 로그인
+- **근거:** `wlan-package/docs/review-report.md`(2026-06-02 종합 리뷰) 심층 분석 → P0 우선순위. 빈 비밀번호를 만들 수 있는 코드 경로(`set-password`로 빈 비번 설정 → 빈 로그인 통과)가 잠재 버그.
+- **정정:** 초기에 "라이브 장치(192.168.0.100)가 빈 비밀번호 로그인을 통과시킨다"고 본 것은 오판이었다 — `vhlctl login`의 기본 `--password`가 `"MyPassword"`(vhlctl.c)라, 무인자 `login`이 보낸 기본 비밀번호를 빈 비번으로 오인한 것. 명시적 `login --password ''`는 정상적으로 NG. 장치의 실제 노출은 **빈 비밀번호가 아니라 알려진 기본 비밀번호**(SEC-005)다.
 - **브랜치:** `harden/p0-password-errorcode`
 - **PR:** 단일 PR (3개 항목 묶음)
 
 ## 배경 / 문제
 
-1. **빈 비밀번호 로그인** — 라이브 장치에서 `vhlctl login`(빈 PW)이 OK 반환. 근본 원인: `set-password`가 빈 새 비밀번호를 허용 → 저장 비밀번호가 빈 문자열 → `handle_login`의 `strncmp("", "", n) == 0`으로 인증 통과. 사실상 무인증 제어.
+1. **빈 비밀번호 로그인(잠재 코드 경로)** — `set-password`가 빈 새 비밀번호를 허용 → 저장 비밀번호가 빈 문자열 → `handle_login`의 `strncmp("", "", n) == 0`으로 빈 로그인 통과. 사실상 무인증 제어가 가능한 경로. (라이브 장치는 이 상태가 아니었음 — 위 정정 참조. 명시적 `login --password ''`는 NG.)
 2. **ErrorCause 와이어 코드 다의성** — `0x0010`이 와이어상 4가지 의미(indication-violation / password-mismatch / slot-range / station-type-invalid)로 충돌. `handler.c`에 맨 hex 리터럴 12곳 산재.
 3. **위협모델 미문서화** — OPC는 사양상 암호화 없는 평문 LAN 프로토콜. 신뢰 네트워크 배포 전제가 코드/문서에 명시 안 됨.
 
@@ -61,7 +62,7 @@
   - 정상 set-password → 성공
   - (테스트 가능성: `handle_*`는 static이므로, 호스트 테스트가 가능한 진입점/구조를 먼저 확인. 불가 시 인증 비교 로직을 작은 testable 헬퍼로 추출.)
 - **회귀**: 기존 `make check`(protocol codec + opcd 단위) 통과.
-- **실장치**: 재빌드·재배포 후 `vhlctl login`(빈 PW) → NG, `login --password MyPassword` → OK 확인.
+- **실장치**: 재빌드·재배포 후 `vhlctl login --password ''`(명시적 빈) → NG, `set-password --new ''` → NG, `login --password MyPassword` → OK 확인.
 
 ## 비범위 (YAGNI)
 
