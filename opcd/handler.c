@@ -47,6 +47,42 @@ static int check_login_required(const opcd_state_t *st, uint32_t client_ip,
     return 0;
 }
 
+/* Single owner of session teardown — used by explicit logout, dispatch idle
+ * check, and the main-loop timer idle check (previously three divergent
+ * copies). Emits the final LOGGED_OUT transition while indication is still
+ * enabled so the notification goes out, then clears the session and stops
+ * indications: the periodic indication stream (a potential UDP reflector,
+ * SEC-002) must not outlive the authenticated session. */
+void opcd_session_logout(opcd_state_t *st)
+{
+    opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_OUT);
+    st->logged_in          = false;
+    st->boot_status        = OPC_DEVICE_READY;
+    st->indication_enabled = false;
+}
+
+/* Reject indication recipients that are not plain unicast. 0.0.0.0, the
+ * 224.0.0.0/4 multicast block, and the 255.255.255.255 broadcast address
+ * would let SetIndicationConfig aim the periodic stream at a group/broadcast
+ * (amplifier). Arbitrary unicast is allowed per spec (Indication IP Address).
+ * `ip_host` is host byte order. */
+static bool valid_unicast_ipv4(uint32_t ip_host)
+{
+    if (ip_host == 0u)                          return false;  /* 0.0.0.0 */
+    if (ip_host == 0xFFFFFFFFu)                 return false;  /* 255.255.255.255 */
+    if ((ip_host & 0xF0000000u) == 0xE0000000u) return false;  /* 224.0.0.0/4 */
+    return true;
+}
+
+/* Store an ack-pack result as the response length. A negative pack result
+ * (capacity / argument failure) means "no response": store 0 rather than a
+ * negative length, which the main loop would otherwise have to special-case.
+ * Centralises the check the handlers previously skipped (ARCH-003). */
+static void emit_ack(ssize_t *rlen, ssize_t packed)
+{
+    *rlen = (packed < 0) ? 0 : packed;
+}
+
 /* ---- file persistence helpers (best-effort — log + continue on failure) ---- */
 
 static int save_password(opcd_state_t *st)
@@ -97,7 +133,7 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
     }
 
     opc_login_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_login_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_login_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -114,12 +150,10 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
     } else if (!session_owns(st, ip)) {
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_CONDITION;
     } else {
-        st->logged_in   = false;
-        st->boot_status = OPC_DEVICE_READY;
-        opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_OUT);
+        opcd_session_logout(st);
     }
     opc_logout_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_logout_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_logout_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -140,7 +174,7 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
         .station_type    = st->radio.station_type ? st->radio.station_type
                                                   : st->conf.default_station_type,
     };
-    *rlen = opc_get_basic_info_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_get_basic_info_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -258,7 +292,7 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
     }
     ack.result      = result;
     ack.error_cause = err;
-    *rlen = opc_get_device_info_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_get_device_info_ack_pack(resp, rcap, seq, &ack));
     /* Side-channel snapshot for external monitoring. Best-effort: a failed
      * write does not change the wire response we just packed. */
     (void)opcd_snapshot_publish(&ack, OPCD_SNAPSHOT_PATH);
@@ -293,7 +327,7 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
         }
     }
     opc_set_password_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_set_password_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_set_password_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -347,7 +381,7 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
         session_touch(st);
     }
     opc_set_ip_config_list_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_set_ip_config_list_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_set_ip_config_list_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -375,7 +409,7 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
         }
     }
     opc_change_ip_address_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_change_ip_address_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_change_ip_address_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -433,7 +467,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
         }
     }
     opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_set_radio_config_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_set_radio_config_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -448,22 +482,29 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
     if (opc_set_indication_config_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        st->indication_enabled         = (req.info_bits != 0);
-        st->indication_recipient_ip    = req.recipient_ip;
-        st->indication_recipient_port  = req.recipient_port;
-        st->indication_info_bits       = req.info_bits;
-        st->indication_period_s        = req.period_seconds;
-        st->indication_tick_counter    = 0;
-        session_touch(st);
-        if (st->indication_enabled) {
-            /* Spec: on enable, emit InitComplete state sequence. */
-            opcd_ind_init_complete(st, OPC_INIT_STATE_READY);
-            opcd_ind_init_complete(st, OPC_INIT_STATE_RADIO_UP);
-            if (st->logged_in) opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
+        if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
+            /* SEC-002: only a unicast recipient may receive indications.
+             * Reject 0.0.0.0 / multicast / broadcast so the daemon cannot be
+             * pointed at a group/broadcast as an amplifier. State unchanged. */
+            result = OPC_RESULT_NG; err = OPC_ERR_INDICATION_SETTING_VIOLATION;
+        } else {
+            st->indication_enabled         = (req.info_bits != 0);
+            st->indication_recipient_ip    = req.recipient_ip;
+            st->indication_recipient_port  = req.recipient_port;
+            st->indication_info_bits       = req.info_bits;
+            st->indication_period_s        = req.period_seconds;
+            st->indication_tick_counter    = 0;
+            session_touch(st);
+            if (st->indication_enabled) {
+                /* Spec: on enable, emit InitComplete state sequence. */
+                opcd_ind_init_complete(st, OPC_INIT_STATE_READY);
+                opcd_ind_init_complete(st, OPC_INIT_STATE_RADIO_UP);
+                if (st->logged_in) opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
+            }
         }
     }
     opc_set_indication_config_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_set_indication_config_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_set_indication_config_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -480,7 +521,7 @@ static int handle_reset(opcd_state_t *st, const uint8_t *frame, size_t flen,
         st->should_reset = true;     /* main loop will exit(0) after sending ack */
     }
     opc_reset_ack_t ack = { .result = result, .error_cause = err };
-    *rlen = opc_reset_ack_pack(resp, rcap, seq, &ack);
+    emit_ack(rlen, opc_reset_ack_pack(resp, rcap, seq, &ack));
     return 0;
 }
 
@@ -504,9 +545,7 @@ int opcd_dispatch(opcd_state_t *st,
 
     /* Idle auto-logout — check before serving any Login-requiring command. */
     if (st->logged_in && mono_now() >= st->idle_deadline) {
-        st->logged_in   = false;
-        st->boot_status = OPC_DEVICE_READY;
-        opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_OUT);
+        opcd_session_logout(st);
     }
 
     switch (hdr.req_indication_id) {
