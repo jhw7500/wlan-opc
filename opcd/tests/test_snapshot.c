@@ -50,9 +50,25 @@ static uint32_t ipv4_host(const char *s)
     return ntohl(a.s_addr);
 }
 
+/* Whitespace-tolerant field check: locate "key", then require `val` to occur
+ * before the end of that same line. Decouples the assertions from write_json's
+ * column alignment, so a layout/padding tweak in the emitter does not silently
+ * break the tests (the property we actually care about is key->value, not the
+ * number of spaces between them). */
+static int has_field(const char *body, const char *key, const char *val)
+{
+    const char *p = strstr(body, key);
+    if (!p) return 0;
+    const char *eol = strchr(p, '\n');
+    const char *v   = strstr(p + strlen(key), val);
+    return v != NULL && (eol == NULL || v < eol);
+}
+
 int main(void)
 {
-    /* opcd_snapshot_init: missing dir is created, existing dir is OK. */
+    /* opcd_snapshot_init: NULL is rejected, missing dir is created, existing
+     * dir is OK. */
+    ASSERT(opcd_snapshot_init(NULL) == -EINVAL, "init NULL dir rejected");
     char tmp_dir[64];
     snprintf(tmp_dir, sizeof tmp_dir, "/tmp/test_snapshot_%d", (int)getpid());
     rmdir(tmp_dir); /* ignore */
@@ -113,49 +129,49 @@ int main(void)
     char *body = slurp(out_path);
     ASSERT(body != NULL, "snapshot file readable");
 
-    /* Field presence + value checks. Not whitespace-strict — find substr. */
-    /* 0x00902CFB = 9448699 ; 0xFE03 = 65027. JSON emits %u, so the values
-     * appear as plain decimal. The trailing comma anchors the line so a
-     * later field accidentally containing the same digits cannot match. */
-    ASSERT(strstr(body, "\"vendor_code\":     9448699,") != NULL,
+    /* Field presence + value checks via has_field() — whitespace-tolerant, so
+     * these survive emitter alignment changes.
+     * 0x00902CFB = 9448699 ; 0xFE03 = 65027. JSON emits %u, so the values
+     * appear as plain decimal. */
+    ASSERT(has_field(body, "\"vendor_code\":", "9448699"),
            "vendor_code numeric (0x00902CFB)");
-    ASSERT(strstr(body, "\"product_code\":    65027,")   != NULL,
+    ASSERT(has_field(body, "\"product_code\":", "65027"),
            "product_code numeric (0xFE03)");
-    ASSERT(strstr(body, "\"product_subcode\": 1,")       != NULL,
+    ASSERT(has_field(body, "\"product_subcode\":", "1"),
            "product_subcode numeric (0x0001)");
-    ASSERT(strstr(body, "\"firmware_version\": \"0.3.0\"")    != NULL,
+    ASSERT(has_field(body, "\"firmware_version\":", "\"0.3.0\""),
            "firmware_version literal");
-    ASSERT(strstr(body, "\"hardware_version\": \"HW-1.0.0\"") != NULL,
+    ASSERT(has_field(body, "\"hardware_version\":", "\"HW-1.0.0\""),
            "hardware_version literal");
-    ASSERT(strstr(body, "\"serial_number\":    \"SN-2026-0001\"") != NULL,
+    ASSERT(has_field(body, "\"serial_number\":", "\"SN-2026-0001\""),
            "serial_number literal");
-    ASSERT(strstr(body, "\"manufacture_date\": \"2026-02-28\"") != NULL,
+    ASSERT(has_field(body, "\"manufacture_date\":", "\"2026-02-28\""),
            "manufacture_date formatted");
-    ASSERT(strstr(body, "\"shipment_date\":    \"2026-03-15\"") != NULL,
+    ASSERT(has_field(body, "\"shipment_date\":", "\"2026-03-15\""),
            "shipment_date formatted");
-    ASSERT(strstr(body, "\"ethernet_mac\":     \"2e:db:15:c3:dd:8d\"") != NULL,
+    ASSERT(has_field(body, "\"ethernet_mac\":", "\"2e:db:15:c3:dd:8d\""),
            "ethernet_mac formatted");
-    ASSERT(strstr(body, "\"ip_address\":       \"192.168.0.101\"") != NULL,
+    ASSERT(has_field(body, "\"ip_address\":", "\"192.168.0.101\""),
            "ip_address dotted");
-    ASSERT(strstr(body, "\"subnet_mask\":      \"255.255.255.0\"") != NULL,
+    ASSERT(has_field(body, "\"subnet_mask\":", "\"255.255.255.0\""),
            "subnet_mask dotted");
-    ASSERT(strstr(body, "\"default_gateway\":  \"0.0.0.0\"") != NULL,
+    ASSERT(has_field(body, "\"default_gateway\":", "\"0.0.0.0\""),
            "default_gateway zero rendered as dotted");
-    ASSERT(strstr(body, "\"ntp_server\":       \"192.168.0.99\"") != NULL,
+    ASSERT(has_field(body, "\"ntp_server\":", "\"192.168.0.99\""),
            "ntp_server dotted");
-    ASSERT(strstr(body, "\"essid\":            \"jhw_wlan\"") != NULL,
+    ASSERT(has_field(body, "\"essid\":", "\"jhw_wlan\""),
            "essid literal");
-    ASSERT(strstr(body, "\"ieee_11r\":  1")  != NULL, "11r value");
-    ASSERT(strstr(body, "\"ieee_11ai\": 1")  != NULL, "11ai value");
-    ASSERT(strstr(body, "\"ieee_11k\":  1")  != NULL, "11k value");
-    ASSERT(strstr(body, "\"ieee_11v\":  0")  != NULL, "11v value");
+    ASSERT(has_field(body, "\"ieee_11r\":", "1"),  "11r value");
+    ASSERT(has_field(body, "\"ieee_11ai\":", "1"), "11ai value");
+    ASSERT(has_field(body, "\"ieee_11k\":", "1"),  "11k value");
+    ASSERT(has_field(body, "\"ieee_11v\":", "0"),  "11v value");
 
     /* wlan blocks emitted in stable order. */
-    ASSERT(strstr(body, "\"wlan1\"")                          != NULL, "wlan1 block");
-    ASSERT(strstr(body, "\"wlan2\"")                          != NULL, "wlan2 block (always present)");
-    ASSERT(strstr(body, "\"mac\":            \"00:04:9f:06:e9:f0\"") != NULL,
+    ASSERT(strstr(body, "\"wlan1\"") != NULL, "wlan1 block");
+    ASSERT(strstr(body, "\"wlan2\"") != NULL, "wlan2 block (always present)");
+    ASSERT(has_field(body, "\"mac\":", "\"00:04:9f:06:e9:f0\""),
            "wlan1 mac");
-    ASSERT(strstr(body, "\"connect_ap_mac\": \"04:ba:d6:ec:0b:08\"") != NULL,
+    ASSERT(has_field(body, "\"connect_ap_mac\":", "\"04:ba:d6:ec:0b:08\""),
            "wlan1 ap mac");
 
     /* fetched_at present — value-content matters less, just that it is a
@@ -164,6 +180,27 @@ int main(void)
            "fetched_at_monotonic_s field");
 
     free(body);
+
+    /* JSON escaping regression: an essid carrying a double-quote and a
+     * backslash (both legal in an SSID) must not break the JSON. The raw %s
+     * emitter produced `"essid": "ap"x\y"` which is invalid; json_str() must
+     * render it as `ap\"x\\y`. */
+    opc_get_device_info_ack_t ack2 = ack;
+    strcpy(ack2.essid, "ap\"x\\y");
+    char esc_path[160];
+    snprintf(esc_path, sizeof esc_path, "%s/escaped.json", tmp_dir);
+    ASSERT(opcd_snapshot_publish(&ack2, esc_path) == 0,
+           "publish with quote+backslash essid");
+    char *eb = slurp(esc_path);
+    ASSERT(eb != NULL, "escaped snapshot readable");
+    if (eb) {
+        ASSERT(strstr(eb, "ap\\\"x\\\\y") != NULL,
+               "essid quote and backslash escaped");
+        ASSERT(strstr(eb, "\"ap\"x") == NULL,
+               "raw unescaped quote absent");
+        free(eb);
+    }
+    unlink(esc_path);
 
     /* Atomicity: temp file must not be left behind on a successful publish. */
     char tmp_path[160];

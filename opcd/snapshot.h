@@ -41,8 +41,11 @@ extern "C" {
 int opcd_snapshot_init(const char *dir);
 
 /* Dump `ack` as JSON to `path` using a temp file + rename(2) for atomicity.
- * Returns 0 on success, -errno on failure. Callers must NOT block their
- * response path on this — invoke it after the UDP send completes. */
+ * Returns 0 on success, -errno on failure. Invoke it right after packing the
+ * GetDeviceInfo ack (the current caller publishes before the subsequent UDP
+ * send) — the snapshot mirrors the packed ack content, so send timing is
+ * irrelevant. It must never block or fail the response path, so callers
+ * ignore the return value. */
 int opcd_snapshot_publish(const opc_get_device_info_ack_t *ack,
                           const char *path);
 

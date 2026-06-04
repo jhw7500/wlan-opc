@@ -61,13 +61,33 @@ static const char *mac_str(const uint8_t mac[6], char buf[/*18*/])
     return buf;
 }
 
+/* Escape the two JSON-significant characters (" and \) in `in`, writing a
+ * NUL-terminated result to `out`. Field values like essid are peer- or
+ * operator-controlled and routinely contain quotes; emitting them raw via %s
+ * would produce invalid JSON. Output is truncated to fit `cap` (worst case
+ * each input byte expands to two). Returns `out` for use as a printf arg. */
+static const char *json_str(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0' && o + 2 < cap; i++) {
+        char c = in[i];
+        if (c == '"' || c == '\\') out[o++] = '\\';
+        out[o++] = c;
+    }
+    out[o] = '\0';
+    return out;
+}
+
 /* Emit one WLAN radio block. `idx` is 1 or 2; caller controls whether wlan2
  * is emitted (SINGLE-mode snapshots still write wlan2 because callers want a
- * stable schema — readers can tell SINGLE from the station_type field). */
-static void emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
+ * stable schema — readers can tell SINGLE from the station_type field).
+ * Emits no trailing comma or newline — write_json owns the separators so that
+ * adding a field after wlan2 cannot silently produce trailing-comma JSON.
+ * Returns 0 on success, -EIO on write failure. */
+static int emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
 {
     char macbuf[18], apbuf[18];
-    fprintf(f,
+    if (fprintf(f,
         "  \"wlan%d\": {\n"
         "    \"mac\":            \"%s\",\n"
         "    \"mode\":           %u,\n"
@@ -78,15 +98,17 @@ static void emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
         "    \"snr\":            %d,\n"
         "    \"rssi\":           %d,\n"
         "    \"connect_ap_mac\": \"%s\"\n"
-        "  }%s\n",
+        "  }",
         idx,
         mac_str(w->mac, macbuf),
         (unsigned)w->mode, (unsigned)w->bandwidth,
         (unsigned)w->freq_mhz, (unsigned)w->channel,
         (unsigned)w->status,
         (int)w->snr, (int)w->rssi,
-        mac_str(w->connect_ap_mac, apbuf),
-        (idx == 1) ? "," : "");
+        mac_str(w->connect_ap_mac, apbuf)) < 0) {
+        return -EIO;
+    }
+    return 0;
 }
 
 /* Serialise the full ack into FILE* `f`. Layout mirrors opc_get_device_info_ack_t
@@ -95,6 +117,12 @@ static int write_json(FILE *f, const opc_get_device_info_ack_t *ack)
 {
     char ipbuf[16], maskbuf[16], gwbuf[16], ntpbuf[16];
     char ethbuf[18];
+    /* Escaped copies of the operator-/peer-controlled string fields. Sized at
+     * 2x the source field (each byte may gain one escape backslash) + NUL. */
+    char fwbuf[2 * OPC_VERSION_FIELD_LEN];
+    char hwbuf[2 * OPC_VERSION_FIELD_LEN];
+    char snbuf[2 * OPC_SERIAL_FIELD_LEN];
+    char essidbuf[2 * OPC_ESSID_FIELD_LEN];
 
     /* fetched_at: monotonic seconds since boot, NOT wall clock — the device
      * may have no time source synced yet. Tools that need wall clock can
@@ -140,15 +168,15 @@ static int write_json(FILE *f, const opc_get_device_info_ack_t *ack)
         (unsigned)ack->shipment.year,
         (unsigned)ack->shipment.month,
         (unsigned)ack->shipment.day,
-        ack->firmware_version,
-        ack->hardware_version,
-        ack->serial_number,
+        json_str(ack->firmware_version, fwbuf, sizeof fwbuf),
+        json_str(ack->hardware_version, hwbuf, sizeof hwbuf),
+        json_str(ack->serial_number,    snbuf, sizeof snbuf),
         mac_str(ack->ethernet_mac, ethbuf),
         ipv4_str(ack->ip_address,      ipbuf),
         ipv4_str(ack->subnet_mask,     maskbuf),
         ipv4_str(ack->default_gateway, gwbuf),
         ipv4_str(ack->ntp_server,      ntpbuf),
-        ack->essid,
+        json_str(ack->essid, essidbuf, sizeof essidbuf),
         (unsigned)ack->device_status,
         (unsigned)ack->station_type,
         (unsigned)ack->priority_ch,
@@ -158,9 +186,12 @@ static int write_json(FILE *f, const opc_get_device_info_ack_t *ack)
         (unsigned)ack->ieee_11v) < 0) {
         return -EIO;
     }
-    emit_wlan(f, 1, &ack->wlan1);
-    emit_wlan(f, 2, &ack->wlan2);
-    if (fprintf(f, "}\n") < 0) return -EIO;
+    /* Comma between the two radio blocks is owned here, not by emit_wlan, so
+     * the separator stays correct if a field is ever appended after wlan2. */
+    if (emit_wlan(f, 1, &ack->wlan1) != 0) return -EIO;
+    if (fprintf(f, ",\n") < 0)             return -EIO;
+    if (emit_wlan(f, 2, &ack->wlan2) != 0) return -EIO;
+    if (fprintf(f, "\n}\n") < 0)           return -EIO;
     return 0;
 }
 
@@ -211,5 +242,10 @@ int opcd_snapshot_publish(const opc_get_device_info_ack_t *ack,
         warn_once(path, "rename", e);
         return -e;
     }
+    /* A clean publish re-arms the one-shot warning: if a later write fails
+     * after an operator has fixed a transient problem (e.g. remounted
+     * /dev/shm), the recurrence is reported instead of staying silenced for
+     * the lifetime of the process. */
+    g_warn_emitted = false;
     return 0;
 }
