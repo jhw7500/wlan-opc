@@ -8,3 +8,18 @@ protocol/tests/test_codec
 .omc/
 .bkit/
 .gstack/
+
+# local test reports / scratch (untracked)
+tmp/
+
+# agent / tooling scratch
+.agents/
+skills-lock.json
+*.swp
+
+# docs: spec copies (canonical lives in parent wlan-package/docs/) + binary originals
+docs/*.docx
+docs/seed.yaml
+docs/proto-todo.md
+docs/opc_vhl_protocol_Rev1.00_KO.md
+docs/manual-runthrough.md

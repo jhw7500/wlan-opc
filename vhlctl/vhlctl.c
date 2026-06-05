@@ -39,12 +39,14 @@
 #include "commands.h"
 #include "ids.h"
 #include "indications.h"
+#include "fielddump.h"
 
 static const char *g_host       = "127.0.0.1";
 static int         g_port       = 50607;
 static int         g_timeout_ms = 2000;
 static uint16_t    g_seq        = 1;
 static bool        g_dump       = false;
+static bool        g_hex        = false;
 
 static void hex_dump(const char *label, const uint8_t *buf, size_t len)
 {
@@ -222,6 +224,14 @@ static int cmd_basic_info(int argc, char **argv)
     ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
+    if (g_hex) {
+        printf("basic-info (--hex):\n");
+        opc_get_basic_info_ack_t ack_hex;   /* basic-info has no result field — validate framing only */
+        int bad = (opc_get_basic_info_ack_unpack(rx, (size_t)rn, &ack_hex) != 0);
+        if (bad) fprintf(stderr, "basic-info: malformed ack\n");   /* error before the stdout dump */
+        fd_dump_basic_info(stdout, rx, (size_t)rn);                /* still dump raw bytes for debugging */
+        return bad ? 2 : 0;
+    }
     opc_get_basic_info_ack_t ack;
     if (opc_get_basic_info_ack_unpack(rx, (size_t)rn, &ack) != 0) { fprintf(stderr, "basic-info: malformed ack\n"); return 2; }
     printf("basic-info:\n");
@@ -245,6 +255,15 @@ static int cmd_device_info(int argc, char **argv)
     ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
+    if (g_hex) {
+        printf("device-info (--hex):\n");
+        opc_get_device_info_ack_t ack_hex;
+        int bad = (opc_get_device_info_ack_unpack(rx, (size_t)rn, &ack_hex) != 0);
+        if (bad) fprintf(stderr, "device-info: malformed ack\n");   /* error before the stdout dump */
+        fd_dump_device_info(stdout, rx, (size_t)rn);                /* still dump raw bytes for debugging */
+        if (bad) return 2;
+        return ack_hex.result == OPC_RESULT_OK ? 0 : 1;
+    }
     opc_get_device_info_ack_t ack;
     if (opc_get_device_info_ack_unpack(rx, (size_t)rn, &ack) != 0) { fprintf(stderr, "device-info: malformed ack\n"); return 2; }
     if (ack.result != OPC_RESULT_OK) {
@@ -470,6 +489,12 @@ static int cmd_listen(int argc, char **argv)
         if (hdr.command_type != OPC_CMD_INDICATION) {
             fprintf(stderr, "  not an indication (cmd_type=0x%02x)\n", hdr.command_type); continue;
         }
+        if (g_hex) {
+            printf("[%u] indication 0x%04x (--hex):\n", hdr.sequence_number, hdr.req_indication_id);
+            fd_dump_indication(stdout, hdr.req_indication_id, buf, (size_t)n);
+            fflush(stdout);
+            continue;
+        }
         switch (hdr.req_indication_id) {
         case OPC_IND_INIT_COMPLETE: {
             opc_ind_init_complete_t in;
@@ -533,7 +558,7 @@ static int cmd_listen(int argc, char **argv)
 
 static void usage(void)
 {
-    fputs("usage: vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] SUBCOMMAND [args]\n"
+    fputs("usage: vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND [args]\n"
           "subcommands:\n"
           "  login [--password PW]\n"
           "  logout\n"
@@ -560,6 +585,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[idx], "--port")    && idx + 1 < argc) { g_port       = atoi(argv[idx + 1]); idx += 2; }
         else if (!strcmp(argv[idx], "--timeout") && idx + 1 < argc) { g_timeout_ms = atoi(argv[idx + 1]); idx += 2; }
         else if (!strcmp(argv[idx], "--dump"))   { g_dump = true; idx += 1; }
+        else if (!strcmp(argv[idx], "--hex"))    { g_hex  = true; idx += 1; }
         else if (!strcmp(argv[idx], "--help")) { usage(); return 0; }
         else break;
     }

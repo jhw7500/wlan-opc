@@ -17,8 +17,8 @@ extern "C" {
  * Common Acknowledgment shape (Result + ErrorCause body, 4 bytes).
  * Used by Login/Logout/SetPassword/SetIpConfigList/ChangeIpAddress/
  * SetRadioConfig/SetIndicationConfig/Reset Acks.
- * The header `length_field` differs per command — Reset Ack uses 0 (T11),
- * everyone else uses 60.
+ * Every simple Ack uses Length 60 (body 4 + reserve 56). Reset Ack's spec
+ * "0" was a typo (T11, resolved) — it also uses 60.
  * ======================================================================== */
 
 #define OPC_SIMPLE_ACK_BODY_LEN   4
@@ -401,7 +401,7 @@ int     opc_set_indication_config_ack_unpack(const uint8_t *frame, size_t frame_
 
 #define OPC_RESET_REQ_BODY_LEN    0
 #define OPC_RESET_REQ_LENGTH      0
-#define OPC_RESET_ACK_LENGTH      0   /* spec literal — body still present (T11) */
+#define OPC_RESET_ACK_LENGTH      60  /* T11 resolved: spec '0' is a copy-paste typo from Reset Req; 60 matches every other simple Ack (body 4 + 56). */
 
 typedef struct opc_reset_ack {
     uint16_t result;

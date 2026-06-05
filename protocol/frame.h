@@ -12,16 +12,16 @@ extern "C" {
 #endif
 
 /*
- * Build a complete OPC frame (header + body) in `frame`.
+ * Build a complete body-bearing OPC frame (64-byte common header + body).
  *
- * The 60-byte common header is zero-filled in the reserve area (bytes 8..59)
- * and the header fields are written big-endian per spec.
+ * The 64-byte common header has its 56-byte reserve area (bytes 8..63)
+ * zero-filled; header fields are written big-endian per spec. The body is
+ * placed at byte 64.
  *
  * `length_field` is the literal value placed in the header's Length field.
- * Per spec Rev1.00 (vendor clarification): Length = total_frame_bytes - 4,
- * i.e. it excludes the first 4 bytes (protocol version + command type +
- * req/indication id). Per-command helpers in commands.h compute this
- * automatically via OPC_*_REQ_LENGTH / OPC_*_ACK_LENGTH macros.
+ * Per spec Rev1.00 (confirmed against the docx figures): Length =
+ * total_frame_bytes - 8 = reserve(56) + body_len. Per-command helpers in
+ * commands.h supply this via OPC_*_REQ_LENGTH / OPC_*_ACK_LENGTH macros.
  *
  * Returns total frame size (OPC_HEADER_SIZE + body_len) on success,
  * or -1 on invalid argument / insufficient capacity.
@@ -32,11 +32,22 @@ ssize_t opc_frame_build(uint8_t *frame, size_t cap,
                         const uint8_t *body, size_t body_len);
 
 /*
+ * Build an empty-body request frame: only the 8-byte fixed header
+ * (OPC_FIXED_HEADER_SIZE), Length=0, no reserve, no body. Used by Logout /
+ * GetBasicInfo / GetDeviceInfo / Reset requests.
+ *
+ * Returns OPC_FIXED_HEADER_SIZE (8) on success, -1 on bad arg / small cap.
+ */
+ssize_t opc_empty_frame_build(uint8_t *frame, size_t cap,
+                              uint8_t cmd_type, uint16_t req_id, uint16_t seq_no);
+
+/*
  * Parse an OPC frame:
- *   - Copies header fields into *hdr_out.
- *   - Sets *body_out (may be NULL to skip) to point inside `frame` (no copy).
- *   - Sets *body_len_out (may be NULL to skip) to the remaining bytes after
- *     the 60-byte header.
+ *   - Requires at least the 8-byte fixed header; copies header fields into
+ *     *hdr_out.
+ *   - If the frame reaches the full 64-byte common header, *body_out (skippable
+ *     with NULL) points at byte 64 and *body_len_out is frame_len - 64.
+ *   - For an 8-byte empty-request frame, *body_out is NULL and *body_len_out 0.
  *
  * Returns 0 on success, -1 on insufficient input / argument error.
  */

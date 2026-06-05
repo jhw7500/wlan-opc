@@ -88,7 +88,7 @@ static int test_logout(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_logout_req_pack(frame, sizeof frame, 0x0012);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_be16_read(&frame[6]) == OPC_LOGOUT_REQ_LENGTH, "req length");
     ASSERT(opc_logout_req_unpack(frame, nq) == 0, "req unpack");
 
@@ -107,7 +107,7 @@ static int test_get_basic_info(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_get_basic_info_req_pack(frame, sizeof frame, 0x0001);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_get_basic_info_req_unpack(frame, nq) == 0, "req unpack");
 
     opc_get_basic_info_ack_t ai = {
@@ -136,7 +136,7 @@ static int test_get_device_info(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_get_device_info_req_pack(frame, sizeof frame, 0x0002);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_get_device_info_req_unpack(frame, nq) == 0, "req unpack");
 
     opc_get_device_info_ack_t ai;
@@ -392,15 +392,15 @@ static int test_reset(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_reset_req_pack(frame, sizeof frame, 0x0060);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_be16_read(&frame[6]) == OPC_RESET_REQ_LENGTH, "req length");
     ASSERT(opc_reset_req_unpack(frame, nq) == 0, "req unpack");
 
     opc_reset_ack_t ai = { .result = OPC_RESULT_OK };
     ssize_t na = opc_reset_ack_pack(frame, sizeof frame, 0x0060, &ai);
     ASSERT(na > 0, "ack pack");
-    /* Spec quirk T11: Length field is 0 even though body is present. */
-    ASSERT(opc_be16_read(&frame[6]) == OPC_RESET_ACK_LENGTH, "ack length is 0 per spec");
+    /* T11 resolved: spec '0' treated as a typo; Reset Ack uses 60 like every other simple Ack. */
+    ASSERT(opc_be16_read(&frame[6]) == OPC_RESET_ACK_LENGTH, "ack length is 60 (T11 typo corrected)");
     opc_reset_ack_t ao;
     ASSERT(opc_reset_ack_unpack(frame, na, &ao) == 0, "ack unpack");
     ASSERT(ao.result == OPC_RESULT_OK, "ack result");
@@ -556,6 +556,16 @@ static int test_rejects(void)
     ASSERT(opc_set_ip_config_list_req_pack(frame, sizeof frame, 0, &bad) < 0, "0 entries");
     bad.entry_count = OPC_IPCFG_LIST_MAX_PER_REQ + 1;
     ASSERT(opc_set_ip_config_list_req_pack(frame, sizeof frame, 0, &bad) < 0, "21 entries");
+
+    /* Partial frame: 9..63 B is neither an 8-byte empty request nor a full
+     * 64-byte-header frame -> must be rejected, not accepted as empty. */
+    uint8_t pf[OPC_HEADER_SIZE]; memset(pf, 0, sizeof pf);
+    pf[0] = OPC_PROTOCOL_VERSION; pf[1] = OPC_CMD_REQUEST;
+    opc_header_t ph;
+    ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE + 1, &ph, NULL, NULL) < 0, "partial (fixed+1) rejected");
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE - 1,     &ph, NULL, NULL) < 0, "partial (header-1) rejected");
+    ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE,   &ph, NULL, NULL) == 0, "8B fixed-header accepted");
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) == 0, "64B common header accepted");
     return 0;
 }
 
