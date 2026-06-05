@@ -224,6 +224,53 @@ static void test_dump_indication_roaming(void)
     free(buf);
 }
 
+/* Remaining 5 indication tables — happy-path offset check per type so drift in
+ * any of them fails make check (not just keepalive/roaming). */
+static void test_dump_indication_rest(void)
+{
+    char *buf; size_t sz; FILE *fp;
+    uint8_t frame[OPC_FRAME_MAX]; ssize_t n;
+
+    opc_ind_init_complete_t init; memset(&init, 0, sizeof init);
+    init.status = 0x00000002;
+    n = opc_ind_init_complete_pack(frame, sizeof frame, 1, &init);
+    fp = open_memstream(&buf, &sz); fd_dump_indication(fp, OPC_IND_INIT_COMPLETE, frame, (size_t)n); fclose(fp);
+    ASSERT(line_has(buf, "status", "0x00000002"), "ind init: status @offset");
+    free(buf);
+
+    opc_ind_wlan_status_change_t ws; memset(&ws, 0, sizeof ws);
+    ws.wlan_status = 0x0001; ws.indication_ch = 0x0206;
+    n = opc_ind_wlan_status_change_pack(frame, sizeof frame, 1, &ws);
+    fp = open_memstream(&buf, &sz); fd_dump_indication(fp, OPC_IND_WLAN_STATUS_CHANGE, frame, (size_t)n); fclose(fp);
+    ASSERT(line_has(buf, "wlan_status",   "0x0001"), "ind wlanstat: status @offset");
+    ASSERT(line_has(buf, "indication_ch", "0x0206"), "ind wlanstat: ch @offset");
+    free(buf);
+
+    opc_ind_ap_disconnect_t ap; memset(&ap, 0, sizeof ap);
+    ap.message_id = 0x000a; ap.result_code = 0x0005;
+    uint8_t dm[6] = {0xaa,0xbb,0xcc,0xdd,0xee,0xff}; memcpy(ap.disconnect_ap_mac, dm, 6);
+    n = opc_ind_ap_disconnect_pack(frame, sizeof frame, 1, &ap);
+    fp = open_memstream(&buf, &sz); fd_dump_indication(fp, OPC_IND_AP_DISCONNECT, frame, (size_t)n); fclose(fp);
+    ASSERT(line_has(buf, "message_id",        "0x000a"),            "ind apdisc: msg_id @offset");
+    ASSERT(line_has(buf, "disconnect_ap_mac", "aa:bb:cc:dd:ee:ff"), "ind apdisc: ap mac @offset");
+    free(buf);
+
+    opc_ind_fault_detect_t ft; memset(&ft, 0, sizeof ft);
+    ft.congestion_id = 0x0001; ft.current_val = 0x0063;
+    n = opc_ind_fault_detect_pack(frame, sizeof frame, 1, &ft);
+    fp = open_memstream(&buf, &sz); fd_dump_indication(fp, OPC_IND_FAULT_DETECT, frame, (size_t)n); fclose(fp);
+    ASSERT(line_has(buf, "congestion_id", "0x0001"), "ind fault: congestion @offset");
+    ASSERT(line_has(buf, "current_val",   "0x0063"), "ind fault: val @offset");
+    free(buf);
+
+    opc_ind_reset_notice_t rst; memset(&rst, 0, sizeof rst);
+    rst.reset_cause = 0x12345678;
+    n = opc_ind_reset_notice_pack(frame, sizeof frame, 1, &rst);
+    fp = open_memstream(&buf, &sz); fd_dump_indication(fp, OPC_IND_RESET_NOTICE, frame, (size_t)n); fclose(fp);
+    ASSERT(line_has(buf, "reset_cause", "0x12345678"), "ind reset: cause @offset");
+    free(buf);
+}
+
 /* Every decoded field gets a distinct value; line_has verifies each value
  * lands on its own label's line. Any offset drift anywhere in the body
  * (header through wlan2.ap_mac @356) breaks at least one assertion. */
@@ -315,6 +362,7 @@ int main(void)
     test_dump_basic_info();
     test_dump_indication_keepalive();
     test_dump_indication_roaming();
+    test_dump_indication_rest();
 
     if (failures == 0) { printf("all fielddump tests passed\n"); return 0; }
     fprintf(stderr, "%d fielddump test(s) failed\n", failures);

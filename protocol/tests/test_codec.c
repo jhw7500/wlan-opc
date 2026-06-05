@@ -559,11 +559,13 @@ static int test_rejects(void)
 
     /* Partial frame: 9..63 B is neither an 8-byte empty request nor a full
      * 64-byte-header frame -> must be rejected, not accepted as empty. */
-    uint8_t pf[40]; memset(pf, 0, sizeof pf);
+    uint8_t pf[OPC_HEADER_SIZE]; memset(pf, 0, sizeof pf);
     pf[0] = OPC_PROTOCOL_VERSION; pf[1] = OPC_CMD_REQUEST;
     opc_header_t ph;
-    ASSERT(opc_frame_parse(pf, 40, &ph, NULL, NULL) < 0, "partial 40B frame rejected");
-    ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE, &ph, NULL, NULL) == 0, "8B fixed-header accepted");
+    ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE + 1, &ph, NULL, NULL) < 0, "partial (fixed+1) rejected");
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE - 1,     &ph, NULL, NULL) < 0, "partial (header-1) rejected");
+    ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE,   &ph, NULL, NULL) == 0, "8B fixed-header accepted");
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) == 0, "64B common header accepted");
     return 0;
 }
 
