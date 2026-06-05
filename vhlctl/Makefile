@@ -4,7 +4,7 @@ CFLAGS  += -I../protocol
 LDFLAGS += -L../protocol
 LDLIBS  += -lopcproto
 
-OBJS := vhlctl.o
+OBJS := vhlctl.o fielddump.o
 
 vhlctl: $(OBJS) ../protocol/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)

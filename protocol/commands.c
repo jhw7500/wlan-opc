@@ -82,13 +82,19 @@ int opc_simple_ack_unpack(const uint8_t *frame, size_t frame_len,
 static ssize_t empty_req_pack(uint8_t *frame, size_t cap,
                               uint16_t req_id, uint16_t seq_no, uint16_t length_field)
 {
-    return opc_frame_build(frame, cap, OPC_CMD_REQUEST, req_id, seq_no,
-                           length_field, NULL, 0);
+    /* All empty-body requests are exactly the 8-byte fixed header with Length=0
+     * (no reserve, no body) per the spec figures. length_field is the spec
+     * literal 0 carried by the OPC_*_REQ_LENGTH macros. */
+    (void)length_field;
+    return opc_empty_frame_build(frame, cap, OPC_CMD_REQUEST, req_id, seq_no);
 }
 
 static int empty_req_unpack(const uint8_t *frame, size_t frame_len, uint16_t expected_req_id)
 {
     opc_header_t hdr;
+    /* Empty-body requests are exactly the 8-byte fixed header on the wire; a
+     * full 64-byte-header frame for one of these IDs is malformed. */
+    if (frame_len != OPC_FIXED_HEADER_SIZE) return -1;
     if (opc_frame_parse(frame, frame_len, &hdr, NULL, NULL) != 0) return -1;
     if (hdr.command_type != OPC_CMD_REQUEST)        return -1;
     if (hdr.req_indication_id != expected_req_id)   return -1;

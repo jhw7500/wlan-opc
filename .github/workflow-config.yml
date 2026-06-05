@@ -33,9 +33,9 @@ workflows:
     description: "Issue triage and labeling"
 
   gemini-auto-review:
-    enabled: false
-    auto: false
-    description: "Automatic PR review with Gemini (disabled: GCP project denied access)"
+    enabled: true
+    auto: true
+    description: "Automatic PR review with Gemini (PR opened/synchronize 시 자동 실행)"
 
   gemini-scheduled-triage:
     enabled: false

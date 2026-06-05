@@ -28,8 +28,11 @@ check:
 	$(MAKE) -C opcd      CC=cc PLATFORM=stub inventory.o json_util.o ntp_parse.o \
 	                          snapshot.o handler.o store.o indication.o platform_stub.o
 	$(MAKE) -C opcd/tests CC=cc check
+	$(MAKE) -C vhlctl    CC=cc fielddump.o
+	$(MAKE) -C vhlctl/tests CC=cc check
 
 clean:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d clean; done
 	$(MAKE) -C protocol/tests clean
 	$(MAKE) -C opcd/tests    clean
+	$(MAKE) -C vhlctl/tests  clean
