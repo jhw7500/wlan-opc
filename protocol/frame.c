@@ -36,6 +36,25 @@ ssize_t opc_frame_build(uint8_t *frame, size_t cap,
     return (ssize_t)(OPC_HEADER_SIZE + body_len);
 }
 
+ssize_t opc_empty_frame_build(uint8_t *frame, size_t cap,
+                              uint8_t cmd_type, uint16_t req_id, uint16_t seq_no)
+{
+    if (!frame || cap < OPC_FIXED_HEADER_SIZE) {
+        return -1;
+    }
+    opc_header_t hdr = {
+        .protocol_version  = OPC_PROTOCOL_VERSION,
+        .command_type      = cmd_type,
+        .req_indication_id = req_id,
+        .sequence_number   = seq_no,
+        .length            = 0,
+    };
+    if (opc_fixed_header_pack(frame, &hdr) != 0) {
+        return -1;
+    }
+    return (ssize_t)OPC_FIXED_HEADER_SIZE;
+}
+
 int opc_frame_parse(const uint8_t *frame, size_t frame_len,
                     opc_header_t *hdr_out,
                     const uint8_t **body_out, size_t *body_len_out)
@@ -43,20 +62,23 @@ int opc_frame_parse(const uint8_t *frame, size_t frame_len,
     if (!frame || !hdr_out) {
         return -1;
     }
-    if (frame_len < OPC_HEADER_SIZE) {
+    if (frame_len < OPC_FIXED_HEADER_SIZE) {
         return -1;
     }
     if (frame_len > OPC_FRAME_MAX) {
         return -1;
     }
-    if (opc_header_unpack(frame, frame_len, hdr_out) != 0) {
+    if (opc_fixed_header_unpack(frame, frame_len, hdr_out) != 0) {
         return -1;
     }
-    if (body_out) {
-        *body_out = frame + OPC_HEADER_SIZE;
-    }
-    if (body_len_out) {
-        *body_len_out = frame_len - OPC_HEADER_SIZE;
+    /* Body present only once the frame reaches the full common header.
+     * Empty-request frames stop at the 8-byte fixed header (no reserve/body). */
+    if (frame_len >= OPC_HEADER_SIZE) {
+        if (body_out)     *body_out     = frame + OPC_HEADER_SIZE;
+        if (body_len_out) *body_len_out = frame_len - OPC_HEADER_SIZE;
+    } else {
+        if (body_out)     *body_out     = NULL;
+        if (body_len_out) *body_len_out = 0;
     }
     return 0;
 }

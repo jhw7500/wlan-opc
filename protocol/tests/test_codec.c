@@ -88,7 +88,7 @@ static int test_logout(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_logout_req_pack(frame, sizeof frame, 0x0012);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_be16_read(&frame[6]) == OPC_LOGOUT_REQ_LENGTH, "req length");
     ASSERT(opc_logout_req_unpack(frame, nq) == 0, "req unpack");
 
@@ -107,7 +107,7 @@ static int test_get_basic_info(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_get_basic_info_req_pack(frame, sizeof frame, 0x0001);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_get_basic_info_req_unpack(frame, nq) == 0, "req unpack");
 
     opc_get_basic_info_ack_t ai = {
@@ -136,7 +136,7 @@ static int test_get_device_info(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_get_device_info_req_pack(frame, sizeof frame, 0x0002);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_get_device_info_req_unpack(frame, nq) == 0, "req unpack");
 
     opc_get_device_info_ack_t ai;
@@ -392,15 +392,15 @@ static int test_reset(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t nq = opc_reset_req_pack(frame, sizeof frame, 0x0060);
-    ASSERT(nq == OPC_HEADER_SIZE, "req size");
+    ASSERT(nq == OPC_FIXED_HEADER_SIZE, "req size");
     ASSERT(opc_be16_read(&frame[6]) == OPC_RESET_REQ_LENGTH, "req length");
     ASSERT(opc_reset_req_unpack(frame, nq) == 0, "req unpack");
 
     opc_reset_ack_t ai = { .result = OPC_RESULT_OK };
     ssize_t na = opc_reset_ack_pack(frame, sizeof frame, 0x0060, &ai);
     ASSERT(na > 0, "ack pack");
-    /* Spec quirk T11: Length field is 0 even though body is present. */
-    ASSERT(opc_be16_read(&frame[6]) == OPC_RESET_ACK_LENGTH, "ack length is 0 per spec");
+    /* T11 resolved: spec '0' treated as a typo; Reset Ack uses 60 like every other simple Ack. */
+    ASSERT(opc_be16_read(&frame[6]) == OPC_RESET_ACK_LENGTH, "ack length is 60 (T11 typo corrected)");
     opc_reset_ack_t ao;
     ASSERT(opc_reset_ack_unpack(frame, na, &ao) == 0, "ack unpack");
     ASSERT(ao.result == OPC_RESULT_OK, "ack result");
