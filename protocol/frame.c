@@ -68,6 +68,11 @@ int opc_frame_parse(const uint8_t *frame, size_t frame_len,
     if (frame_len > OPC_FRAME_MAX) {
         return -1;
     }
+    /* Valid sizes: exactly the 8-byte fixed header (empty request, no reserve)
+     * or at least the full 64-byte common header. 9..63 B is malformed. */
+    if (frame_len != OPC_FIXED_HEADER_SIZE && frame_len < OPC_HEADER_SIZE) {
+        return -1;
+    }
     if (opc_fixed_header_unpack(frame, frame_len, hdr_out) != 0) {
         return -1;
     }

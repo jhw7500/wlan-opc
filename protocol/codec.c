@@ -66,7 +66,7 @@ int opc_fixed_header_unpack(const uint8_t *buf, size_t buf_len, opc_header_t *hd
 
 int opc_header_unpack(const uint8_t *buf, size_t buf_len, opc_header_t *hdr)
 {
-    if (buf_len < OPC_HEADER_SIZE) {
+    if (!buf || !hdr || buf_len < OPC_HEADER_SIZE) {
         return -1;
     }
     return opc_fixed_header_unpack(buf, buf_len, hdr);

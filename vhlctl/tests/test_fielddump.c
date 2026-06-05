@@ -161,8 +161,8 @@ static void test_dump_basic_info(void)
     ack.vendor_code     = 0x00902cfb;
     ack.product_code    = 0xfe03;
     ack.product_subcode = 0x0001;
-    ack.device_status   = OPC_DEVICE_READY;
-    ack.station_type    = OPC_STATION_SINGLE;
+    ack.device_status   = OPC_DEVICE_READY;   /* 0x00000001 */
+    ack.station_type    = OPC_STATION_DUAL;   /* 0x0002 — distinct from the reserve gap (0) */
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t n = opc_get_basic_info_ack_pack(frame, sizeof frame, 7, &ack);
@@ -173,8 +173,10 @@ static void test_dump_basic_info(void)
     fd_dump_basic_info(fp, frame, (size_t)n);
     fclose(fp);
 
-    ASSERT(strstr(buf, "0x00902cfb") != NULL, "dump basicinfo: vendor @offset");
-    ASSERT(strstr(buf, "0xfe03")     != NULL, "dump basicinfo: product @offset");
+    ASSERT(line_has(buf, "vendor_code",   "0x00902cfb"), "dump basicinfo: vendor @offset");
+    ASSERT(line_has(buf, "product_code",  "0xfe03"),     "dump basicinfo: product @offset");
+    ASSERT(line_has(buf, "device_status", "0x00000001"), "dump basicinfo: device_status @offset");
+    ASSERT(line_has(buf, "station_type",  "0x0002"),     "dump basicinfo: station_type @offset (reserve gap honored)");
     free(buf);
 }
 

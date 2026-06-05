@@ -36,15 +36,15 @@ device-info (--hex):
   [hdr] req_id        @02 ( 2B): 00 02                   = 0x0002
   [hdr] sequence      @04 ( 2B): 00 01                   = 1
   [hdr] length        @06 ( 2B): 01 98                   = 408
-  result          @60 ( 2B): 00 00                   = OK
-  error_cause     @62 ( 2B): 00 00                   = 0x0000
-  vendor_code     @64 ( 4B): 00 90 2c fb             = 0x00902cfb
-  essid           @200 (32B): 6a 68 77 5f 77 6c 61 6e 00 …  = 'jhw_wlan'
-  wlan1.rssi      @352 ( 1B): b9                      = -71
+  result          @64 ( 2B): 00 00                   = OK
+  error_cause     @66 ( 2B): 00 00                   = 0x0000
+  vendor_code     @68 ( 4B): 00 90 2c fb             = 0x00902cfb
+  essid           @204 (32B): 6a 68 77 5f 77 6c 61 6e 00 …  = 'jhw_wlan'
+  wlan1.rssi      @356 ( 1B): b9                      = -71
 ```
 - 라인: `라벨 @절대오프셋 (크기B): 원시hex [요약시 …] = 디코딩값`
 - hex는 최대 N바이트(기본 16)까지 표시, 초과분은 `…`
-- 절대오프셋 = `OPC_HEADER_SIZE(60)` + body offset (헤더 필드는 0~7)
+- 절대오프셋 = `OPC_HEADER_SIZE(64)` + body offset (헤더 필드는 0~7)
 
 ## 구조 (접근 A: 디스크립터 테이블 + 범용 포맷 함수)
 

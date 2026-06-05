@@ -248,7 +248,13 @@ static int cmd_device_info(int argc, char **argv)
     ssize_t rn = send_recv(fd, &dst, tx, tn, rx, sizeof rx);
     close(fd);
     if (rn < 0) return 2;
-    if (g_hex) { printf("device-info (--hex):\n"); fd_dump_device_info(stdout, rx, (size_t)rn); return 0; }
+    if (g_hex) {
+        printf("device-info (--hex):\n");
+        fd_dump_device_info(stdout, rx, (size_t)rn);
+        opc_get_device_info_ack_t hack;
+        if (opc_get_device_info_ack_unpack(rx, (size_t)rn, &hack) != 0) return 2;
+        return hack.result == OPC_RESULT_OK ? 0 : 1;
+    }
     opc_get_device_info_ack_t ack;
     if (opc_get_device_info_ack_unpack(rx, (size_t)rn, &ack) != 0) { fprintf(stderr, "device-info: malformed ack\n"); return 2; }
     if (ack.result != OPC_RESULT_OK) {

@@ -6,7 +6,7 @@ device-info 데이터 소스 확인법을 다룬다.
 > 시점별 검증 결과(실측값)는 `tmp/device_test_*.md` 리포트를, 1차 인수 체크리스트는
 > `docs/manual-runthrough.md`를 참조. 이 문서는 **방법**만 담는다.
 
-작업 디렉토리: `/home/jhw/ai/opencode/projects/wlan-package/wlan-opc`
+작업 디렉토리: `<repo-root>/wlan-package/wlan-opc`
 
 ---
 
@@ -77,7 +77,7 @@ $V --dump basic-info             # raw TX/RX 프레임 hexdump
 실장치 opcd는 systemd로 이미 active(UDP 50607).
 
 ```bash
-cd /home/jhw/ai/opencode/projects/wlan-package/wlan-opc
+cd <repo-root>/wlan-package/wlan-opc
 export VHL="./vhlctl/vhlctl --host 192.168.0.100 --port 50607 --timeout 2000"
 
 # 요청/응답

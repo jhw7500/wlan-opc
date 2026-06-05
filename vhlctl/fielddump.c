@@ -27,8 +27,11 @@ static void build_hex(char *out, size_t cap, const uint8_t *p, size_t len)
     size_t shown = (len < 16) ? len : 16;
     size_t o = 0;
     out[0] = '\0';
-    for (size_t i = 0; i < shown && o + 4 < cap; i++)
-        o += (size_t)snprintf(out + o, cap - o, "%02x ", p[i]);
+    for (size_t i = 0; i < shown && o + 4 < cap; i++) {
+        int r = snprintf(out + o, cap - o, "%02x ", p[i]);
+        if (r <= 0 || (size_t)r >= cap - o) break;
+        o += (size_t)r;
+    }
     if (o > 0 && out[o - 1] == ' ') out[--o] = '\0';
     if (len > shown && o + 5 < cap) snprintf(out + o, cap - o, " ...");
 }
@@ -85,6 +88,7 @@ void fd_render(char *out, size_t outcap,
 {
     if (!outcap) return;
     out[0] = '\0';
+    if (!frame || !f) return;
     if (off + f->len > frame_len) {
         snprintf(out, outcap, "  %-18s @%03zu (%2zuB): (truncated)",
                  f->label, off, f->len);
@@ -105,7 +109,7 @@ void fd_render(char *out, size_t outcap,
 
 /* ---- descriptor tables (length-only; offsets accumulate at dump time) ---- */
 
-/* Common 60-byte header — first 8 bytes are meaningful, 8..59 reserve. */
+/* Common 64-byte header — first 8 bytes are meaningful, 8..63 reserve. */
 static const fd_field_t HDR[] = {
     {"protocol_ver", 1, FD_U8},
     {"command_type", 1, FD_U8},
@@ -114,12 +118,14 @@ static const fd_field_t HDR[] = {
     {"length",       2, FD_U16BE},
 };
 
-/* GetBasicInfo Ack body (commands.h: 16 B). */
+/* GetBasicInfo Ack body (commands.h: 16 B = 14 B fields + 2 B reserve before
+ * station_type, per opc_get_basic_info_ack_pack). */
 static const fd_field_t BASIC[] = {
     {"vendor_code",     4, FD_U32BE},
     {"product_code",    2, FD_U16BE},
     {"product_subcode", 2, FD_U16BE},
     {"device_status",   4, FD_U32BE},
+    {"(reserve)",       2, FD_HEX},
     {"station_type",    2, FD_U16BE},
 };
 
@@ -170,6 +176,8 @@ static const fd_field_t DEVINFO[] = {
     {"wlan2.snr",        1, FD_I8},
     {"wlan2.rssi",       1, FD_I8},
     {"wlan2.ap_mac",     6, FD_MAC},
+    {"(pad)",            2, FD_HEX},
+    {"(reserve)",       48, FD_HEX},
 };
 
 /* Indication bodies (indications.c). */
@@ -195,7 +203,7 @@ static const fd_field_t IND_KEEPALIVE[] = {{"timestamp", 32, FD_STR}};
 static void dump_table(FILE *fp, const uint8_t *frame, size_t len,
                        size_t start_off, const fd_field_t *t, size_t n)
 {
-    char line[160];
+    char line[256];
     size_t off = start_off;
     for (size_t i = 0; i < n; i++) {
         fd_render(line, sizeof line, frame, len, off, &t[i]);
