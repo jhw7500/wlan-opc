@@ -86,7 +86,7 @@ static void build_decoded(char *dec, size_t cap, const uint8_t *p, const fd_fiel
 void fd_render(char *out, size_t outcap,
                const uint8_t *frame, size_t frame_len, size_t off, const fd_field_t *f)
 {
-    if (!outcap) return;
+    if (!out || !outcap) return;
     out[0] = '\0';
     if (!frame || !f) return;
     if (off + f->len > frame_len) {
@@ -219,18 +219,21 @@ static void dump_header(FILE *fp, const uint8_t *frame, size_t len)
 
 void fd_dump_basic_info(FILE *fp, const uint8_t *frame, size_t frame_len)
 {
+    if (!fp || !frame) return;
     dump_header(fp, frame, frame_len);
     dump_table(fp, frame, frame_len, OPC_HEADER_SIZE, BASIC, ARRAY_SIZE(BASIC));
 }
 
 void fd_dump_device_info(FILE *fp, const uint8_t *frame, size_t frame_len)
 {
+    if (!fp || !frame) return;
     dump_header(fp, frame, frame_len);
     dump_table(fp, frame, frame_len, OPC_HEADER_SIZE, DEVINFO, ARRAY_SIZE(DEVINFO));
 }
 
 void fd_dump_indication(FILE *fp, uint16_t ind_id, const uint8_t *frame, size_t frame_len)
 {
+    if (!fp || !frame) return;
     const fd_field_t *t = NULL;
     size_t n = 0;
     switch (ind_id) {

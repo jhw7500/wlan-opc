@@ -226,13 +226,11 @@ static int cmd_basic_info(int argc, char **argv)
     if (rn < 0) return 2;
     if (g_hex) {
         printf("basic-info (--hex):\n");
-        fd_dump_basic_info(stdout, rx, (size_t)rn);
         opc_get_basic_info_ack_t ack_hex;   /* basic-info has no result field — validate framing only */
-        if (opc_get_basic_info_ack_unpack(rx, (size_t)rn, &ack_hex) != 0) {
-            fprintf(stderr, "basic-info: malformed ack\n");
-            return 2;
-        }
-        return 0;
+        int bad = (opc_get_basic_info_ack_unpack(rx, (size_t)rn, &ack_hex) != 0);
+        if (bad) fprintf(stderr, "basic-info: malformed ack\n");   /* error before the stdout dump */
+        fd_dump_basic_info(stdout, rx, (size_t)rn);                /* still dump raw bytes for debugging */
+        return bad ? 2 : 0;
     }
     opc_get_basic_info_ack_t ack;
     if (opc_get_basic_info_ack_unpack(rx, (size_t)rn, &ack) != 0) { fprintf(stderr, "basic-info: malformed ack\n"); return 2; }
@@ -259,12 +257,11 @@ static int cmd_device_info(int argc, char **argv)
     if (rn < 0) return 2;
     if (g_hex) {
         printf("device-info (--hex):\n");
-        fd_dump_device_info(stdout, rx, (size_t)rn);
         opc_get_device_info_ack_t ack_hex;
-        if (opc_get_device_info_ack_unpack(rx, (size_t)rn, &ack_hex) != 0) {
-            fprintf(stderr, "device-info: malformed ack\n");
-            return 2;
-        }
+        int bad = (opc_get_device_info_ack_unpack(rx, (size_t)rn, &ack_hex) != 0);
+        if (bad) fprintf(stderr, "device-info: malformed ack\n");   /* error before the stdout dump */
+        fd_dump_device_info(stdout, rx, (size_t)rn);                /* still dump raw bytes for debugging */
+        if (bad) return 2;
         return ack_hex.result == OPC_RESULT_OK ? 0 : 1;
     }
     opc_get_device_info_ack_t ack;

@@ -92,6 +92,9 @@ static ssize_t empty_req_pack(uint8_t *frame, size_t cap,
 static int empty_req_unpack(const uint8_t *frame, size_t frame_len, uint16_t expected_req_id)
 {
     opc_header_t hdr;
+    /* Empty-body requests are exactly the 8-byte fixed header on the wire; a
+     * full 64-byte-header frame for one of these IDs is malformed. */
+    if (frame_len != OPC_FIXED_HEADER_SIZE) return -1;
     if (opc_frame_parse(frame, frame_len, &hdr, NULL, NULL) != 0) return -1;
     if (hdr.command_type != OPC_CMD_REQUEST)        return -1;
     if (hdr.req_indication_id != expected_req_id)   return -1;
