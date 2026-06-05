@@ -186,10 +186,10 @@ vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND
 - `--dump` — 프레임 전체 raw hexdump(16B/줄, 필드 경계 없음). TX/RX/listen 수신(IND)에 적용.
 - `--hex` — **필드 단위 분해**: `라벨 @절대오프셋 (크기): raw hex = 디코딩값`. `basic-info`/`device-info` ack와 `listen` 수신 indication에 적용. 켜면 그 명령의 디코드 출력을 대체하며, `--dump`와 독립(둘 다 켜면 둘 다 출력).
 ```
-$VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@060~) 분해
-  vendor_code        @064 ( 4B): 00 90 2c fb       = 0x00902cfb
-  essid              @200 (32B): 6a 68 77 5f 77 …  = 'jhw_wlan'
-  wlan1.rssi         @295 ( 1B): b9                = -71
+$VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) 분해
+  vendor_code        @068 ( 4B): 00 90 2c fb       = 0x00902cfb
+  essid              @204 (32B): 6a 68 77 5f 77 …  = 'jhw_wlan'
+  wlan1.rssi         @299 ( 1B): b9                = -71
 ./vhlctl/vhlctl --hex listen --bind 0.0.0.0:9999   # 수신 indication을 필드별 hex로
 ```
 
