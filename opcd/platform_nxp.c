@@ -53,6 +53,15 @@
 #define WIFI_SH_TIMEOUT_MS 900
 #define WIFI_SH_POLL_MS    10
 
+/* ChangeIpAddress replaces eth0's management IP at runtime via `ip addr`.
+ * Verified on-target: systemd-networkd does NOT revert the change (a .network
+ * /run override is instead reconciled away by wifi_init.sh, which owns eth0
+ * routing), and wifi_init.sh's host-scope mlan IP /32 is left intact. Runtime
+ * only — a reboot restores 22-eth0.network's Address, matching the spec's
+ * "volatile, reverts on power cycle". Board-specific (eth0 + iproute2). */
+#define IP_BIN_SH            "/bin/sh"
+#define IP_CHANGE_TIMEOUT_MS 900
+
 /* Parse "-66 dBm" / "-66dBm" into an int8 (signed dBm). */
 static int parse_signed_dbm(const char *s, int8_t *out)
 {
@@ -482,36 +491,35 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
     return 0;
 }
 
-/* Run "wifi.sh <iface> freq <mhz>" synchronously. wifi.sh only rewrites
- * scan_freq= / freq_list= in wpa_supplicant-<iface>.conf — fast (~ms) and
- * comfortably within the OPC 1-second response budget. wpa_supplicant
- * restart is intentionally NOT triggered here so the active link is not
- * dropped on every Set-Radio; the operator triggers reconnect explicitly. */
-static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_ms)
+/* Run argv[] (path = absolute binary, argv[0] = program name) to completion
+ * with a bounded wait: poll waitpid(WNOHANG) against a monotonic deadline and
+ * SIGKILL+reap on overrun, so a stalled child (SD/NFS fsync) cannot exceed the
+ * OPC 1-second response budget. `label` tags diagnostics. Returns 0 on child
+ * exit status 0, -1 otherwise. */
+static int run_argv_bounded(const char *label, const char *path,
+                            char *const argv[], long timeout_ms)
 {
-    char freq_buf[8];
-    snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
-
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "opcd: nxp_apply_radio_config: fork failed: %s\n", strerror(errno));
+        fprintf(stderr, "opcd: %s: fork failed: %s\n", label, strerror(errno));
         return -1;
     }
     if (pid == 0) {
-        execl(WIFI_SH, "wifi.sh", iface, "freq", freq_buf, (char *)NULL);
-        /* execl returned: fprintf is not async-signal-safe post-fork.
+        execv(path, argv);
+        /* execv returned: fprintf is not async-signal-safe post-fork.
          * Diagnose via write() so the parent's "status=0x7f00" is
-         * distinguishable from wifi.sh itself returning 127. */
-        static const char msg[] =
-            "opcd: nxp_apply_radio_config: execl " WIFI_SH " failed\n";
-        (void)!write(STDERR_FILENO, msg, sizeof msg - 1);
+         * distinguishable from the child itself returning 127. */
+        static const char pfx[] = "opcd: run_argv_bounded: execv failed: ";
+        (void)!write(STDERR_FILENO, pfx, sizeof pfx - 1);
+        (void)!write(STDERR_FILENO, path, strlen(path));
+        (void)!write(STDERR_FILENO, "\n", 1);
         _exit(127);
     }
 
-    /* Bounded wait: poll with WNOHANG + monotonic deadline. wifi.sh freq is
-     * awk + install_0644_sync (normally ms), but backing-store stalls (SD
-     * card / NFS fsync) could block indefinitely. platform.h's "bounded
-     * short timeout" contract requires we cap and SIGKILL on overrun. */
+    /* Bounded wait: poll with WNOHANG + monotonic deadline. The forked tools
+     * are normally ms-fast, but backing-store stalls (SD card / NFS fsync)
+     * could block indefinitely. platform.h's "bounded short timeout" contract
+     * requires we cap and SIGKILL on overrun. */
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     int status = 0;
@@ -523,16 +531,12 @@ static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_m
              * unreachable for our own forked pid under the current model.
              * Still SIGKILL+reap defensively so a future signal-handling
              * change cannot cause this branch to leak the child. */
-            fprintf(stderr, "opcd: nxp_apply_radio_config: waitpid failed: %s\n",
-                    strerror(errno));
+            fprintf(stderr, "opcd: %s: waitpid failed: %s\n", label, strerror(errno));
             kill(pid, SIGKILL);
             pid_t wr;
             while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
-            if (wr < 0) {
-                fprintf(stderr,
-                        "opcd: nxp_apply_radio_config: defensive reap failed: %s\n",
-                        strerror(errno));
-            }
+            if (wr < 0)
+                fprintf(stderr, "opcd: %s: defensive reap failed: %s\n", label, strerror(errno));
             return -1;
         }
         struct timespec now;
@@ -540,18 +544,15 @@ static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_m
         long elapsed_ms = (now.tv_sec  - start.tv_sec)  * 1000L
                         + (now.tv_nsec - start.tv_nsec) / 1000000L;
         if (elapsed_ms >= timeout_ms) {
-            fprintf(stderr,
-                    "opcd: nxp_apply_radio_config: wifi.sh %s freq %u timed out after %ldms, sending SIGKILL\n",
-                    iface, freq_mhz, elapsed_ms);
+            fprintf(stderr, "opcd: %s: '%s' timed out after %ldms, sending SIGKILL\n",
+                    label, path, elapsed_ms);
             kill(pid, SIGKILL);
             /* Reap so the SIGKILL'd child is not left as a zombie. */
             pid_t wr;
             while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
-            if (wr < 0) {
-                fprintf(stderr,
-                        "opcd: nxp_apply_radio_config: waitpid reap after SIGKILL failed: %s\n",
-                        strerror(errno));
-            }
+            if (wr < 0)
+                fprintf(stderr, "opcd: %s: waitpid reap after SIGKILL failed: %s\n",
+                        label, strerror(errno));
             return -1;
         }
         /* Cap the sleep so the last poll never overruns the deadline.
@@ -562,12 +563,27 @@ static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_m
         nanosleep(&ts, NULL);
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr,
-                "opcd: nxp_apply_radio_config: wifi.sh %s freq %u failed (status=0x%x)\n",
-                iface, freq_mhz, (unsigned)status);
+        fprintf(stderr, "opcd: %s: '%s' failed (status=0x%x)\n",
+                label, path, (unsigned)status);
         return -1;
     }
     return 0;
+}
+
+/* Run "wifi.sh <iface> freq <mhz>" synchronously. wifi.sh only rewrites
+ * scan_freq= / freq_list= in wpa_supplicant-<iface>.conf — fast (~ms) and
+ * comfortably within the OPC 1-second response budget. wpa_supplicant
+ * restart is intentionally NOT triggered here so the active link is not
+ * dropped on every Set-Radio; the operator triggers reconnect explicitly. */
+static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_ms)
+{
+    char freq_buf[8];
+    snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
+    /* const char *[] + cast: execv never writes argv, and string literals must
+     * not be exposed as char* (C11 6.4.5p7). */
+    const char *argv[] = { "wifi.sh", iface, "freq", freq_buf, NULL };
+    return run_argv_bounded("nxp_apply_radio_config", WIFI_SH,
+                            (char *const *)argv, timeout_ms);
 }
 
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
@@ -622,10 +638,77 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
     return 0;
 }
 
+/* Portable population count — avoids the GCC __builtin_popcount extension
+ * (this is opcd's only bit-count site). */
+static int count_set_bits(uint32_t v)
+{
+    int n = 0;
+    for (; v; v >>= 1) n += (int)(v & 1u);
+    return n;
+}
+
+/* Apply a committed IP-config slot to eth0's management IP at runtime.
+ *
+ * eth0 routing on this board is owned by wifi_init.sh (it assigns the mlan0 IP
+ * as a host-scope /32 and manages a table-100 policy rule, actively overriding
+ * 22-eth0.network). A systemd-networkd override therefore does not stick, but a
+ * direct `ip addr` change does (verified on-target: networkd does not revert it
+ * and the new address survives). Runtime only, so a reboot restores
+ * 22-eth0.network's Address — the spec's "volatile, reverts on power cycle".
+ *
+ * We delete every scope-global, non-/32 IPv4 on eth0 (the management address;
+ * wifi_init.sh's /32 is intentionally kept) and add the new one, in a single
+ * /bin/sh pipeline. gateway/essid/ntp are out of scope (they interact with
+ * wifi_init.sh routing / wpa_supplicant) and are not applied. */
 static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
 {
-    (void)slot;
-    return 0;
+    /* Reject a non-contiguous or empty netmask — cannot be a /prefix. */
+    int prefix = count_set_bits(slot->subnet_mask);
+    uint32_t recon = (prefix == 0) ? 0u : (uint32_t)(0xFFFFFFFFu << (32 - prefix));
+    if (prefix < 1 || prefix > 32 || recon != slot->subnet_mask) {
+        fprintf(stderr, "opcd: nxp_apply_ip_change: non-contiguous netmask 0x%08x\n",
+                slot->subnet_mask);
+        return -1;
+    }
+
+    /* Reject non-unicast targets BEFORE touching eth0: deleting the current
+     * address and then failing to add a 0.0.0.0 / broadcast / multicast one
+     * would leave eth0 with no management IP. */
+    uint32_t ip = slot->ip_address;
+    uint8_t  hi = (uint8_t)((ip >> 24) & 0xff);
+    if (ip == 0 || ip == 0xFFFFFFFFu || hi == 127 || hi >= 224) {  /* 0/loopback/bcast/mcast+ */
+        fprintf(stderr, "opcd: nxp_apply_ip_change: non-unicast target 0x%08x\n", ip);
+        return -1;
+    }
+
+    char ipbuf[16];
+    snprintf(ipbuf, sizeof ipbuf, "%u.%u.%u.%u",
+             (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
+
+    /* add BEFORE delete so a failed add leaves the current management IP in
+     * place (delete-then-add could strand eth0 with no management address, with
+     * no recovery short of reboot). On add success, remove every OTHER
+     * scope-global non-/32 address — keep=new and wifi_init.sh's /32 are
+     * excluded. ipbuf is digits-and-dots and prefix is 1..32 — injection-safe. */
+    char cmd[320];
+    int n = snprintf(cmd, sizeof cmd,
+        "ip addr add %s/%d dev eth0 && "
+        "ip -4 addr show dev eth0 | "
+        "awk -v keep=%s/%d '/scope global/&&!/\\/32/&&$2!=keep{print $2}' | "
+        "xargs -r -I{} ip addr del {} dev eth0", ipbuf, prefix, ipbuf, prefix);
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        fprintf(stderr, "opcd: nxp_apply_ip_change: command too long\n");
+        return -1;
+    }
+
+    /* const char *[] + cast: execv never writes argv, and cmd/literals must not
+     * be exposed as char* (C11 6.4.5p7). */
+    const char *argv[] = { "sh", "-c", cmd, NULL };
+    int ret = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
+                               (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
+    fprintf(stderr, "opcd: nxp_apply_ip_change: eth0 → %s/%d%s\n", ipbuf, prefix,
+            ret == 0 ? " (ip addr)" : " (FAILED)");
+    return ret;
 }
 
 static int nxp_prepare_reset(void)

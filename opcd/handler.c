@@ -571,11 +571,22 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     uint16_t n = st->ip_change_list_no;
     if (n < 1 || n > OPC_IPCFG_LIST_MAX_SLOTS) { st->ip_change_pending = false; return; }
     const opc_ipcfg_entry_t *e = &st->ip_list.slots[n - 1];
-    /* In a real target this would call out to a platform hook that actually
-     * rewrites the active IP/ESSID. For the 1st-stage scaffold we just log it. */
     fprintf(stderr, "opcd: apply pending IP change → slot %u ip=0x%08X essid=%s\n",
             n, e->ip_address, e->essid);
+
+    /* Hand off to the platform backend to rewrite the active IP (stub no-ops;
+     * nxp reconfigures eth0's management IP directly via ip addr). Clear the
+     * indication target only on success — a failed apply means the IP did not
+     * move, so the existing indication session stays valid. Per platform.h the
+     * vtable is fully populated after init(), so only the registration guard
+     * (opcd_platform() can be NULL before register) is needed. */
+    const opcd_platform_ops_t *plat = opcd_platform();
+    int rc = plat ? plat->apply_ip_change(e) : -1;
+    if (rc != 0)
+        fprintf(stderr, "opcd: apply pending IP change: platform apply_ip_change failed\n");
+    else
+        st->indication_enabled = false;   /* IP changed → indication target invalid */
+
     st->ip_change_pending = false;
-    st->indication_enabled = false;       /* IP changes invalidate indication target */
     memset(&st->ip_change_list_no, 0, sizeof st->ip_change_list_no);
 }
