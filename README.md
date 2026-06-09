@@ -16,17 +16,19 @@ NXP88W9098 + i.MX8MM ARM64 targets.
 
 ## Build
 
-ARM64 cross-build (default toolchain `aarch64-linux-gnu-*`):
+Per-architecture out-of-tree build — native (host) and arm64 (target) binaries
+coexist under `build/native/` and `build/arm64/`, so neither clobbers the other:
 
 ```
-make
+make            # = arm64 cross-build (target deploy)  -> build/arm64/
+make native     # host build (sanity checks)           -> build/native/
+make both       # both, side by side
+make check      # native build + host unit tests
+make clean      # remove build/
 ```
 
-Native build for sanity checks:
-
-```
-CC=cc AR=ar make
-```
+`PLATFORM` (stub|nxp) is orthogonal to arch and only affects opcd (vhlctl is
+platform-independent); cross-deploy uses `make PLATFORM=nxp`.
 
 ## Install layout (target)
 

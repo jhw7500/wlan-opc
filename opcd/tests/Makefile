@@ -1,47 +1,59 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2
 CFLAGS  += -I.. -I../../protocol
-LDFLAGS += -L../../protocol
+
+# Out-of-tree: test objects + binaries land under build/<arch>/opcd/tests/.
+# Reuses the opcd objects already compiled into build/<arch>/opcd/ (so the
+# tests link against the host build without dragging in platform_nxp.c) and
+# the protocol library from build/<arch>/protocol/. Defaults to native.
+BUILDROOT ?= $(abspath ../../build/native)
+OPCDOBJ   := $(BUILDROOT)/opcd
+PROTODIR  := $(BUILDROOT)/protocol
+TESTDIR   := $(BUILDROOT)/opcd/tests
+
+LDFLAGS += -L$(PROTODIR)
 LDLIBS  += -lopcproto
 
-# Object files from the opcd source tree, recompiled for the host so the
-# tests can link against them without dragging in platform_nxp.c (which is
-# target-specific).
-OPCD_OBJS_INVENTORY := ../inventory.o ../json_util.o
-OPCD_OBJS_NTP       := ../ntp_parse.o
-OPCD_OBJS_JSON      := ../json_util.o
-OPCD_OBJS_SNAPSHOT  := ../snapshot.o
+OPCD_OBJS_INVENTORY := $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o
+OPCD_OBJS_NTP       := $(OPCDOBJ)/ntp_parse.o
+OPCD_OBJS_JSON      := $(OPCDOBJ)/json_util.o
+OPCD_OBJS_SNAPSHOT  := $(OPCDOBJ)/snapshot.o
 # test_handler drives opcd_dispatch end-to-end, so it links the handler and
 # everything it depends on, with the host-only stub platform backend.
-OPCD_OBJS_HANDLER   := ../handler.o ../store.o ../indication.o ../inventory.o \
-                       ../json_util.o ../snapshot.o ../platform_stub.o
+OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/indication.o \
+                       $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/snapshot.o \
+                       $(OPCDOBJ)/platform_stub.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler
+BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
-all: $(TESTS)
+.PHONY: all check clean
+all: $(BINS)
 
-test_inventory: test_inventory.o $(OPCD_OBJS_INVENTORY) ../../protocol/libopcproto.a
-	$(CC) $(CFLAGS) -o $@ test_inventory.o $(OPCD_OBJS_INVENTORY) $(LDFLAGS) $(LDLIBS)
+$(TESTDIR)/test_inventory: $(TESTDIR)/test_inventory.o $(OPCD_OBJS_INVENTORY) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_inventory.o $(OPCD_OBJS_INVENTORY) $(LDFLAGS) $(LDLIBS)
 
-test_ntp_parse: test_ntp_parse.o $(OPCD_OBJS_NTP)
-	$(CC) $(CFLAGS) -o $@ test_ntp_parse.o $(OPCD_OBJS_NTP)
+$(TESTDIR)/test_ntp_parse: $(TESTDIR)/test_ntp_parse.o $(OPCD_OBJS_NTP)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_ntp_parse.o $(OPCD_OBJS_NTP)
 
-test_json_util: test_json_util.o $(OPCD_OBJS_JSON)
-	$(CC) $(CFLAGS) -o $@ test_json_util.o $(OPCD_OBJS_JSON)
+$(TESTDIR)/test_json_util: $(TESTDIR)/test_json_util.o $(OPCD_OBJS_JSON)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_json_util.o $(OPCD_OBJS_JSON)
 
-test_snapshot: test_snapshot.o $(OPCD_OBJS_SNAPSHOT) ../../protocol/libopcproto.a
-	$(CC) $(CFLAGS) -o $@ test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(LDFLAGS) $(LDLIBS)
+$(TESTDIR)/test_snapshot: $(TESTDIR)/test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(LDFLAGS) $(LDLIBS)
 
-test_handler: test_handler.o $(OPCD_OBJS_HANDLER) ../../protocol/libopcproto.a
-	$(CC) $(CFLAGS) -o $@ test_handler.o $(OPCD_OBJS_HANDLER) $(LDFLAGS) $(LDLIBS)
+$(TESTDIR)/test_handler: $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(LDFLAGS) $(LDLIBS)
 
-%.o: %.c
+$(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-.PHONY: check clean
-check: $(TESTS)
-	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
+$(TESTDIR):
+	mkdir -p $(TESTDIR)
+
+check: $(BINS)
+	@for t in $(BINS); do echo "== $$t =="; $$t || exit 1; done
 	@echo "all opcd unit tests passed"
 
 clean:
-	rm -f *.o $(TESTS)
+	rm -rf $(TESTDIR)

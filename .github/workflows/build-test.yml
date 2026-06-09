@@ -78,25 +78,25 @@ jobs:
         run: |
           set -euo pipefail
           make
-          test -f protocol/libopcproto.a
-          test -f opcd/opcd
-          test -f vhlctl/vhlctl
+          test -f build/arm64/protocol/libopcproto.a
+          test -f build/arm64/opcd/opcd
+          test -f build/arm64/vhlctl/vhlctl
 
       - name: Verify arm64 binaries
         run: |
           set -euo pipefail
-          file opcd/opcd vhlctl/vhlctl protocol/libopcproto.a
-          file opcd/opcd    | grep -q 'ARM aarch64'
-          file vhlctl/vhlctl | grep -q 'ARM aarch64'
+          file build/arm64/opcd/opcd build/arm64/vhlctl/vhlctl build/arm64/protocol/libopcproto.a
+          file build/arm64/opcd/opcd     | grep -q 'ARM aarch64'
+          file build/arm64/vhlctl/vhlctl | grep -q 'ARM aarch64'
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: wlan-opc-arm64
           path: |
-            opcd/opcd
-            vhlctl/vhlctl
-            protocol/libopcproto.a
+            build/arm64/opcd/opcd
+            build/arm64/vhlctl/vhlctl
+            build/arm64/protocol/libopcproto.a
           if-no-files-found: error
           retention-days: 7
 
