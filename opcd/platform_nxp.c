@@ -675,7 +675,8 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
      * address and then failing to add a 0.0.0.0 / broadcast / multicast one
      * would leave eth0 with no management IP. */
     uint32_t ip = slot->ip_address;
-    if (ip == 0 || ip == 0xFFFFFFFFu || ((ip >> 24) & 0xff) >= 224) {
+    uint8_t  hi = (uint8_t)((ip >> 24) & 0xff);
+    if (ip == 0 || ip == 0xFFFFFFFFu || hi == 127 || hi >= 224) {  /* 0/loopback/bcast/mcast+ */
         fprintf(stderr, "opcd: nxp_apply_ip_change: non-unicast target 0x%08x\n", ip);
         return -1;
     }

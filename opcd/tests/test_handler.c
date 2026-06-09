@@ -291,7 +291,8 @@ int main(void)
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     stub_apply_ip_reset();
-    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*192.168.1.101*/);
+    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*192.168.1.101*/);
+    ASSERT(r == OPC_RESULT_OK, "change-ip: set-ip-list start ok");
     r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
     ASSERT(r == OPC_RESULT_OK, "change-ip: set-ip-list commit ok");
     r = do_change_ip(&st, CIP, 1);
