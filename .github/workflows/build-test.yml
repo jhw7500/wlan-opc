@@ -71,9 +71,6 @@ jobs:
           set -euo pipefail
           make check
 
-      - name: Clean before cross-compile
-        run: make clean
-
       - name: Cross-compile (default = aarch64)
         run: |
           set -euo pipefail
