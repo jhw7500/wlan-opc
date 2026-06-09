@@ -142,17 +142,19 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
  * accessors below (keeps them out of the global namespace). */
 static unsigned s_apply_ip_calls   = 0;
 static uint32_t s_apply_ip_last_ip = 0;
+static int      s_apply_ip_fail    = 0;
 static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot)
 {
     s_apply_ip_calls++;
     s_apply_ip_last_ip = slot->ip_address;
-    return 0;
+    return s_apply_ip_fail ? -1 : 0;
 }
 
 /* Test-only accessors (declared extern in test_handler.c). */
-unsigned stub_apply_ip_calls(void)   { return s_apply_ip_calls; }
-uint32_t stub_apply_ip_last_ip(void) { return s_apply_ip_last_ip; }
-void     stub_apply_ip_reset(void)   { s_apply_ip_calls = 0; s_apply_ip_last_ip = 0; }
+unsigned stub_apply_ip_calls(void)        { return s_apply_ip_calls; }
+uint32_t stub_apply_ip_last_ip(void)      { return s_apply_ip_last_ip; }
+void     stub_apply_ip_reset(void)        { s_apply_ip_calls = 0; s_apply_ip_last_ip = 0; s_apply_ip_fail = 0; }
+void     stub_apply_ip_set_fail(int fail) { s_apply_ip_fail = fail; }
 
 static int stub_prepare_reset(void)
 {

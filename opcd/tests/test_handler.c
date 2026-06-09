@@ -30,6 +30,7 @@ static int failures = 0;
 extern unsigned stub_apply_ip_calls(void);
 extern uint32_t stub_apply_ip_last_ip(void);
 extern void     stub_apply_ip_reset(void);
+extern void     stub_apply_ip_set_fail(int fail);
 
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
@@ -300,6 +301,22 @@ int main(void)
     opcd_apply_pending_ip_change(&st);   /* main loop applies after logout response */
     ASSERT(stub_apply_ip_calls() == 1, "change-ip: platform apply_ip_change called on logout");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "change-ip: apply gets committed slot ip");
+
+    /* 14. A failed platform apply must NOT clear indication — the IP did not
+     *     actually move, so the existing indication session stays valid. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    (void)do_set_indication(&st, CIP, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(st.indication_enabled, "change-ip fail: indication enabled precondition");
+    stub_apply_ip_reset();
+    stub_apply_ip_set_fail(1);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    opcd_apply_pending_ip_change(&st);   /* platform apply fails */
+    ASSERT(stub_apply_ip_calls() == 1, "change-ip fail: platform apply attempted");
+    ASSERT(st.indication_enabled, "change-ip fail: indication kept (IP unchanged)");
+    stub_apply_ip_set_fail(0);
 
     unlink(g_pw_path);
     unlink(g_iplist_path);

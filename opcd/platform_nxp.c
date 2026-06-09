@@ -509,8 +509,10 @@ static int run_argv_bounded(const char *label, const char *path,
         /* execv returned: fprintf is not async-signal-safe post-fork.
          * Diagnose via write() so the parent's "status=0x7f00" is
          * distinguishable from the child itself returning 127. */
-        static const char msg[] = "opcd: run_argv_bounded: execv failed\n";
-        (void)!write(STDERR_FILENO, msg, sizeof msg - 1);
+        static const char pfx[] = "opcd: run_argv_bounded: execv failed: ";
+        (void)!write(STDERR_FILENO, pfx, sizeof pfx - 1);
+        (void)!write(STDERR_FILENO, path, strlen(path));
+        (void)!write(STDERR_FILENO, "\n", 1);
         _exit(127);
     }
 
@@ -682,13 +684,17 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
     snprintf(ipbuf, sizeof ipbuf, "%u.%u.%u.%u",
              (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
 
-    /* ipbuf is digits-and-dots and prefix is 1..32, so the command is
-     * injection-safe. awk drops the /32 host-scope address wifi_init.sh owns. */
-    char cmd[256];
+    /* add BEFORE delete so a failed add leaves the current management IP in
+     * place (delete-then-add could strand eth0 with no management address, with
+     * no recovery short of reboot). On add success, remove every OTHER
+     * scope-global non-/32 address — keep=new and wifi_init.sh's /32 are
+     * excluded. ipbuf is digits-and-dots and prefix is 1..32 — injection-safe. */
+    char cmd[320];
     int n = snprintf(cmd, sizeof cmd,
-        "ip -4 addr show dev eth0 | awk '/scope global/&&!/\\/32/{print $2}' | "
-        "xargs -r -I{} ip addr del {} dev eth0; "
-        "ip addr add %s/%d dev eth0", ipbuf, prefix);
+        "ip addr add %s/%d dev eth0 && "
+        "ip -4 addr show dev eth0 | "
+        "awk -v keep=%s/%d '/scope global/&&!/\\/32/&&$2!=keep{print $2}' | "
+        "xargs -r -I{} ip addr del {} dev eth0", ipbuf, prefix, ipbuf, prefix);
     if (n < 0 || (size_t)n >= sizeof cmd) {
         fprintf(stderr, "opcd: nxp_apply_ip_change: command too long\n");
         return -1;
