@@ -577,10 +577,11 @@ static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_m
 {
     char freq_buf[8];
     snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
-    char *const argv[] = {
-        (char *)"wifi.sh", (char *)iface, (char *)"freq", freq_buf, (char *)NULL
-    };
-    return run_argv_bounded("nxp_apply_radio_config", WIFI_SH, argv, timeout_ms);
+    /* const char *[] + cast: execv never writes argv, and string literals must
+     * not be exposed as char* (C11 6.4.5p7). */
+    const char *argv[] = { "wifi.sh", iface, "freq", freq_buf, NULL };
+    return run_argv_bounded("nxp_apply_radio_config", WIFI_SH,
+                            (char *const *)argv, timeout_ms);
 }
 
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
@@ -635,6 +636,15 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
     return 0;
 }
 
+/* Portable population count — avoids the GCC __builtin_popcount extension
+ * (this is opcd's only bit-count site). */
+static int count_set_bits(uint32_t v)
+{
+    int n = 0;
+    for (; v; v >>= 1) n += (int)(v & 1u);
+    return n;
+}
+
 /* Apply a committed IP-config slot to eth0's management IP at runtime.
  *
  * eth0 routing on this board is owned by wifi_init.sh (it assigns the mlan0 IP
@@ -651,7 +661,7 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
 {
     /* Reject a non-contiguous or empty netmask — cannot be a /prefix. */
-    int prefix = __builtin_popcount(slot->subnet_mask);
+    int prefix = count_set_bits(slot->subnet_mask);
     uint32_t recon = (prefix == 0) ? 0u : (uint32_t)(0xFFFFFFFFu << (32 - prefix));
     if (prefix < 1 || prefix > 32 || recon != slot->subnet_mask) {
         fprintf(stderr, "opcd: nxp_apply_ip_change: non-contiguous netmask 0x%08x\n",
@@ -659,10 +669,18 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
         return -1;
     }
 
+    /* Reject non-unicast targets BEFORE touching eth0: deleting the current
+     * address and then failing to add a 0.0.0.0 / broadcast / multicast one
+     * would leave eth0 with no management IP. */
+    uint32_t ip = slot->ip_address;
+    if (ip == 0 || ip == 0xFFFFFFFFu || ((ip >> 24) & 0xff) >= 224) {
+        fprintf(stderr, "opcd: nxp_apply_ip_change: non-unicast target 0x%08x\n", ip);
+        return -1;
+    }
+
     char ipbuf[16];
     snprintf(ipbuf, sizeof ipbuf, "%u.%u.%u.%u",
-             (slot->ip_address >> 24) & 0xff, (slot->ip_address >> 16) & 0xff,
-             (slot->ip_address >> 8) & 0xff, slot->ip_address & 0xff);
+             (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
 
     /* ipbuf is digits-and-dots and prefix is 1..32, so the command is
      * injection-safe. awk drops the /32 host-scope address wifi_init.sh owns. */
@@ -676,8 +694,11 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
         return -1;
     }
 
-    char *const argv[] = { (char *)"sh", (char *)"-c", cmd, (char *)NULL };
-    int ret = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH, argv, IP_CHANGE_TIMEOUT_MS);
+    /* const char *[] + cast: execv never writes argv, and cmd/literals must not
+     * be exposed as char* (C11 6.4.5p7). */
+    const char *argv[] = { "sh", "-c", cmd, NULL };
+    int ret = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
+                               (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
     fprintf(stderr, "opcd: nxp_apply_ip_change: eth0 → %s/%d%s\n", ipbuf, prefix,
             ret == 0 ? " (ip addr)" : " (FAILED)");
     return ret;

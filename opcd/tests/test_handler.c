@@ -25,10 +25,11 @@
 
 static int failures = 0;
 
-/* Set by platform_stub's stub_apply_ip_change so the change-ip → platform apply
- * wiring (deferred until logout) is observable from this handler test. */
-extern unsigned g_stub_apply_ip_calls;
-extern uint32_t g_stub_apply_ip_last_ip;
+/* platform_stub accessors: observe the change-ip → platform apply wiring
+ * (deferred until logout) from this handler test. */
+extern unsigned stub_apply_ip_calls(void);
+extern uint32_t stub_apply_ip_last_ip(void);
+extern void     stub_apply_ip_reset(void);
 
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
@@ -288,18 +289,17 @@ int main(void)
      *     the handler→platform wiring that the 1st-stage scaffold left as a stub. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
-    g_stub_apply_ip_calls   = 0;
-    g_stub_apply_ip_last_ip = 0;
+    stub_apply_ip_reset();
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*192.168.1.101*/);
     r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
     ASSERT(r == OPC_RESULT_OK, "change-ip: set-ip-list commit ok");
     r = do_change_ip(&st, CIP, 1);
     ASSERT(r == OPC_RESULT_OK, "change-ip: accepted");
-    ASSERT(g_stub_apply_ip_calls == 0, "change-ip: apply deferred (not before logout)");
+    ASSERT(stub_apply_ip_calls() == 0, "change-ip: apply deferred (not before logout)");
     ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "change-ip: logout ok");
     opcd_apply_pending_ip_change(&st);   /* main loop applies after logout response */
-    ASSERT(g_stub_apply_ip_calls == 1, "change-ip: platform apply_ip_change called on logout");
-    ASSERT(g_stub_apply_ip_last_ip == 0xC0A80165, "change-ip: apply gets committed slot ip");
+    ASSERT(stub_apply_ip_calls() == 1, "change-ip: platform apply_ip_change called on logout");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "change-ip: apply gets committed slot ip");
 
     unlink(g_pw_path);
     unlink(g_iplist_path);

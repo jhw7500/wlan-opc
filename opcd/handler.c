@@ -575,7 +575,7 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
             n, e->ip_address, e->essid);
 
     /* Hand off to the platform backend to rewrite the active IP (stub no-ops;
-     * nxp drops a /run override of 22-eth0.network and reconfigures eth0). */
+     * nxp reconfigures eth0's management IP directly via ip addr). */
     const opcd_platform_ops_t *plat = opcd_platform();
     if (plat && plat->apply_ip_change) {
         if (plat->apply_ip_change(e) != 0)
