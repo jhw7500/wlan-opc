@@ -136,9 +136,15 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
     return 0;
 }
 
+/* Test observability: count apply_ip_change calls and record the last slot's IP
+ * so the change-ip → platform wiring (deferred until logout) is verifiable from
+ * the handler test. Harmless in production (two words of unused state). */
+unsigned g_stub_apply_ip_calls   = 0;
+uint32_t g_stub_apply_ip_last_ip = 0;
 static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot)
 {
-    (void)slot;
+    g_stub_apply_ip_calls++;
+    g_stub_apply_ip_last_ip = slot->ip_address;
     return 0;
 }
 

@@ -17,6 +17,7 @@
 
 #include "../handler.h"
 #include "../opcd_state.h"
+#include "../platform.h"
 #include "../../protocol/codec.h"
 #include "../../protocol/commands.h"
 #include "../../protocol/ids.h"
@@ -24,12 +25,18 @@
 
 static int failures = 0;
 
+/* Set by platform_stub's stub_apply_ip_change so the change-ip → platform apply
+ * wiring (deferred until logout) is observable from this handler test. */
+extern unsigned g_stub_apply_ip_calls;
+extern uint32_t g_stub_apply_ip_last_ip;
+
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
     else         { fprintf(stdout, "PASS %s\n", label); }                     \
 } while (0)
 
 static char g_pw_path[128];
+static char g_iplist_path[128];
 
 static void init_state(opcd_state_t *st, const char *pw)
 {
@@ -37,6 +44,7 @@ static void init_state(opcd_state_t *st, const char *pw)
     st->conf.login_idle_s         = 3600;
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->paths.password = g_pw_path;
+    st->paths.ip_list  = g_iplist_path;
     st->udp_fd      = -1;            /* indication send is a no-op when < 0 */
     st->boot_status = OPC_DEVICE_READY;
     st->radio.station_type = OPC_STATION_SINGLE;
@@ -131,13 +139,63 @@ static uint16_t do_set_indication(opcd_state_t *st, uint32_t cip,
     return ack.result;
 }
 
+/* Pack one SetIpConfigList entry (ip_host, /24), dispatch, return ack result. */
+static uint16_t do_set_ip_list(opcd_state_t *st, uint32_t cip, uint16_t slot,
+                               uint16_t flag, uint32_t ip_host)
+{
+    opc_set_ip_config_list_req_t req;
+    memset(&req, 0, sizeof req);
+    req.entry_count              = 1;
+    req.entries[0].boundary_flag = flag;
+    req.entries[0].list_number   = slot;
+    req.entries[0].ip_address    = ip_host;
+    req.entries[0].subnet_mask   = 0xFFFFFF00u;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_ip_config_list_req_pack(frame, sizeof frame, 5, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_ip_config_list_ack_t ack;
+    if (opc_set_ip_config_list_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    return ack.result;
+}
+
+/* Pack a ChangeIpAddress request, dispatch, return ack result. */
+static uint16_t do_change_ip(opcd_state_t *st, uint32_t cip, uint16_t slot)
+{
+    opc_change_ip_address_req_t req;
+    memset(&req, 0, sizeof req);
+    req.list_number = slot;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_change_ip_address_req_pack(frame, sizeof frame, 6, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_change_ip_address_ack_t ack;
+    if (opc_change_ip_address_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    return ack.result;
+}
+
 int main(void)
 {
     const uint32_t CIP = 0x7f000001;   /* 127.0.0.1, host order */
+    opcd_platform_register();          /* link-time stub backend (needed for change-ip apply hook) */
     /* CWD-relative, not /tmp: avoids the predictable-shared-path symlink class
      * (CWE-377). `make check` runs this in opcd/tests/, a build-owned dir. */
     snprintf(g_pw_path, sizeof g_pw_path, "test_handler_pw_%d.tmp", (int)getpid());
+    snprintf(g_iplist_path, sizeof g_iplist_path, "test_handler_iplist_%d.tmp", (int)getpid());
     unlink(g_pw_path);
+    unlink(g_iplist_path);
 
     opcd_state_t st;
 
@@ -223,7 +281,28 @@ int main(void)
         ASSERT(rlen == 0, "emit_ack: failed ack pack yields rlen 0");
     }
 
+    /* ---- change-ip → platform apply wiring (deferred until logout) ---- */
+
+    /* 13. change-ip commits a slot, defers application until logout, then drives
+     *     the platform apply_ip_change hook with the committed slot's IP. This is
+     *     the handler→platform wiring that the 1st-stage scaffold left as a stub. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    g_stub_apply_ip_calls   = 0;
+    g_stub_apply_ip_last_ip = 0;
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*192.168.1.101*/);
+    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    ASSERT(r == OPC_RESULT_OK, "change-ip: set-ip-list commit ok");
+    r = do_change_ip(&st, CIP, 1);
+    ASSERT(r == OPC_RESULT_OK, "change-ip: accepted");
+    ASSERT(g_stub_apply_ip_calls == 0, "change-ip: apply deferred (not before logout)");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "change-ip: logout ok");
+    opcd_apply_pending_ip_change(&st);   /* main loop applies after logout response */
+    ASSERT(g_stub_apply_ip_calls == 1, "change-ip: platform apply_ip_change called on logout");
+    ASSERT(g_stub_apply_ip_last_ip == 0xC0A80165, "change-ip: apply gets committed slot ip");
+
     unlink(g_pw_path);
+    unlink(g_iplist_path);
 
     if (failures == 0) {
         fprintf(stdout, "all handler tests passed\n");
