@@ -1,23 +1,37 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2
 CFLAGS  += -I../protocol
-LDFLAGS += -L../protocol
+
+# Out-of-tree: objects + binary land under build/<arch>/opcd/, and link the
+# protocol library from build/<arch>/protocol/. BUILDROOT is passed in by the
+# top-level Makefile; defaults to native for standalone `make -C opcd`.
+BUILDROOT ?= $(abspath ../build/native)
+OBJDIR    := $(BUILDROOT)/opcd
+PROTODIR  := $(BUILDROOT)/protocol
+
+LDFLAGS += -L$(PROTODIR)
 LDLIBS  += -lopcproto
 
 # Platform backend selection — exactly one platform_<PLATFORM>.c is linked.
-# Override on the command line: `make PLATFORM=nxp` once platform_nxp.c lands.
+# Override on the command line: `make PLATFORM=nxp`.
 PLATFORM ?= stub
 
-OBJS := opcd.o store.o handler.o indication.o json_util.o inventory.o ntp_parse.o snapshot.o platform_$(PLATFORM).o
+SRCS := opcd.c store.c handler.c indication.c json_util.c inventory.c \
+        ntp_parse.c snapshot.c platform_$(PLATFORM).c
+OBJS := $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
+BIN  := $(OBJDIR)/opcd
 
-opcd: $(OBJS) ../protocol/libopcproto.a
+.PHONY: all clean
+all: $(BIN)
+
+$(BIN): $(OBJS) $(PROTODIR)/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 
-%.o: %.c
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-.PHONY: clean
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
 clean:
-	# Use wildcard so that switching PLATFORM does not leave stale
-	# platform_<other>.o behind ($(OBJS) only references the *current* PLATFORM).
-	rm -f *.o opcd
+	rm -rf $(OBJDIR)

@@ -1,23 +1,34 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2
 CFLAGS  += -I..
-LDFLAGS += -L..
+
+# Out-of-tree: test objects + binaries land under build/<arch>/protocol/tests/,
+# linking the library from build/<arch>/protocol/. Defaults to native.
+BUILDROOT ?= $(abspath ../../build/native)
+PROTODIR  := $(BUILDROOT)/protocol
+TESTDIR   := $(BUILDROOT)/protocol/tests
+
+LDFLAGS += -L$(PROTODIR)
 LDLIBS  += -lopcproto
 
 TESTS := test_codec
+BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
-all: $(TESTS)
+.PHONY: all check clean
+all: $(BINS)
 
-test_codec: test_codec.o ../libopcproto.a
-	$(CC) $(CFLAGS) -o $@ test_codec.o $(LDFLAGS) $(LDLIBS)
+$(TESTDIR)/test_codec: $(TESTDIR)/test_codec.o $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_codec.o $(LDFLAGS) $(LDLIBS)
 
-%.o: %.c
+$(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-.PHONY: check clean
-check: $(TESTS)
-	@for t in $(TESTS); do echo "== $$t =="; ./$$t || exit 1; done
+$(TESTDIR):
+	mkdir -p $(TESTDIR)
+
+check: $(BINS)
+	@for t in $(BINS); do echo "== $$t =="; $$t || exit 1; done
 	@echo "all tests passed"
 
 clean:
-	rm -f *.o $(TESTS)
+	rm -rf $(TESTDIR)

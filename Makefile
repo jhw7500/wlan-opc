@@ -1,38 +1,61 @@
-SUBDIRS := protocol opcd vhlctl
+# wlan-opc top-level build.
+#
+# Artifacts are kept per-architecture under build/<arch>/ so the native (host)
+# and arm64 (target) builds coexist without clobbering each other:
+#
+#   build/native/{protocol,opcd,vhlctl}/   (cc / ar)
+#   build/arm64/{protocol,opcd,vhlctl}/    (aarch64-linux-gnu-*)
+#
+# Targets:
+#   make            # = arm64 (target-deploy cross build)
+#   make arm64      # cross build  -> build/arm64
+#   make native     # host build   -> build/native
+#   make both       # arm64 + native, side by side
+#   make check      # native build + host-side unit tests
+#   make clean      # remove build/ entirely
+#
+# PLATFORM (stub|nxp) is orthogonal to ARCH and only selects opcd's platform
+# backend (vhlctl is platform-independent). Default stub; cross-deploy uses
+# `make PLATFORM=nxp` (= `make arm64 PLATFORM=nxp`).
 
-CC  = aarch64-linux-gnu-gcc
-AR  = aarch64-linux-gnu-ar
-export CC AR
+ROOT := $(abspath $(CURDIR))
 
-# Default platform backend for opcd. Override at the command line with
-# `make PLATFORM=nxp`. opcd's own Makefile defaults to stub when no value
-# is forwarded.
 PLATFORM ?= stub
 
-.PHONY: all clean check $(SUBDIRS)
+# Per-arch toolchains.
+NATIVE_CC := cc
+NATIVE_AR := ar
+ARM64_CC  := aarch64-linux-gnu-gcc
+ARM64_AR  := aarch64-linux-gnu-ar
 
-all: $(SUBDIRS)
+.PHONY: all arm64 native both check clean
 
-opcd vhlctl: protocol
+all: arm64
 
-$(SUBDIRS):
-	$(MAKE) -C $@ PLATFORM=$(PLATFORM)
+# Build every subdir for one arch into build/<arch>/.
+#   $(1)=arch  $(2)=cc  $(3)=ar
+define build_arch
+	$(MAKE) -C protocol BUILDROOT=$(ROOT)/build/$(1) CC=$(2) AR=$(3)
+	$(MAKE) -C opcd     BUILDROOT=$(ROOT)/build/$(1) CC=$(2) AR=$(3) PLATFORM=$(PLATFORM)
+	$(MAKE) -C vhlctl   BUILDROOT=$(ROOT)/build/$(1) CC=$(2) AR=$(3)
+endef
 
-# `make check` runs host-side codec round-trip tests with the native compiler
-# so they can be invoked on the build machine without a target board.
-# Also runs the platform-independent opcd unit tests (inventory loader,
-# timesyncd parser).
+arm64:
+	$(call build_arch,arm64,$(ARM64_CC),$(ARM64_AR))
+
+native:
+	$(call build_arch,native,$(NATIVE_CC),$(NATIVE_AR))
+
+both: arm64 native
+
+# Host-side codec round-trip + opcd/vhlctl unit tests. Always native (the
+# binaries must run on the build machine) and always PLATFORM=stub so the
+# handler test can link platform_stub.o regardless of the caller's PLATFORM.
 check:
-	$(MAKE) -C protocol CC=cc AR=ar
-	$(MAKE) -C protocol/tests CC=cc check
-	$(MAKE) -C opcd      CC=cc PLATFORM=stub inventory.o json_util.o ntp_parse.o \
-	                          snapshot.o handler.o store.o indication.o platform_stub.o
-	$(MAKE) -C opcd/tests CC=cc check
-	$(MAKE) -C vhlctl    CC=cc fielddump.o
-	$(MAKE) -C vhlctl/tests CC=cc check
+	$(MAKE) native PLATFORM=stub
+	$(MAKE) -C protocol/tests BUILDROOT=$(ROOT)/build/native CC=$(NATIVE_CC) check
+	$(MAKE) -C opcd/tests     BUILDROOT=$(ROOT)/build/native CC=$(NATIVE_CC) check
+	$(MAKE) -C vhlctl/tests   BUILDROOT=$(ROOT)/build/native CC=$(NATIVE_CC) check
 
 clean:
-	for d in $(SUBDIRS); do $(MAKE) -C $$d clean; done
-	$(MAKE) -C protocol/tests clean
-	$(MAKE) -C opcd/tests    clean
-	$(MAKE) -C vhlctl/tests  clean
+	rm -rf $(ROOT)/build

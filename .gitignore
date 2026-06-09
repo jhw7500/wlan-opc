@@ -1,8 +1,8 @@
 *.o
 *.a
-opcd/opcd
-vhlctl/vhlctl
-protocol/tests/test_codec
+
+# per-arch build artifacts (build/native, build/arm64) — see top-level Makefile
+build/
 
 # OMC harness scratch (never tracked)
 .omc/
@@ -23,3 +23,6 @@ docs/seed.yaml
 docs/proto-todo.md
 docs/opc_vhl_protocol_Rev1.00_KO.md
 docs/manual-runthrough.md
+
+# Compound Engineering machine-local config
+.compound-engineering/*.local.yaml

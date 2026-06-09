@@ -3,14 +3,26 @@ AR      ?= ar
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2 -fPIC
 CFLAGS  += -I.
 
-OBJS := codec.o frame.o commands.o indications.o
+# Out-of-tree: objects + library land under build/<arch>/protocol/, passed in
+# by the top-level Makefile via BUILDROOT. Defaults to native for standalone
+# `make -C protocol`.
+BUILDROOT ?= $(abspath ../build/native)
+OBJDIR    := $(BUILDROOT)/protocol
 
-libopcproto.a: $(OBJS)
+OBJS := $(addprefix $(OBJDIR)/,codec.o frame.o commands.o indications.o)
+LIB  := $(OBJDIR)/libopcproto.a
+
+.PHONY: all clean
+all: $(LIB)
+
+$(LIB): $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
-%.o: %.c
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-.PHONY: clean
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
 clean:
-	rm -f $(OBJS) libopcproto.a
+	rm -rf $(OBJDIR)
