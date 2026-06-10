@@ -24,5 +24,5 @@ docs/proto-todo.md
 docs/opc_vhl_protocol_Rev1.00_KO.md
 docs/manual-runthrough.md
 
-# Compound Engineering machine-local config
-.compound-engineering/*.local.yaml
+# Compound Engineering tooling (machine-local)
+.compound-engineering/
