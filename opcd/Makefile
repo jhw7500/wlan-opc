@@ -1,6 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O2
 CFLAGS  += -I../protocol
+CFLAGS  += -pthread   # store_async worker thread (compile)
 
 # Out-of-tree: objects + binary land under build/<arch>/opcd/, and link the
 # protocol library from build/<arch>/protocol/. BUILDROOT is passed in by the
@@ -10,13 +11,16 @@ OBJDIR    := $(BUILDROOT)/opcd
 PROTODIR  := $(BUILDROOT)/protocol
 
 LDFLAGS += -L$(PROTODIR)
+# -pthread at link too: some cross-toolchains (NXP Yocto aarch64) treat the
+# CFLAGS -pthread as compile-only and need the link flag to pull in libpthread.
+LDFLAGS += -pthread
 LDLIBS  += -lopcproto
 
 # Platform backend selection — exactly one platform_<PLATFORM>.c is linked.
 # Override on the command line: `make PLATFORM=nxp`.
 PLATFORM ?= stub
 
-SRCS := opcd.c store.c handler.c indication.c json_util.c inventory.c \
+SRCS := opcd.c store.c store_async.c handler.c indication.c json_util.c inventory.c \
         ntp_parse.c snapshot.c platform_$(PLATFORM).c
 OBJS := $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 BIN  := $(OBJDIR)/opcd
