@@ -1,6 +1,13 @@
+#include <assert.h>
 #include <string.h>
 
 #include "indications.h"
+#include "strutil.h"
+
+/* STYLE-007: tie the documentary length macro to the KeepAlive timestamp field
+ * width so it is compile-time-checked rather than a dead constant. */
+static_assert(OPC_TIMESTAMP_MAX_LEN == OPC_IND_KEEP_ALIVE_BODY_LEN - 1,
+              "timestamp max chars must be the field width minus the NUL");
 
 /* ---- generic indication-frame helpers ---- */
 
@@ -193,20 +200,13 @@ int opc_ind_reset_notice_unpack(const uint8_t *frame, size_t frame_len,
  * 0x0080 — KeepAlive
  * ======================================================================== */
 
-static size_t bounded_strnlen(const char *s, size_t cap)
-{
-    size_t i = 0;
-    while (i < cap && s[i] != '\0') i++;
-    return i;
-}
-
 ssize_t opc_ind_keep_alive_pack(uint8_t *frame, size_t cap, uint16_t seq_no,
                                 const opc_ind_keep_alive_t *in)
 {
     if (!in) return -1;
     uint8_t body[OPC_IND_KEEP_ALIVE_BODY_LEN];
     memset(body, 0, sizeof body);
-    size_t n = bounded_strnlen(in->timestamp, sizeof body - 1);
+    size_t n = opc_bounded_strnlen(in->timestamp, sizeof body - 1);
     memcpy(body, in->timestamp, n);
     return opc_frame_build(frame, cap, OPC_CMD_INDICATION, OPC_IND_KEEP_ALIVE, seq_no,
                            OPC_IND_KEEP_ALIVE_LENGTH, body, sizeof body);

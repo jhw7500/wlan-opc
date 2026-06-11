@@ -564,8 +564,22 @@ static int test_rejects(void)
     opc_header_t ph;
     ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE + 1, &ph, NULL, NULL) < 0, "partial (fixed+1) rejected");
     ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE - 1,     &ph, NULL, NULL) < 0, "partial (header-1) rejected");
+    /* 8B fixed header: length field reads 0 (= 8 - 8); pf is all-zero. */
     ASSERT(opc_frame_parse(pf, OPC_FIXED_HEADER_SIZE,   &ph, NULL, NULL) == 0, "8B fixed-header accepted");
+
+    /* 64B common header (reserve, no body): SEC-003 requires the length field
+     * to equal (64 - 8) = 56. Set it big-endian at bytes 6..7 first. */
+    pf[6] = 0x00;
+    pf[7] = (uint8_t)(OPC_HEADER_SIZE - OPC_FIXED_HEADER_SIZE);   /* 56 */
     ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) == 0, "64B common header accepted");
+
+    /* SEC-003: a frame whose declared length disagrees with its actual size is
+     * rejected — both directions. Under-claim (length 0 in a 64-byte frame): */
+    pf[6] = 0x00; pf[7] = 0x00;
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) < 0, "length under-claim rejected (SEC-003)");
+    /* Over-claim (length 100 > 64 - 8 = 56): */
+    pf[6] = 0x00; pf[7] = 100;
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) < 0, "length over-claim rejected (SEC-003)");
     return 0;
 }
 
