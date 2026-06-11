@@ -511,9 +511,12 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             }
             uint16_t flag = e->boundary_flag;
             if (flag == OPC_LIST_BOUNDARY_START) {
-                /* Fresh sequence: drop any stale staging from a prior
-                 * incomplete cycle before recording this entry. */
-                memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
+                /* Fresh sequence: seed staging from the committed list so the
+                 * END commit only updates the slots named in this cycle (spec
+                 * §3.3.6: "指定された番号のリストを更新する" — merge, not
+                 * wholesale replace). This also drops any stale staging from
+                 * a prior incomplete cycle. */
+                st->ip_list_staging = st->ip_list;
                 st->ip_list_staging_active = true;
             }
 
