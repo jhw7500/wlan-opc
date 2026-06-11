@@ -1,19 +1,17 @@
+#include <assert.h>
 #include <string.h>
 
 #include "commands.h"
+#include "strutil.h"
+
+/* STYLE-007: tie the documentary length macro to the actual field width so it
+ * is compile-time-checked rather than a dead constant. */
+static_assert(OPC_LOGIN_PASSWORD_MAX == OPC_LOGIN_REQ_BODY_LEN - 1,
+              "login password max chars must be the field width minus the NUL");
 
 /* ========================================================================
  * Internal helpers
  * ======================================================================== */
-
-static size_t bounded_strnlen(const char *s, size_t cap)
-{
-    size_t i = 0;
-    while (i < cap && s[i] != '\0') {
-        i++;
-    }
-    return i;
-}
 
 static void copy_with_null_pad(uint8_t *dst, size_t dst_len, const char *src)
 {
@@ -21,7 +19,7 @@ static void copy_with_null_pad(uint8_t *dst, size_t dst_len, const char *src)
     if (!src || dst_len == 0) {
         return;
     }
-    size_t n = bounded_strnlen(src, dst_len - 1);
+    size_t n = opc_bounded_strnlen(src, dst_len - 1);
     memcpy(dst, src, n);
 }
 
