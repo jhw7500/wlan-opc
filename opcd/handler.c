@@ -518,6 +518,12 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                  * a prior incomplete cycle. */
                 st->ip_list_staging = st->ip_list;
                 st->ip_list_staging_active = true;
+            } else if (!st->ip_list_staging_active) {
+                /* A17: CONTINUE/END with no open cycle — NG with 0x0018 per
+                 * the vendor answer (numeric value pending confirmation).
+                 * The entry is not recorded and nothing reaches NVM. */
+                result = OPC_RESULT_NG; err = OPC_ERR_LIST_SEQUENCE;
+                break;
             }
 
             uint16_t slot = (uint16_t)(e->list_number - 1);
@@ -525,19 +531,12 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             st->ip_list_staging.present[slot] = 1;
 
             if (flag == OPC_LIST_BOUNDARY_END) {
-                if (st->ip_list_staging_active) {
-                    /* Commit staging atomically (in memory). */
-                    st->ip_list = st->ip_list_staging;
-                    committed = true;
-                    st->ip_list_staging_active = false;
-                    memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
-                } else {
-                    /* Lone END (no prior START in this session). Spec defines
-                     * no NG for this; skip commit so a stale staging buffer
-                     * cannot be flushed to NVM. */
-                    fprintf(stderr,
-                            "opcd: SetIPConfigList: END without prior START — commit skipped\n");
-                }
+                /* staging is guaranteed active here — a lone CONTINUE/END
+                 * already NG'd out above (A17). Commit atomically (in memory). */
+                st->ip_list = st->ip_list_staging;
+                committed = true;
+                st->ip_list_staging_active = false;
+                memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
             }
         }
         session_touch(st);
@@ -637,8 +636,11 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 abort();
             }
             if (plat->apply_radio_config(&req) != 0) {
-                /* regulation-class NG — platform refused the kernel change */
-                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
+                /* regulation-class NG — platform refused the kernel change.
+                 * Reported as 0x0011 (frequency NG): the spec defines no
+                 * apply-failure code and the apply step is the frequency
+                 * change (D9, decided 2026-06-11). */
+                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_FREQ;
             } else {
                 st->radio = req;
                 bool deferred = false;
@@ -668,12 +670,18 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
 
     if (opc_set_indication_config_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
-    } else if (check_login_required(st, ip, &result, &err) == 0) {
+    } else if (check_login_required(st, ip, &result, &err) != 0) {
+        /* A14 (spec §3.3.9): for this command "issued from a non-login IP"
+         * carries its own code 0x0013 — override the common 0x0002 mapping.
+         * The not-logged-in case stays 0x0001. */
+        if (err == OPC_ERR_LOGIN_CONDITION) err = OPC_ERR_IND_OTHER_IP;
+    } else {
         if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
             /* SEC-002: only a unicast recipient may receive indications.
              * Reject 0.0.0.0 / multicast / broadcast so the daemon cannot be
-             * pointed at a group/broadcast as an amplifier. State unchanged. */
-            result = OPC_RESULT_NG; err = OPC_ERR_INDICATION_SETTING_VIOLATION;
+             * pointed at a group/broadcast as an amplifier. State unchanged.
+             * Spec error cause: "IP 주소 이상" 0x0012 (D10). */
+            result = OPC_RESULT_NG; err = OPC_ERR_IND_RECIPIENT_IP;
         } else {
             st->indication_enabled         = (req.info_bits != 0);
             st->indication_recipient_ip    = req.recipient_ip;

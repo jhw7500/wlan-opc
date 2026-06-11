@@ -92,7 +92,16 @@
 #define OPC_ERR_IP_CHANGE_CONFLICT            0x0012  /* ChangeIpAddress during in-progress list update */
 #define OPC_ERR_RADIO_MODE                    0x0013  /* SetRadioConfig: invalid WLAN mode */
 #define OPC_ERR_RADIO_BW                      0x0014  /* SetRadioConfig: invalid WLAN bandwidth */
-#define OPC_ERR_RADIO_APPLY                   0x0050  /* SetRadioConfig: platform refused the change */
+#define OPC_ERR_RADIO_FREQ                    0x0011  /* SetRadioConfig: frequency NG — also reports a
+                                                       * platform apply refusal: the spec defines no
+                                                       * apply-failure code and the apply step is the
+                                                       * frequency change (D9) */
+#define OPC_ERR_IND_RECIPIENT_IP              0x0012  /* SetIndicationConfig: recipient IP invalid
+                                                       * (non-unicast) — spec "IP 주소 이상" (D10) */
+#define OPC_ERR_IND_OTHER_IP                  0x0013  /* SetIndicationConfig: issued from a non-login IP
+                                                       * (A14; overlap with 0x0002 — vendor inquiry) */
+#define OPC_ERR_LIST_SEQUENCE                 0x0018  /* SetIpConfigList: CONTINUE/END without prior
+                                                       * START (A17; value pending vendor confirmation) */
 
 /* Reset cause (Reset ack / ResetNotice indication). */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */

@@ -38,6 +38,7 @@ extern unsigned stub_apply_ip_calls(void);
 extern uint32_t stub_apply_ip_last_ip(void);
 extern void     stub_apply_ip_reset(void);
 extern void     stub_apply_ip_set_fail(int fail);
+extern void     stub_apply_radio_set_fail(int fail);
 
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
@@ -47,6 +48,9 @@ extern void     stub_apply_ip_set_fail(int fail);
 static char g_pw_path[128];
 static char g_iplist_path[128];
 static char g_radio_path[128];
+
+/* error_cause of the last ack seen by the matching do_* helper below */
+static uint16_t g_last_ind_err, g_last_iplist_err, g_last_radio_err;
 
 /* Bind a loopback UDP socket on an ephemeral port; returns the fd and the
  * chosen port. Used to observe the deferred Set* acks (PERF-001). */
@@ -171,6 +175,7 @@ static uint16_t do_set_indication(opcd_state_t *st, uint32_t cip,
 
     opc_set_indication_config_ack_t ack;
     if (opc_set_indication_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_ind_err = ack.error_cause;
     return ack.result;
 }
 
@@ -197,6 +202,32 @@ static uint16_t do_set_ip_list(opcd_state_t *st, uint32_t cip, uint16_t slot,
 
     opc_set_ip_config_list_ack_t ack;
     if (opc_set_ip_config_list_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_iplist_err = ack.error_cause;
+    return ack.result;
+}
+
+/* Pack a SetRadioConfig request (SINGLE, 11AX/20MHz), dispatch, return ack
+ * result; error cause lands in g_last_radio_err. */
+static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip)
+{
+    opc_set_radio_config_req_t req;
+    memset(&req, 0, sizeof req);
+    req.station_type    = OPC_STATION_SINGLE;
+    req.wlan1.mode      = OPC_WLAN_MODE_11AX;
+    req.wlan1.bandwidth = OPC_BANDWIDTH_20;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_radio_config_ack_t ack;
+    if (opc_set_radio_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_radio_err = ack.error_cause;
     return ack.result;
 }
 
@@ -374,6 +405,48 @@ int main(void)
     ASSERT(st.ip_list.present[1] == 1 &&
            st.ip_list.slots[1].ip_address == 0xC0A80199,
            "merge: slot 2 updated by cycle B");
+
+    /* 14c. A17: CONTINUE/END without a prior START must NG with 0x0018 and
+     *      record nothing; a following normal cycle is unaffected. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_ip_list(&st, CIP, 3, OPC_LIST_BOUNDARY_END, 0xC0A80170);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LIST_SEQUENCE,
+           "A17: lone END → NG 0x0018");
+    r = do_set_ip_list(&st, CIP, 3, OPC_LIST_BOUNDARY_CONTINUE, 0xC0A80170);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LIST_SEQUENCE,
+           "A17: lone CONTINUE → NG 0x0018");
+    ASSERT(st.ip_list.present[2] == 0, "A17: nothing committed by lone entries");
+    r = do_set_ip_list(&st, CIP, 3, OPC_LIST_BOUNDARY_START, 0xC0A80170);
+    ASSERT(r == OPC_RESULT_OK, "A17: START after NG still opens a cycle");
+    r = do_set_ip_list(&st, CIP, 3, OPC_LIST_BOUNDARY_END, 0xC0A80170);
+    ASSERT(r == OPC_RESULT_OK && st.ip_list.present[2] == 1,
+           "A17: normal START..END cycle unaffected");
+
+    /* 14d. A14: SetIndication from a non-login IP → 0x0013 (was the common
+     *      0x0002); the not-logged-in case stays 0x0001. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    r = do_set_indication(&st, CIP, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_LOGIN_VIOLATION,
+           "A14: not logged in → 0x0001 unchanged");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_indication(&st, CIP + 1, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_OTHER_IP,
+           "A14: other IP while logged in → 0x0013");
+
+    /* 14e. D10: non-unicast indication recipient → 0x0012 (spec "IP 주소 이상"). */
+    r = do_set_indication(&st, CIP, 0xFFFFFFFF, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+    ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
+           "D10: broadcast recipient → 0x0012");
+
+    /* 14f. D9: platform apply refusal → frequency NG 0x0011 (0x0050 removed). */
+    stub_apply_radio_set_fail(1);
+    r = do_set_radio(&st, CIP);
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
+           "D9: apply refusal → NG 0x0011");
+    stub_apply_radio_set_fail(0);
+    r = do_set_radio(&st, CIP);
+    ASSERT(r == OPC_RESULT_OK, "D9: apply ok once fail toggle cleared");
 
     /* ---- PERF-001: async NVRAM persist → deferred Set* ack ---- */
 
