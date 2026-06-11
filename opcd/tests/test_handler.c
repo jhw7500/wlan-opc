@@ -10,14 +10,21 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "../handler.h"
 #include "../opcd_state.h"
 #include "../platform.h"
+#include "../store.h"
+#include "../store_async.h"
 #include "../../protocol/codec.h"
 #include "../../protocol/commands.h"
 #include "../../protocol/ids.h"
@@ -39,6 +46,31 @@ extern void     stub_apply_ip_set_fail(int fail);
 
 static char g_pw_path[128];
 static char g_iplist_path[128];
+static char g_radio_path[128];
+
+/* Bind a loopback UDP socket on an ephemeral port; returns the fd and the
+ * chosen port. Used to observe the deferred Set* acks (PERF-001). */
+static int bind_loopback_udp(uint16_t *port_out)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in sa = {0};
+    sa.sin_family      = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) { close(fd); return -1; }
+    socklen_t sl = sizeof sa;
+    if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) { close(fd); return -1; }
+    if (port_out) *port_out = ntohs(sa.sin_port);
+    return fd;
+}
+
+static int wait_fd_readable(int fd, int timeout_ms)
+{
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int r;
+    do { r = poll(&pfd, 1, timeout_ms); } while (r < 0 && errno == EINTR);
+    return (r == 1 && (pfd.revents & POLLIN)) ? 0 : -1;
+}
 
 static void init_state(opcd_state_t *st, const char *pw)
 {
@@ -47,6 +79,7 @@ static void init_state(opcd_state_t *st, const char *pw)
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->paths.password = g_pw_path;
     st->paths.ip_list  = g_iplist_path;
+    st->paths.radio    = g_radio_path;
     st->udp_fd      = -1;            /* indication send is a no-op when < 0 */
     st->boot_status = OPC_DEVICE_READY;
     st->radio.station_type = OPC_STATION_SINGLE;
@@ -196,8 +229,10 @@ int main(void)
      * (CWE-377). `make check` runs this in opcd/tests/, a build-owned dir. */
     snprintf(g_pw_path, sizeof g_pw_path, "test_handler_pw_%d.tmp", (int)getpid());
     snprintf(g_iplist_path, sizeof g_iplist_path, "test_handler_iplist_%d.tmp", (int)getpid());
+    snprintf(g_radio_path, sizeof g_radio_path, "test_handler_radio_%d.tmp", (int)getpid());
     unlink(g_pw_path);
     unlink(g_iplist_path);
+    unlink(g_radio_path);
 
     opcd_state_t st;
 
@@ -319,8 +354,258 @@ int main(void)
     ASSERT(st.indication_enabled, "change-ip fail: indication kept (IP unchanged)");
     stub_apply_ip_set_fail(0);
 
+    /* ---- PERF-001: async NVRAM persist → deferred Set* ack ---- */
+
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);        /* daemon side: acks sent from here */
+        int cli = bind_loopback_udp(&cli_port);   /* VHL side: acks received here */
+        opc_store_async_t *sa = opc_store_async_create();
+        ASSERT(srv >= 0 && cli >= 0 && sa != NULL, "async: test rig up");
+
+        const uint32_t LOOP = 0x7F000001;   /* acks must reach 127.0.0.1:cli_port */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd      = srv;
+        st.store_async = sa;
+        (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+
+        uint8_t frame[OPC_FRAME_MAX], resp[OPC_FRAME_MAX], rx_buf[OPC_FRAME_MAX];
+
+        /* 15. set-password defers its ack until the NVRAM write completes;
+         *     the deferred ack is OK, echoes the request seq, and the file
+         *     lands on disk. Dispatch itself must produce no response. */
+        opc_set_password_req_t preq;
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, OPC_PASSWORD_DEFAULT, sizeof preq.old_password - 1);
+        strncpy(preq.new_password, "AsyncSecret1", sizeof preq.new_password - 1);
+        ssize_t fn = opc_set_password_req_pack(frame, sizeof frame, 77, &preq);
+        ssize_t rlen = -1;
+        int drc = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                                resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "async set-password: ack deferred");
+        ASSERT(strcmp(st.password, "AsyncSecret1") == 0,
+               "async set-password: in-memory password updated");
+
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "async set-password: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "async set-password: ack arrived");
+        ssize_t rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        opc_header_t ahdr;
+        ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 77,
+               "async set-password: deferred ack echoes seq");
+        opc_set_password_ack_t pack_ack;
+        ASSERT(rn > 0 && opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
+               pack_ack.result == OPC_RESULT_OK,
+               "async set-password: deferred ack OK");
+        char pwbuf[129] = {0};
+        ASSERT(opc_store_read_all(g_pw_path, pwbuf, sizeof pwbuf - 1) ==
+                   (ssize_t)strlen("AsyncSecret1") &&
+               strcmp(pwbuf, "AsyncSecret1") == 0,
+               "async set-password: NVRAM file written");
+
+        /* 16. a failing NVRAM write surfaces as a deferred NG/OPC_ERR_NVRAM
+         *     ack — the wire contract the deferral exists to preserve. */
+        char bad_path[160];
+        snprintf(bad_path, sizeof bad_path, "no_such_dir_%d/pw", (int)getpid());
+        st.paths.password = bad_path;
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, "AsyncSecret1", sizeof preq.old_password - 1);
+        strncpy(preq.new_password, "Another1", sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 78, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "async NVRAM-fail: ack deferred");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "async NVRAM-fail: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "async NVRAM-fail: ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 && opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
+               pack_ack.result == OPC_RESULT_NG &&
+               pack_ack.error_cause == OPC_ERR_NVRAM,
+               "async NVRAM-fail: deferred NG/NVRAM ack");
+        st.paths.password = g_pw_path;
+
+        /* 17. set-ip-list commits then defers one persist for the request;
+         *     deferred ack is OK and the committed list reaches disk. */
+        opc_set_ip_config_list_req_t lreq;
+        memset(&lreq, 0, sizeof lreq);
+        lreq.entry_count              = 2;
+        lreq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START;
+        lreq.entries[0].list_number   = 1;
+        lreq.entries[0].ip_address    = 0xC0A80165;          /* 192.168.1.101 */
+        lreq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        lreq.entries[1].boundary_flag = OPC_LIST_BOUNDARY_END;
+        lreq.entries[1].list_number   = 2;
+        lreq.entries[1].ip_address    = 0xC0A80166;          /* 192.168.1.102 */
+        lreq.entries[1].subnet_mask   = 0xFFFFFF00u;
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 79, &lreq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "async set-ip-list: ack deferred");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "async set-ip-list: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "async set-ip-list: ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        opc_set_ip_config_list_ack_t lack;
+        ASSERT(rn > 0 &&
+               opc_set_ip_config_list_ack_unpack(rx_buf, (size_t)rn, &lack) == 0 &&
+               lack.result == OPC_RESULT_OK,
+               "async set-ip-list: deferred ack OK");
+        static opcd_ip_list_t disk_list;
+        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) ==
+                   (ssize_t)sizeof disk_list &&
+               disk_list.present[0] == 1 && disk_list.present[1] == 1 &&
+               disk_list.slots[1].ip_address == 0xC0A80166,
+               "async set-ip-list: committed list on disk");
+
+        /* 18. NG-after-commit: a frame that commits (START..END) and then
+         *     fails (slot out of range) acks NG immediately, while the
+         *     committed list still reaches NVRAM through the queue (no-ack
+         *     job) — never via an in-line write that could interleave with
+         *     an in-flight worker job on the same temp file. */
+        memset(&lreq, 0, sizeof lreq);
+        lreq.entry_count              = 3;
+        lreq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START;
+        lreq.entries[0].list_number   = 1;
+        lreq.entries[0].ip_address    = 0xC0A80170;          /* 192.168.1.112 */
+        lreq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        lreq.entries[1].boundary_flag = OPC_LIST_BOUNDARY_END;
+        lreq.entries[1].list_number   = 2;
+        lreq.entries[1].ip_address    = 0xC0A80171;
+        lreq.entries[1].subnet_mask   = 0xFFFFFF00u;
+        lreq.entries[2].list_number   = 999;                 /* > MAX_SLOTS → NG */
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 80, &lreq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen > 0, "NG-after-commit: immediate ack");
+        ASSERT(opc_set_ip_config_list_ack_unpack(resp, (size_t)rlen, &lack) == 0 &&
+               lack.result == OPC_RESULT_NG,
+               "NG-after-commit: ack carries the entry error");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "NG-after-commit: queued no-ack write completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "NG-after-commit: no duplicate deferred ack sent");
+        memset(&disk_list, 0, sizeof disk_list);
+        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) ==
+                   (ssize_t)sizeof disk_list &&
+               disk_list.present[0] == 1 &&
+               disk_list.slots[0].ip_address == 0xC0A80170,
+               "NG-after-commit: committed list reached NVRAM via queue");
+
+        /* 19. burst pressure: with every async-store job slot pre-filled by
+         *     no-ack writes, a deferred Set* must still queue — persist_blob
+         *     blocks on a bounded wait until a slot frees — and produce
+         *     exactly one OK ack. Re-init to a known password so this case
+         *     does not depend on the 15-16 chain (test 16 leaves memory at
+         *     "Another1" with disk unchanged — the no-rollback semantics). */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd      = srv;
+        st.store_async = sa;
+        (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+
+        /* Fill all job slots; the single worker drains them FIFO with no
+         * temp-file race (it is the sole writer of this path). */
+        for (int b = 0; b < OPC_STORE_ASYNC_QUEUE_DEPTH; b++)
+            (void)opc_store_async_submit(sa, g_iplist_path, &st.ip_list,
+                                         sizeof st.ip_list, 0644,
+                                         UINT64_MAX /* no-ack token */);
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, OPC_PASSWORD_DEFAULT, sizeof preq.old_password - 1);
+        strncpy(preq.new_password, "BurstSecret1", sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 81, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "burst: ack deferred despite full queue");
+        /* All slots were pre-filled with no-ack jobs, so on_ready must drain
+         * those completions (freeing a slot) before the password write can be
+         * submitted and its deferred ack reach the client. Pump until the ack
+         * lands. */
+        for (int tries = 0; tries < 10 && wait_fd_readable(cli, 1000) != 0; tries++) {
+            if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
+                opcd_store_async_on_ready(&st);
+        }
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 && opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
+               pack_ack.result == OPC_RESULT_OK,
+               "burst: deferred ack OK after queue drained");
+        ASSERT(strcmp(st.password, "BurstSecret1") == 0,
+               "burst: in-memory password updated");
+
+        /* Drain any no-ack filler completions the burst loop left queued so
+         * test 20 starts with an empty job queue, then re-init to a clean
+         * logged-in session. Without this, an undrained JOB_DONE slot can hold
+         * the queue full and the radio persist would hit the bounded wait. */
+        while (wait_fd_readable(opc_store_async_event_fd(sa), 200) == 0)
+            opcd_store_async_on_ready(&st);
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd      = srv;
+        st.store_async = sa;
+        (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+
+        /* 20. set-radio-config deferred ack. Structurally mirrors test 15 but
+         *     exercises handle_set_radio_config, whose session_touch sits
+         *     inside the deferred `else if` branch rather than unconditionally
+         *     before the ack — verify both the deferred OK ack and that the
+         *     session was touched on that path (no regression). */
+        opc_set_radio_config_req_t rreq;
+        memset(&rreq, 0, sizeof rreq);
+        rreq.station_type     = OPC_STATION_SINGLE;
+        rreq.wlan1.freq_mhz   = 5180;
+        rreq.wlan1.channel    = 36;
+        rreq.wlan1.mode       = OPC_WLAN_MODE_11A;
+        rreq.wlan1.bandwidth  = OPC_BANDWIDTH_20;
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 82, &rreq);
+        /* Pull the deadline back to a still-future value (not 0 — that would
+         * read as expired and trip dispatch's idle auto-logout before the
+         * handler runs). session_touch on the deferred path must push it
+         * forward again, which the post-dispatch assert checks. */
+        time_t radio_deadline_before = st.idle_deadline - 1000;
+        st.idle_deadline = radio_deadline_before;
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "async set-radio: ack deferred");
+        ASSERT(st.idle_deadline > radio_deadline_before,
+               "async set-radio: session touched on deferred path");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "async set-radio: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "async set-radio: ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        opc_set_radio_config_ack_t rack;
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 82,
+               "async set-radio: deferred ack echoes seq");
+        ASSERT(rn > 0 &&
+               opc_set_radio_config_ack_unpack(rx_buf, (size_t)rn, &rack) == 0 &&
+               rack.result == OPC_RESULT_OK,
+               "async set-radio: deferred ack OK");
+        static opc_set_radio_config_req_t disk_radio;
+        ASSERT(opc_store_read_all(g_radio_path, &disk_radio, sizeof disk_radio) ==
+                   (ssize_t)sizeof disk_radio &&
+               disk_radio.wlan1.channel == 36 &&
+               disk_radio.wlan1.mode == OPC_WLAN_MODE_11A,
+               "async set-radio: NVRAM file written");
+
+        st.store_async = NULL;
+        opc_store_async_destroy(sa);
+        close(srv);
+        close(cli);
+    }
+
     unlink(g_pw_path);
     unlink(g_iplist_path);
+    unlink(g_radio_path);
 
     if (failures == 0) {
         fprintf(stdout, "all handler tests passed\n");

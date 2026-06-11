@@ -49,6 +49,22 @@ typedef struct opcd_ip_list {
     uint8_t present[OPC_IPCFG_LIST_MAX_SLOTS];   /* 1 = populated */
 } opcd_ip_list_t;
 
+/* Async NVRAM writer — opaque; see store_async.h. */
+struct opc_store_async;
+
+/* A Set* ack whose NVRAM write is still in flight (PERF-001 deferred ack).
+ * One slot per queued store_async job; the job token is the slot index.
+ * The ack is packed and sent from opcd_store_async_on_ready() once the
+ * worker reports the write result. */
+#define OPCD_PENDING_ACK_MAX 4
+typedef struct opcd_pending_ack {
+    bool     in_use;
+    uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */
+    uint16_t seq;           /* echoed sequence number */
+    uint32_t client_ip;     /* host byte order */
+    uint16_t client_port;   /* host byte order */
+} opcd_pending_ack_t;
+
 /* Whole-daemon mutable state. */
 typedef struct opcd_state {
     opcd_conf_t conf;
@@ -84,6 +100,11 @@ typedef struct opcd_state {
 
     /* Device status as visible to GetBasicInfo (boot → ready → logged_in). */
     uint32_t boot_status;
+
+    /* Async NVRAM persist. NULL → handlers write synchronously (unit tests,
+     * or the daemon when the writer could not be created at startup). */
+    struct opc_store_async *store_async;
+    opcd_pending_ack_t pending_acks[OPCD_PENDING_ACK_MAX];
 
     /* Sockets / control. */
     int      udp_fd;

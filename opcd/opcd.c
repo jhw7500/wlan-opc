@@ -5,9 +5,11 @@
  *   - UDP socket on /usr/local/opc/etc/opc.conf::udp_port  (default 50607)
  *   - signalfd  for SIGINT / SIGTERM      → graceful shutdown
  *   - timerfd   1 s tick                  → indication period & idle check
+ *   - eventfd   async NVRAM completions   → deferred Set* acks (PERF-001)
  *
  * State persists in /usr/local/opc/etc/{password, iplist.cfg, radio.conf}
- * via atomic temp+rename writes (see store.c).
+ * via atomic temp+rename writes (see store.c), queued onto the store_async
+ * worker thread so the fsync stall never blocks the loop (store_async.c).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -36,6 +38,7 @@
 #include "platform.h"
 #include "snapshot.h"
 #include "store.h"
+#include "store_async.h"
 
 #define LOG(fmt, ...) fprintf(stderr, "opcd: " fmt "\n", ##__VA_ARGS__)
 
@@ -282,6 +285,29 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Async NVRAM writer — keeps the fsync stall of Set* persists off the
+     * epoll loop (PERF-001). Created after open_signalfd() so the worker
+     * inherits the blocked SIGINT/SIGTERM mask: a process-directed signal
+     * must land on the signalfd, not terminate the process through the
+     * worker's default disposition. Creation failure is non-fatal —
+     * handlers fall back to the original synchronous write path. */
+    st.store_async = opc_store_async_create();
+    if (!st.store_async)
+        LOG("async NVRAM writer unavailable — Set* persists run synchronously");
+
+    /* Async NVRAM completions → deferred Set* acks. */
+    int store_fd = opc_store_async_event_fd(st.store_async);
+    if (store_fd >= 0) {
+        struct epoll_event ev_store = { .events = EPOLLIN, .data.fd = store_fd };
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, store_fd, &ev_store) != 0) {
+            LOG("epoll_ctl(store_fd=%d) failed: %s — async NVRAM writer disabled",
+                store_fd, strerror(errno));
+            opc_store_async_destroy(st.store_async);
+            st.store_async = NULL;
+            store_fd = -1;
+        }
+    }
+
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
     while (!st.should_exit && !st.should_reset) {
@@ -308,6 +334,11 @@ int main(int argc, char **argv)
                     }
                 }
                 opcd_ind_tick(&st);
+            } else if (fd == store_fd) {
+                /* store_fd is -1 when no async writer is attached (creation or
+                 * epoll_ctl failed); a real fd never equals -1, so this branch
+                 * is inert in that case. */
+                opcd_store_async_on_ready(&st);
             } else if (fd == evt_fd) {
                 /* Drain all queued platform events; on_platform_event
                  * dispatches each to the corresponding indication.
@@ -338,10 +369,15 @@ int main(int argc, char **argv)
                     ssize_t tx_len = 0;
                     int rc = opcd_dispatch(&st, rx, (size_t)rn, cip, cprt,
                                            tx, sizeof tx, &tx_len);
-                    if (rc == 0 && tx_len > 0) {
-                        ssize_t w = sendto(udp_fd, tx, (size_t)tx_len, 0,
-                                           (struct sockaddr *)&src, srclen);
-                        if (w != tx_len) LOG("sendto short: %zd/%zd", w, tx_len);
+                    if (rc == 0) {
+                        /* tx_len == 0 is a legitimate no-response: a deferred
+                         * Set* ack awaiting its NVRAM completion, or a failed
+                         * ack pack (emit_ack). */
+                        if (tx_len > 0) {
+                            ssize_t w = sendto(udp_fd, tx, (size_t)tx_len, 0,
+                                               (struct sockaddr *)&src, srclen);
+                            if (w != tx_len) LOG("sendto short: %zd/%zd", w, tx_len);
+                        }
                     } else {
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
                     }
@@ -350,6 +386,11 @@ int main(int argc, char **argv)
         }
         opcd_apply_pending_ip_change(&st);
     }
+
+    /* Completes any queued NVRAM writes before the worker joins; an ack
+     * still in flight is dropped — the client's response timer covers it. */
+    opc_store_async_destroy(st.store_async);
+    st.store_async = NULL;
 
     if (st.should_reset) {
         LOG("reset requested — exiting (systemd will restart)");
