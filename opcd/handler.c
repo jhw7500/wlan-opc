@@ -725,7 +725,7 @@ typedef int (*opcd_handler_fn)(opcd_state_t *st,
 static const struct {
     uint16_t        req_id;
     opcd_handler_fn fn;
-} OPCD_DISPATCH_TABLE[] = {
+} opcd_dispatch_table[] = {
     { OPC_REQ_LOGIN,                 handle_login },
     { OPC_REQ_LOGOUT,                handle_logout },
     { OPC_REQ_GET_BASIC_INFO,        handle_get_basic_info },
@@ -759,13 +759,14 @@ int opcd_dispatch(opcd_state_t *st,
         opcd_session_logout(st);
     }
 
-    for (size_t i = 0; i < sizeof OPCD_DISPATCH_TABLE / sizeof OPCD_DISPATCH_TABLE[0]; i++) {
-        if (OPCD_DISPATCH_TABLE[i].req_id == hdr.req_indication_id) {
-            return OPCD_DISPATCH_TABLE[i].fn(st, frame, frame_len, client_ip,
+    for (size_t i = 0; i < sizeof opcd_dispatch_table / sizeof opcd_dispatch_table[0]; i++) {
+        if (opcd_dispatch_table[i].req_id == hdr.req_indication_id &&
+            opcd_dispatch_table[i].fn != NULL) {
+            return opcd_dispatch_table[i].fn(st, frame, frame_len, client_ip,
                                              client_port, resp, resp_cap, resp_len, seq);
         }
     }
-    *resp_len = 0;   /* unknown request id */
+    *resp_len = 0;   /* unknown request id, or a table row with no handler */
     return -1;
 }
 
