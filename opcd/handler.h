@@ -36,6 +36,11 @@ void opcd_apply_pending_ip_change(opcd_state_t *st);
  * idle check so all three paths share one set of side effects. */
 void opcd_session_logout(opcd_state_t *st);
 
+/* Drain finished async NVRAM writes (PERF-001) and transmit the deferred
+ * Set* acks they correspond to. Call when st->store_async's event fd is
+ * readable. No-op when no async store is attached. */
+void opcd_store_async_on_ready(opcd_state_t *st);
+
 #ifdef __cplusplus
 }
 #endif
