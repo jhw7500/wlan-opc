@@ -354,6 +354,27 @@ int main(void)
     ASSERT(st.indication_enabled, "change-ip fail: indication kept (IP unchanged)");
     stub_apply_ip_set_fail(0);
 
+    /* 14b. SetIPConfigList merges into the committed list (spec §3.3.6 "갱신"):
+     *      a later START..END cycle naming only slot 2 must not erase slot 1. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*192.168.1.101*/);
+    ASSERT(r == OPC_RESULT_OK, "merge: cycle A start (slot 1) ok");
+    r = do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END, 0xC0A80166 /*192.168.1.102*/);
+    ASSERT(r == OPC_RESULT_OK, "merge: cycle A commit (slot 2) ok");
+    ASSERT(st.ip_list.present[0] == 1 && st.ip_list.present[1] == 1,
+           "merge: cycle A committed slots 1+2");
+    r = do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START, 0xC0A80199 /*192.168.1.153*/);
+    ASSERT(r == OPC_RESULT_OK, "merge: cycle B start (slot 2) ok");
+    r = do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END, 0xC0A80199);
+    ASSERT(r == OPC_RESULT_OK, "merge: cycle B commit (slot 2) ok");
+    ASSERT(st.ip_list.present[0] == 1 &&
+           st.ip_list.slots[0].ip_address == 0xC0A80165,
+           "merge: slot 1 survives a cycle that does not name it");
+    ASSERT(st.ip_list.present[1] == 1 &&
+           st.ip_list.slots[1].ip_address == 0xC0A80199,
+           "merge: slot 2 updated by cycle B");
+
     /* ---- PERF-001: async NVRAM persist → deferred Set* ack ---- */
 
     {
