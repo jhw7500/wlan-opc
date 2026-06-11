@@ -70,7 +70,9 @@ typedef struct opc_wlan_radio_cfg {
 
 #define OPC_LOGIN_REQ_BODY_LEN    128
 #define OPC_LOGIN_REQ_LENGTH      184  /* spec */
-#define OPC_LOGIN_PASSWORD_MAX    127  /* + NULL */
+/* On-wire password field width (Login body and both SetPassword fields). */
+#define OPC_PASSWORD_FIELD_LEN    128
+#define OPC_LOGIN_PASSWORD_MAX    (OPC_PASSWORD_FIELD_LEN - 1)  /* 127 usable chars + NUL */
 
 typedef struct opc_login_req {
     char password[OPC_LOGIN_REQ_BODY_LEN];
@@ -215,8 +217,8 @@ int     opc_get_device_info_ack_unpack(const uint8_t *frame, size_t frame_len,
 #define OPC_SET_PASSWORD_REQ_LENGTH    312   /* spec */
 
 typedef struct opc_set_password_req {
-    char old_password[128];   /* NULL-terminated, up to 127 chars */
-    char new_password[128];
+    char old_password[OPC_PASSWORD_FIELD_LEN];   /* NULL-terminated, up to OPC_LOGIN_PASSWORD_MAX chars */
+    char new_password[OPC_PASSWORD_FIELD_LEN];
 } opc_set_password_req_t;
 
 typedef struct opc_set_password_ack {
@@ -276,7 +278,7 @@ typedef struct opc_ipcfg_entry {
     uint32_t subnet_mask;
     uint32_t default_gateway;
     uint32_t ntp_server;
-    char     essid[32];
+    char     essid[OPC_ESSID_FIELD_LEN];
 } opc_ipcfg_entry_t;
 
 typedef struct opc_set_ip_config_list_req {

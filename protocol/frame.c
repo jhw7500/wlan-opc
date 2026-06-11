@@ -76,6 +76,17 @@ int opc_frame_parse(const uint8_t *frame, size_t frame_len,
     if (opc_fixed_header_unpack(frame, frame_len, hdr_out) != 0) {
         return -1;
     }
+    /* SEC-003: cross-check the declared length against the datagram. The header
+     * length field carries (total_frame_bytes - OPC_FIXED_HEADER_SIZE); a frame
+     * whose length disagrees with its actual size is malformed, so reject it
+     * here rather than trusting a lying length downstream. frame_len >= the
+     * fixed header is already guaranteed above, so the subtraction cannot
+     * underflow, and (1424 - 8) fits a uint16_t. Self-consistent short-body
+     * frames still pass this gate and reach the per-command unpack, which
+     * issues OPC_ERR_PACKET_SIZE as before. */
+    if (hdr_out->length != (uint16_t)(frame_len - OPC_FIXED_HEADER_SIZE)) {
+        return -1;
+    }
     /* Body present only once the frame reaches the full common header.
      * Empty-request frames stop at the 8-byte fixed header (no reserve/body). */
     if (frame_len >= OPC_HEADER_SIZE) {
