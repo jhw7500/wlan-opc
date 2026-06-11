@@ -81,10 +81,11 @@ int opc_frame_parse(const uint8_t *frame, size_t frame_len,
      * whose length disagrees with its actual size is malformed, so reject it
      * here rather than trusting a lying length downstream. frame_len >= the
      * fixed header is already guaranteed above, so the subtraction cannot
-     * underflow, and (1424 - 8) fits a uint16_t. Self-consistent short-body
-     * frames still pass this gate and reach the per-command unpack, which
-     * issues OPC_ERR_PACKET_SIZE as before. */
-    if (hdr_out->length != (uint16_t)(frame_len - OPC_FIXED_HEADER_SIZE)) {
+     * underflow. The comparison is done in size_t (hdr length promoted) so no
+     * truncating cast is needed — both over- and under-claims are rejected.
+     * Self-consistent short-body frames still pass this gate and reach the
+     * per-command unpack, which issues OPC_ERR_PACKET_SIZE as before. */
+    if ((size_t)hdr_out->length != frame_len - OPC_FIXED_HEADER_SIZE) {
         return -1;
     }
     /* Body present only once the frame reaches the full common header.

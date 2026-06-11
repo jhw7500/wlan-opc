@@ -574,9 +574,12 @@ static int test_rejects(void)
     ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) == 0, "64B common header accepted");
 
     /* SEC-003: a frame whose declared length disagrees with its actual size is
-     * rejected. Claim length 0 in a 64-byte frame -> must fail. */
+     * rejected — both directions. Under-claim (length 0 in a 64-byte frame): */
     pf[6] = 0x00; pf[7] = 0x00;
-    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) < 0, "length-vs-size mismatch rejected (SEC-003)");
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) < 0, "length under-claim rejected (SEC-003)");
+    /* Over-claim (length 100 > 64 - 8 = 56): */
+    pf[6] = 0x00; pf[7] = 100;
+    ASSERT(opc_frame_parse(pf, OPC_HEADER_SIZE,         &ph, NULL, NULL) < 0, "length over-claim rejected (SEC-003)");
     return 0;
 }
 
