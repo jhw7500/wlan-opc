@@ -65,6 +65,11 @@ void opcd_session_logout(opcd_state_t *st)
     st->logged_in          = false;
     st->boot_status        = OPC_DEVICE_READY;
     st->indication_enabled = false;
+    /* An open SetIpConfigList cycle dies with its session — otherwise the
+     * next login could flush (or trip A17 on) a previous session's stale
+     * staging buffer. */
+    st->ip_list_staging_active = false;
+    memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
 }
 
 /* Reject indication recipients that are not plain unicast. 0.0.0.0, the

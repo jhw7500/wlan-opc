@@ -423,6 +423,19 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK && st.ip_list.present[2] == 1,
            "A17: normal START..END cycle unaffected");
 
+    /* 14c-2. An open cycle dies with its session: START → logout → login →
+     *        END must NG (stale staging cleared on logout, A17 review fix). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_ip_list(&st, CIP, 4, OPC_LIST_BOUNDARY_START, 0xC0A80171);
+    ASSERT(r == OPC_RESULT_OK, "A17: cycle open before logout");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "A17: logout mid-cycle ok");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_ip_list(&st, CIP, 4, OPC_LIST_BOUNDARY_END, 0xC0A80171);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LIST_SEQUENCE &&
+           st.ip_list.present[3] == 0,
+           "A17: stale staging cleared on logout → END after re-login NGs");
+
     /* 14d. A14: SetIndication from a non-login IP → 0x0013 (was the common
      *      0x0002); the not-logged-in case stays 0x0001. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
