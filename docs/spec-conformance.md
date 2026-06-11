@@ -7,6 +7,7 @@
 | 기준 사양서 | `docs/opc_vhl_protocol_Rev1.00_KO.md` (원본 `Rev1.00_CANTOPS送付用-260525.pdf`, 전 41p) |
 | 사양 판수 / 일자 | Rev 1.00 / 2026-05-25 (작성 落合庸央) |
 | 분석 대상 코드 | `protocol/{frame,codec,commands,indications}`, `opcd/{handler,opcd,indication,store,inventory}` |
+| 분석 기준 커밋 | `0128f03` (master, 2026-06-11) — 본문 파일:라인 참조는 이 시점 기준 |
 | 분석 방법 | 8개 기능영역 병렬 정밀분석 → "구현≠스펙" 주장 전건 적대적 재검증(거짓양성 제거) → 직접 코드확인 |
 | 분류 | ① 스펙 애매(21) · ② 실측·벤더 확인 필요(17) · ③ 구현≠스펙 확정(A 미문서화 15 / B 의도적 8) |
 
@@ -122,9 +123,10 @@
 - **답변(원문 인용):** seq는 응답에 에코되어 프레임 중복·응답 식별. 불휘발 저장 커맨드는 저장 후 응답 송신. 처리 실행 중 재송 도착 시 동일 요구 폐기 후 처리 완료 시 응답 / 응답과 엇갈린 재송(SN=13)은 신규 요구로 처리(요구 측은 응답 2연속 수신 처리).
 - **검증 보강(2026-06-11):** 원본 그림 3-2 도형 재확인 — 재송은 **새 SN(=12)을 달고 도착**("패킷 송신마다 번호 가산"), 기판은 동일 커맨드로 판단해 **대기 중이던 SN=11(응답 의무)을 폐기**하고 처리 완료 후 SN=12로 응답. 중복 판단 기준은 'SN 동일성'이 아니라 **처리 실행 중 동일 커맨드의 새 요구 도착**. 구현 시 이 의미로 설계할 것.
 
-**A20 · Reset 후 ResetNotice/Ack 순서** — ✅ 종결
+**A20 · Reset 후 ResetNotice/Ack 순서** — ✅ 종결 (검증 정정 2026-06-11)
 - **사양:** §3.3.10 "응답 후 리셋" — 두 통지 공존 시 순서 미규정
-- **답변:** Reset req를 받으면 응답을 보낸 후 리셋. ("공존"은 ResetNotice **indication**(info bit 0x20 설정 시)과 Reset **Ack**를 지칭 — 현행 구현이 답변과 일치: Ack 송신 후 종료, ResetNotice는 indication 설정 시에만 부가 발행)
+- **답변:** Reset req를 받으면 응답을 보낸 후 리셋. ("공존"은 ResetNotice **indication**(info bit 0x20 설정 시)과 Reset **Ack**를 지칭)
+- **검증 정정(PR #32 리뷰):** 답변이 규정하는 **리셋 시점**(Ack 송신 후 exit)은 현행 구현과 일치. 단 와이어 **송신 순서**는 ResetNotice(`handler.c:707`, dispatch 중 즉시 송신) → Reset Ack(dispatch 복귀 후 main loop 송신) 순 — indication이 Ack보다 먼저 나간다. 사양·답변 모두 양자 순서는 미규정이라 deviation은 아니나, 벤더 VHL이 Ack-선행을 전제할 가능성에 대비해 **Ack 송신 후 ResetNotice 발행으로의 조정을 후속 검토 후보로 기록**.
 
 **A21 · priority_ch/channel 밴드값 검증 기준 부재** — 🔧 부분 확정 + 📌 확인 필요
 - **사양:** §3.3.8 — 밴드값(0x01/0x02/0x06)·CH 유효성 판정 기준 없음
@@ -150,7 +152,11 @@
 | V10 | **NVRAM 120초 예산** | i.MX8MM eMMC/NAND fsync 실측 |
 | V11 | **휘발성 IP 복원** | 전원재투입 시 컨피그 IP 복귀 (networkd 비복원 on-target) |
 | V12 | **channel 인코딩(밴드\|CH) 실반영** | 드라이버 채널설정 |
-| V13~V17 | 규제 NG 실동작, ESSID 길이경계, mlan0 라우팅 소유(wifi_init.sh), DUAL 검출, idle 경계 등 | 실타깃/벤더 |
+| V13 | 규제 NG 실동작 | 실타깃/벤더 |
+| V14 | ESSID 길이 경계 | 실타깃/벤더 |
+| V15 | mlan0 라우팅 소유(wifi_init.sh) | 실타깃/벤더 |
+| V16 | DUAL 검출 | 실타깃/벤더 |
+| V17 | idle 경계 | 실타깃/벤더 |
 
 ---
 
@@ -162,7 +168,7 @@
 > 형식: **D# · 항목** — `코드 위치` / **사양:** 요구 / **구현:** 실제 동작
 
 **D1 · SetIPConfigList 값 검증 전무** — `handler.c:494-564`, `ids.h`
-- **사양 §3.3.6:** IP(0x0011)·Netmask(0x0012)·GW(0x0013)·NTP(0x0014)·ESSID(0x0015/0x0016)·list-size(0x0017) 8종 NG 요구
+- **사양 §3.3.6:** 슬롯 범위(0x0010)·IP(0x0011)·Netmask(0x0012)·GW(0x0013)·NTP(0x0014)·ESSID(0x0015/0x0016)·list-size(0x0017) 8종 NG 요구
 - **구현:** list_number 범위·PACKET_SIZE만 검사. **해당 에러코드 상수 자체가 부재.** 잘못된 IP/마스크/ESSID가 OK로 NVRAM 저장
 
 **D2 · 128슬롯 전체 교체 (데이터 소실)** — `handler.c:516,527`
@@ -221,6 +227,7 @@
 
 **D15 · dead branch 2건** — `opcd.c:108`, `handler.c:329`
 - Login '기동중'(0x0001) 도달불가(boot 즉시 READY), GetBasicInfo station_type fallback 미도달
+- 후속 정리 PR(D12·D13 프레임 경계 처리와 묶음)에서 처리 예정
 
 ### 3.2 ③-B 의도적 / 문서화된 불일치 (알려진 결정)
 
