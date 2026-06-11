@@ -19,9 +19,27 @@ OPC 제어 프로토콜은 **사양상 암호화·메시지 인증이 없는 평
 |----|------|-----------|------|
 | SEC-001 | 로그인 세션을 UDP 소스 IP만으로 식별(`holder_ip == client_ip`). 소스 IP 스푸핑으로 기존 세션 탈취 가능. 요청별 시퀀스/논스 검증 없음(`sequence_number`는 에코만). | 신뢰망 전제. (세션 토큰/시퀀스 윈도우는 사양 확장 필요 — 미적용) | 문서화 |
 | 비밀번호 | 컴파일 기본값 `"MyPassword"`가 공개 저장소에 노출 — **장치의 실제 노출은 이 기본 자격증명**. 별개로, 빈 비밀번호를 만들 수 있는 코드 경로(`set-password`로 빈 비번 설정)가 잠재 버그였음. | **빈 비밀번호 인증 거부**(login·set-password 양쪽)로 코드 경로 차단. **기본 비밀번호는 운영 최초에 반드시 변경**(이게 실제 위험). | 부분 완화 |
-| SEC-002 | `SetIndicationConfig`의 indication 수신 IP/포트를 검증 없이 수용 → 인증 후 데몬을 주기 UDP 리플렉터로 악용 가능. | 신뢰망 전제. (수신자를 holder IP로 제한하는 P1 항목 예정) | 미적용(P1) |
+| SEC-002 | `SetIndicationConfig`의 indication 수신 IP/포트를 검증 없이 수용 → 인증 후 데몬을 주기 UDP 리플렉터로 악용 가능. | **비유니캐스트 수신자 거부**(`0.0.0.0`·`224.0.0.0/4`·`255.255.255.255` → NG `0x0010`)로 group/broadcast 증폭 차단. **indication을 로그인 세션 수명에 종속**(logout·idle-logout·IP 변경 시 자동 중단)시켜 리플렉터 창을 세션 내로 한정. 신뢰망 전제는 유지. | 부분 완화 |
 | SEC-004 | `GetBasicInformation`이 인증 없이, malformed 요청에도 응답 → device 식별 + login-state oracle. | 사양상 discovery 요구. (login-state 비노출·rate-limit은 P1) | 미적용(P1) |
 | ARCH-001 | ErrorCause `0x0010`이 와이어상 4가지 의미(indication-violation / password-mismatch / slot-range / station-type)로 중복. | **사양 고정 값** — 변경 불가. `protocol/ids.h`에 의미별 명명상수로 정리하고 다의성을 명시. 수신측은 **명령 컨텍스트로 해석**. | 문서화 |
+
+### SEC-002 잔여 사항 (적용하지 않은 권고의 근거)
+
+부분 완화 이후, 코드 리뷰가 권고했으나 **의도적으로 적용하지 않은** 추가 제한과 그 근거:
+
+- **임의 (동일 세그먼트) 유니캐스트 허용은 유지한다 (확정).** 현재 코드는 비유니캐스트만
+  거부하고 임의 유니캐스트 수신자를 받는다(`opcd/handler.c::valid_unicast_ipv4`,
+  주석 "Arbitrary unicast is allowed per spec"). loopback(`127.0.0.1`)도 OK로
+  문서화되어 있다(`docs/testing-guide.md`). 신뢰망 전제 하에서 비유니캐스트 거부 +
+  세션-수명 종속으로 리플렉터 표면은 충분히 좁다.
+- **`period_seconds` 하한 캡은 적용하지 않는다.** 사양 SetIndicationConfig는
+  Indication Period를 **0~255초로 명시**(0=사상 변화 즉시 통지, 1~255=주기 통지)하므로,
+  하한 캡(예: 최소 5초)은 **사양 위반**이다. 코드 리뷰 권고였으나 채택하지 않는다.
+- **동일 IP 세그먼트 제한(Error Cause `0x0012`)은 적용하지 않는다.** 사양은 통지처가 장치와
+  동일 세그먼트가 아니면 `0x0012`("동일 IP 세그먼트 이외의 통지 주소 이상")를 정의하지만,
+  세그먼트 강제는 라우팅된 VHL 수신자·loopback 검증 흐름을 깨뜨린다. 현행 구현은 의도적으로
+  임의 유니캐스트를 허용하는 설계를 유지한다. (배포가 향후 단일 제어 세그먼트로 고정되면
+  재검토 가능 — 그때 `0x0012` 발행으로 좁힐 수 있다.)
 
 ## 비밀번호 정책 (현재)
 
