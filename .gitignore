@@ -23,6 +23,7 @@ docs/seed.yaml
 docs/proto-todo.md
 docs/opc_vhl_protocol_Rev1.00_KO.md
 docs/manual-runthrough.md
+docs/spec-conformance.pdf
 
 # Compound Engineering tooling (machine-local)
 .compound-engineering/
