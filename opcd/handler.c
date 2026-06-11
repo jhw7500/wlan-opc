@@ -711,6 +711,33 @@ static int handle_reset(opcd_state_t *st, const uint8_t *frame, size_t flen,
 
 /* ---- dispatch ---- */
 
+/* Static command table (ARCH-004). Every handle_* shares one signature, so a
+ * new command is a single table row plus its handler — there is no parallel
+ * switch case to keep in sync. Lookup is a linear scan over a fixed, small
+ * table; the RX hot path is the zero-copy recv loop in opcd.c, not this lookup,
+ * so the table does not regress dispatch performance (PERF-005). */
+typedef int (*opcd_handler_fn)(opcd_state_t *st,
+                               const uint8_t *frame, size_t frame_len,
+                               uint32_t client_ip, uint16_t client_port,
+                               uint8_t *resp, size_t resp_cap, ssize_t *resp_len,
+                               uint16_t seq);
+
+static const struct {
+    uint16_t        req_id;
+    opcd_handler_fn fn;
+} OPCD_DISPATCH_TABLE[] = {
+    { OPC_REQ_LOGIN,                 handle_login },
+    { OPC_REQ_LOGOUT,                handle_logout },
+    { OPC_REQ_GET_BASIC_INFO,        handle_get_basic_info },
+    { OPC_REQ_GET_DEVICE_INFO,       handle_get_device_info },
+    { OPC_REQ_SET_PASSWORD,          handle_set_password },
+    { OPC_REQ_SET_IP_CONFIG_LIST,    handle_set_ip_config_list },
+    { OPC_REQ_CHANGE_IP_ADDRESS,     handle_change_ip_address },
+    { OPC_REQ_SET_RADIO_CONFIG,      handle_set_radio_config },
+    { OPC_REQ_SET_INDICATION_CONFIG, handle_set_indication_config },
+    { OPC_REQ_RESET,                 handle_reset },
+};
+
 int opcd_dispatch(opcd_state_t *st,
                   const uint8_t *frame, size_t frame_len,
                   uint32_t client_ip, uint16_t client_port,
@@ -732,21 +759,14 @@ int opcd_dispatch(opcd_state_t *st,
         opcd_session_logout(st);
     }
 
-    switch (hdr.req_indication_id) {
-    case OPC_REQ_LOGIN:                return handle_login(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_LOGOUT:               return handle_logout(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_GET_BASIC_INFO:       return handle_get_basic_info(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_GET_DEVICE_INFO:      return handle_get_device_info(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_SET_PASSWORD:         return handle_set_password(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_SET_IP_CONFIG_LIST:   return handle_set_ip_config_list(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_CHANGE_IP_ADDRESS:    return handle_change_ip_address(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_SET_RADIO_CONFIG:     return handle_set_radio_config(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_SET_INDICATION_CONFIG:return handle_set_indication_config(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    case OPC_REQ_RESET:                return handle_reset(st, frame, frame_len, client_ip, client_port, resp, resp_cap, resp_len, seq);
-    default:
-        *resp_len = 0;
-        return -1;
+    for (size_t i = 0; i < sizeof OPCD_DISPATCH_TABLE / sizeof OPCD_DISPATCH_TABLE[0]; i++) {
+        if (OPCD_DISPATCH_TABLE[i].req_id == hdr.req_indication_id) {
+            return OPCD_DISPATCH_TABLE[i].fn(st, frame, frame_len, client_ip,
+                                             client_port, resp, resp_cap, resp_len, seq);
+        }
     }
+    *resp_len = 0;   /* unknown request id */
+    return -1;
 }
 
 void opcd_apply_pending_ip_change(opcd_state_t *st)
