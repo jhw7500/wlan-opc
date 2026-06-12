@@ -678,7 +678,10 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
     } else if (check_login_required(st, ip, &result, &err) != 0) {
         /* A14 (spec §3.3.9): for this command "issued from a non-login IP"
          * carries its own code 0x0013 — override the common 0x0002 mapping.
-         * The not-logged-in case stays 0x0001. */
+         * The not-logged-in case stays 0x0001. Unlike every other handler
+         * this branch tests the *failure* path (`!= 0`, inverted on purpose,
+         * not a typo): the override must run after the common mapping fills
+         * `err` and before the ack is packed. */
         if (err == OPC_ERR_LOGIN_CONDITION) err = OPC_ERR_IND_OTHER_IP;
     } else {
         if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {

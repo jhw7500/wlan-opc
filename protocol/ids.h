@@ -92,6 +92,14 @@
 #define OPC_ERR_IP_CHANGE_CONFLICT            0x0012  /* ChangeIpAddress during in-progress list update */
 #define OPC_ERR_RADIO_MODE                    0x0013  /* SetRadioConfig: invalid WLAN mode */
 #define OPC_ERR_RADIO_BW                      0x0014  /* SetRadioConfig: invalid WLAN bandwidth */
+/* 0x0011–0x0013 are likewise spec-overloaded: each name below intentionally
+ * aliases a value already defined above, scoped to a different command.
+ *   0x0011 = SLOT_EMPTY (ChangeIpAddress)        | RADIO_FREQ (SetRadioConfig)
+ *   0x0012 = IP_CHANGE_CONFLICT (ChangeIpAddress)| IND_RECIPIENT_IP (SetIndicationConfig)
+ *   0x0013 = RADIO_MODE (SetRadioConfig)         | IND_OTHER_IP (SetIndicationConfig)
+ * Each handler must use only its own command's names, and a single switch must
+ * never mix two same-valued names — that is a duplicate-case compile error.
+ * vhlctl's value→label map therefore uses literal cases with combined labels. */
 #define OPC_ERR_RADIO_FREQ                    0x0011  /* SetRadioConfig: frequency NG — also reports a
                                                        * platform apply refusal: the spec defines no
                                                        * apply-failure code and the apply step is the
