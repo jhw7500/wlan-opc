@@ -109,7 +109,10 @@
 #define OPC_ERR_IND_OTHER_IP                  0x0013  /* SetIndicationConfig: issued from a non-login IP
                                                        * (A14; overlap with 0x0002 — vendor inquiry) */
 #define OPC_ERR_LIST_SEQUENCE                 0x0018  /* SetIpConfigList: CONTINUE/END without prior
-                                                       * START (A17; value pending vendor confirmation) */
+                                                       * START (A17).
+                                                       * FIXME: wire value unconfirmed — 0x0018 is the
+                                                       * vendor-answer proposal; update when the formal
+                                                       * confirmation arrives. */
 
 /* Reset cause (Reset ack / ResetNotice indication). */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */
