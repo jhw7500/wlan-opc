@@ -675,13 +675,7 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
 
     if (opc_set_indication_config_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
-    } else if (check_login_required(st, ip, &result, &err) != 0) {
-        /* A14 (spec §3.3.9): for this command "issued from a non-login IP"
-         * carries its own code 0x0013 — override the common 0x0002 mapping
-         * after check_login_required fills `err`, before the ack is packed.
-         * The not-logged-in case stays 0x0001. */
-        if (err == OPC_ERR_LOGIN_CONDITION) err = OPC_ERR_IND_OTHER_IP;
-    } else {
+    } else if (check_login_required(st, ip, &result, &err) == 0) {
         if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
             /* SEC-002: only a unicast recipient may receive indications.
              * Reject 0.0.0.0 / multicast / broadcast so the daemon cannot be
@@ -703,6 +697,12 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
                 if (st->logged_in) opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
             }
         }
+    } else {
+        /* A14 (spec §3.3.9): "issued from a non-login IP" carries its own
+         * code 0x0013 for this command — override the common 0x0002 mapping
+         * check_login_required just stored. The not-logged-in case stays
+         * 0x0001. */
+        if (err == OPC_ERR_LOGIN_CONDITION) err = OPC_ERR_IND_OTHER_IP;
     }
     opc_set_indication_config_ack_t ack = { .result = result, .error_cause = err };
     emit_ack(rlen, opc_set_indication_config_ack_pack(resp, rcap, seq, &ack));
