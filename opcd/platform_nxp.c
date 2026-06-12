@@ -659,8 +659,11 @@ static int count_set_bits(uint32_t v)
  *
  * We delete every scope-global, non-/32 IPv4 on eth0 (the management address;
  * wifi_init.sh's /32 is intentionally kept) and add the new one, in a single
- * /bin/sh pipeline. gateway/essid/ntp are out of scope (they interact with
- * wifi_init.sh routing / wpa_supplicant) and are not applied. */
+ * /bin/sh pipeline. gateway/essid/ntp are not applied: gateway is a non-goal
+ * — the board operates as a bridge on the control network, so no L3 gateway
+ * is needed (user decision 2026-06-12, #27); the stored gateway field is
+ * validated (D1: inside the entry's subnet) and echoed but never applied.
+ * essid/ntp remain V3 on-target work (wifi_init.sh routing / wpa_supplicant). */
 static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
 {
     /* Reject a non-contiguous or empty netmask — cannot be a /prefix. */
