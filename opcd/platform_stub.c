@@ -134,7 +134,21 @@ static int s_apply_radio_fail = 0;
 static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
     (void)cfg;
-    return s_apply_radio_fail ? -1 : 0;
+    /* Direct programmatic override (existing API — test 14f). */
+    if (s_apply_radio_fail)
+        return -1;
+    /* Env-var injection for handler-dispatch error-path tests.
+     * OPCD_STUB_APPLY_RADIO_RC=<negative errno>  e.g. -110 → -ETIMEDOUT,
+     *                                                      -71 → -EPROTO.
+     * Unset or zero → success (default behaviour preserved).
+     * STUB ONLY — never consulted by platform_nxp.c. */
+    const char *ev = getenv("OPCD_STUB_APPLY_RADIO_RC");
+    if (ev && ev[0] != '\0') {
+        int rc = atoi(ev);
+        if (rc != 0)
+            return rc;
+    }
+    return 0;
 }
 
 /* Test-only accessor (declared extern in test_handler.c). */

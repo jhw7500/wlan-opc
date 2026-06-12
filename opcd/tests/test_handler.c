@@ -1074,6 +1074,81 @@ int main(void)
         close(cli);
     }
 
+    /* ---- Issue #12: error-path coverage for SetRadioConfig apply failure ----
+     *
+     * These tests drive the handler dispatch path using env-var fault injection
+     * (OPCD_STUB_APPLY_RADIO_RC) so that platform_nxp.c is never touched.
+     * The nxp fork/execl/timeout code path and journal output are excluded from
+     * this change set (#13 covers those). */
+
+    /* 24a. apply failure (-EPROTO) → Result=NG + error_cause=0x0011 (OPC_ERR_RADIO_FREQ).
+     *      handler.c maps every non-zero apply_radio_config return to 0x0011 (D9). */
+    {
+        opcd_state_t st24;
+        init_state(&st24, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24, CIP, OPC_PASSWORD_DEFAULT);
+        setenv("OPCD_STUB_APPLY_RADIO_RC", "-71", 1);  /* -EPROTO */
+        uint16_t r24 = do_set_radio(&st24, CIP, 2412,
+                                    (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+        unsetenv("OPCD_STUB_APPLY_RADIO_RC");
+        ASSERT(r24 == OPC_RESULT_NG,
+               "issue#12-24a: apply -EPROTO → Result NG");
+        ASSERT(g_last_radio_err == OPC_ERR_RADIO_FREQ,
+               "issue#12-24a: apply -EPROTO → error_cause 0x0011");
+    }
+
+    /* 24b. apply failure (-ETIMEDOUT) → same NG + 0x0011 mapping. */
+    {
+        opcd_state_t st24b;
+        init_state(&st24b, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24b, CIP, OPC_PASSWORD_DEFAULT);
+        setenv("OPCD_STUB_APPLY_RADIO_RC", "-110", 1);  /* -ETIMEDOUT */
+        uint16_t r24b = do_set_radio(&st24b, CIP, 5180, 36);
+        unsetenv("OPCD_STUB_APPLY_RADIO_RC");
+        ASSERT(r24b == OPC_RESULT_NG,
+               "issue#12-24b: apply -ETIMEDOUT → Result NG");
+        ASSERT(g_last_radio_err == OPC_ERR_RADIO_FREQ,
+               "issue#12-24b: apply -ETIMEDOUT → error_cause 0x0011");
+    }
+
+    /* 24c. state preservation: after apply failure the in-memory radio config
+     *      must retain the previous (pre-failure) settings, not the rejected
+     *      request values (handler.c only writes st->radio on success). */
+    {
+        opcd_state_t st24c;
+        init_state(&st24c, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24c, CIP, OPC_PASSWORD_DEFAULT);
+
+        /* Prime with a known good config. */
+        (void)do_set_radio(&st24c, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+        uint16_t saved_freq = st24c.radio.wlan1.freq_mhz;
+        uint16_t saved_ch   = st24c.radio.wlan1.channel;
+
+        /* Inject failure and submit a different config. */
+        setenv("OPCD_STUB_APPLY_RADIO_RC", "-71", 1);
+        (void)do_set_radio(&st24c, CIP, 5180, 36);
+        unsetenv("OPCD_STUB_APPLY_RADIO_RC");
+
+        ASSERT(st24c.radio.wlan1.freq_mhz == saved_freq,
+               "issue#12-24c: apply failure preserves previous freq_mhz");
+        ASSERT(st24c.radio.wlan1.channel == saved_ch,
+               "issue#12-24c: apply failure preserves previous channel");
+    }
+
+    /* 24d. success-path regression (env var cleared): apply succeeds, Result=OK. */
+    {
+        opcd_state_t st24d;
+        init_state(&st24d, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24d, CIP, OPC_PASSWORD_DEFAULT);
+        /* Ensure env var is absent. */
+        unsetenv("OPCD_STUB_APPLY_RADIO_RC");
+        uint16_t r24d = do_set_radio(&st24d, CIP, 5180, 36);
+        ASSERT(r24d == OPC_RESULT_OK,
+               "issue#12-24d: no injection → apply succeeds → Result OK");
+        ASSERT(st24d.radio.wlan1.freq_mhz == 5180,
+               "issue#12-24d: success updates in-memory radio state");
+    }
+
     unlink(g_pw_path);
     unlink(g_iplist_path);
     unlink(g_radio_path);

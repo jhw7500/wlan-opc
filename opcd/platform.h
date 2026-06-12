@@ -32,6 +32,12 @@ extern "C" {
  *   platform_stub.c  — zeros / canned values, no kernel I/O. Default build.
  *   platform_nxp.c   — mlanutl + nl80211 + netlink. Selected at link time.
  *
+ * Stub fault-injection env vars (STUB ONLY — ignored by platform_nxp.c):
+ *   OPCD_STUB_APPLY_RADIO_RC=<negative errno>
+ *       stub_apply_radio_config() returns this value instead of 0.
+ *       Examples: -71 (-EPROTO), -110 (-ETIMEDOUT).
+ *       Unset or 0 → success (default).
+ *
  * Exactly one implementation is linked. Selection is a Makefile concern;
  * opcd code only sees this header.
  */
