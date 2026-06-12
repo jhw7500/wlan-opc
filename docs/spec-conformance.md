@@ -129,9 +129,10 @@
 - **답변:** Reset req를 받으면 응답을 보낸 후 리셋. ("공존"은 ResetNotice **indication**(info bit 0x20 설정 시)과 Reset **Ack**를 지칭)
 - **검증 정정(PR #32 리뷰):** 답변이 규정하는 **리셋 시점**(Ack 송신 후 exit)은 현행 구현과 일치. 단 와이어 **송신 순서**는 ResetNotice(`handler.c:707`, dispatch 중 즉시 송신) → Reset Ack(dispatch 복귀 후 main loop 송신) 순 — indication이 Ack보다 먼저 나간다. 사양·답변 모두 양자 순서는 미규정이라 deviation은 아니나, 벤더 VHL이 Ack-선행을 전제할 가능성에 대비해 **Ack 송신 후 ResetNotice 발행으로의 조정을 후속 검토 후보로 기록**.
 
-**A21 · priority_ch/channel 밴드값 검증 기준 부재** — 🔧 부분 확정 + 📌 확인 필요
+**A21 · priority_ch/channel 밴드값 검증 기준 부재** — ✅ 부분 반영(2026-06-12, 6G 거부) + 📌 확인 필요
 - **사양:** §3.3.8 — 밴드값(0x01/0x02/0x06)·CH 유효성 판정 기준 없음
 - **답변:** **6G(0x06)는 지원하지 않음**(거부 검토). CH 값은 디바이스에서 확인 필요.
+- **반영:** 6G 및 미지 밴드 지정 시 0x0012 NG (wlan1/wlan2/priority_ch — priority_ch는 DUAL일 때만, A16). 밴드 0x00(bare CH)은 허용 유지. CH 값 검증은 디바이스 확인 후.
 
 ---
 
@@ -168,25 +169,29 @@
 > 적대적 재검증으로 모두 **실제 불일치(isReal=true)** 확정. proto-todo/SECURITY.md/주석 어디에도 의도적 결정으로 기록되지 않음.
 > 형식: **D# · 항목** — `코드 위치` / **사양:** 요구 / **구현:** 실제 동작
 
-**D1 · SetIPConfigList 값 검증 전무** — `handler.c:494-564`, `ids.h`
+**D1 · SetIPConfigList 값 검증 전무** — `handler.c:494-564`, `ids.h` — ✅ 대부분 해결(2026-06-12)
 - **사양 §3.3.6:** 슬롯 범위(0x0010)·IP(0x0011)·Netmask(0x0012)·GW(0x0013)·NTP(0x0014)·ESSID(0x0015/0x0016)·list-size(0x0017) 8종 NG 요구
 - **구현:** list_number 범위·PACKET_SIZE만 검사. **해당 에러코드 상수 자체가 부재.** 잘못된 IP/마스크/ESSID가 OK로 NVRAM 저장
+- **해결:** 에러코드 상수 전체 정의 + IP(0x0011)/Netmask(0x0012)/GW(0x0013)/NTP(0x0014)/ESSID NULL종단(0x0016)/list-size(0x0017) 검증 구현. **잔여:** ESSID 문자 이상(0x0015)은 "문자열로 지정할 수 없는 값"의 정의 부재로 보류(A5 계열). **GW/NTP=0은 '미설정'으로 허용**(사양 문구는 0.0.0.0 불가이나 운용상 선택 필드 — 📌 발주처 확인 예정)
 
 **D2 · 128슬롯 전체 교체 (데이터 소실)** — `handler.c:516,527`
 - **사양:** "지정 번호 리스트 갱신"(merge). **[보강 2026-06-11]** 원본 도면(image26) 우측 주석도 "지정된 번호의 리스트를 **갱신한다**(更新する)"로 merge 의미를 직접 지지 — A13 답변(전체 교체는 맞지 않다)과 함께 **merge 수정 확정**
 - **구현:** END에서 `ip_list = staging` 전체 대입 → 이번 사이클에 없는 슬롯 `present=0` 소실
 
-**D3 · ESSID NULL종단 미검출 (0x0016)** — `commands.c:26-30`
+**D3 · ESSID NULL종단 미검출 (0x0016)** — `commands.c:26-30` — ✅ 해결(2026-06-12)
 - **사양 §3.3.6:625:** "NULL종단 없으면 NG"
 - **구현:** `copy_string_field`가 32B째 강제 NUL → 종단없는 케이스 silent truncation, 검출경로 소멸
+- **해결:** codec이 와이어 필드의 NUL 부재를 검출해 보고(`essid_terminated_mask`) → handler가 0x0016 NG
 
-**D4 · SetPassword 무효문자·NULL종단 미검증** — `handler.c:457-492`
+**D4 · SetPassword 무효문자·NULL종단 미검증** — `handler.c:457-492` — ✅ 부분 해결(2026-06-12)
 - **사양 §3.3.5:** 0x0011~0x0014 4종
 - **구현:** old불일치/빈new 모두 0x0010만. NULL종단 위반 silent truncation
+- **해결:** 구(0x0012)/신(0x0014) NULL종단 검증 구현. **잔여:** 무효문자(0x0011/0x0013)는 A5 발주처 답변 대기
 
-**D5 · Login 무효문자·NULL종단 미검증** — `handler.c`, `commands.c`
+**D5 · Login 무효문자·NULL종단 미검증** — `handler.c`, `commands.c` — ✅ 부분 해결(2026-06-12)
 - **사양 §3.3.1:** 0x0011/0x0012
 - **구현:** 항상 0x0010(불일치)만 반환
+- **해결:** NULL종단 검증(0x0012) 구현. **잔여:** 무효문자(0x0011)는 A5 발주처 답변 대기
 
 **D6 · List Boundary Flag 코드↔문서 정반대 (3중 드리프트)** — **해소 (2026-06-11, 문서 갱신)**
 - **사양:** page-22 vs page-24 모순은 **원본 docx에 실재** (변환 오류 아님). 단, 원본 재확인에서 번역본에 누락됐던 본문 문장("시작 리스트(**0x0000**)와 계속 리스트(0x0001)를 수신하면…") 발견 — **원본 3개 언급 중 2개가 START=0x0000 지지**
@@ -197,9 +202,10 @@
 - **사양 §3.4:** WlanStatusChange/Roaming/ApDisconnect/FaultDetect
 - **구현:** `drain_events` no-op → 실제 트리거 없음. InitComplete/ResetNotice/KeepAlive만 발행
 
-**D8 · SetRadio 주파수/CH 값 검증 없음** — `handler.c:609-655`
+**D8 · SetRadio 주파수/CH 값 검증 없음** — `handler.c:609-655` — ✅ 부분 해결(2026-06-12)
 - **사양 §3.3.8:** 0x0011(주파수)/0x0012(CH)
 - **구현:** mode/bw만 검증, freq/channel 값 무검증
+- **해결:** freq 범위(2.4G 2400~2500 / 5G 4900~5925, 0=미지정 허용) 0x0011 + CH 밴드 검증(6G·미지 밴드 거부, A21) 0x0012 구현. **잔여:** 밴드별 정확한 CH 리스트(V2)·밴드 0x00(bare CH) 인코딩 강제 여부(V12)는 디바이스 확인 대기
 
 **D9 · 규제-NG에 스펙 미정의 0x0050** — `ids.h:95`, `handler.c:638` — ✅ 해결(2026-06-11)
 - **사양 §3.3.8:** 0x0011/0x0012만 정의

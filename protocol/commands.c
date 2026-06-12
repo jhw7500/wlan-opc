@@ -23,10 +23,17 @@ static void copy_with_null_pad(uint8_t *dst, size_t dst_len, const char *src)
     memcpy(dst, src, n);
 }
 
-static void copy_string_field(char *dst, size_t dst_len, const uint8_t *src)
+/* Copy a fixed-width wire string field, forcing local NUL termination.
+ * Returns true when the wire field itself contained a NUL — the spec requires
+ * string fields to be NUL-terminated and a full-width run of characters is a
+ * detectable violation (D3/D4/D5: §3.3.1 0x0012, §3.3.5 0x0012/0x0014,
+ * §3.3.6 0x0016). */
+static bool copy_string_field(char *dst, size_t dst_len, const uint8_t *src)
 {
+    bool terminated = memchr(src, '\0', dst_len) != NULL;
     memcpy(dst, src, dst_len);
     dst[dst_len - 1] = '\0';
+    return terminated;
 }
 
 static void pack_date(uint8_t *p, const opc_date_t *d)
@@ -122,7 +129,8 @@ int opc_login_req_unpack(const uint8_t *frame, size_t frame_len, opc_login_req_t
     if (hdr.command_type != OPC_CMD_REQUEST)         return -1;
     if (hdr.req_indication_id != OPC_REQ_LOGIN)      return -1;
     if (body_len < OPC_LOGIN_REQ_BODY_LEN)           return -1;
-    copy_string_field(out->password, OPC_LOGIN_REQ_BODY_LEN, body);
+    out->password_terminated =
+        copy_string_field(out->password, OPC_LOGIN_REQ_BODY_LEN, body);
     return 0;
 }
 
@@ -370,8 +378,10 @@ int opc_set_password_req_unpack(const uint8_t *frame, size_t frame_len,
     if (hdr.command_type != OPC_CMD_REQUEST)                  return -1;
     if (hdr.req_indication_id != OPC_REQ_SET_PASSWORD)        return -1;
     if (body_len < OPC_SET_PASSWORD_REQ_BODY_LEN)              return -1;
-    copy_string_field(out->old_password, 128, &body[0]);
-    copy_string_field(out->new_password, 128, &body[128]);
+    out->old_password_terminated =
+        copy_string_field(out->old_password, 128, &body[0]);
+    out->new_password_terminated =
+        copy_string_field(out->new_password, 128, &body[128]);
     return 0;
 }
 
@@ -407,7 +417,8 @@ static void pack_ipcfg_entry(uint8_t *p, const opc_ipcfg_entry_t *e)
     memset(&p[52], 0, 12);
 }
 
-static void unpack_ipcfg_entry(const uint8_t *p, opc_ipcfg_entry_t *e)
+/* Returns whether the entry's ESSID wire field was NUL-terminated. */
+static bool unpack_ipcfg_entry(const uint8_t *p, opc_ipcfg_entry_t *e)
 {
     e->boundary_flag    = opc_be16_read(&p[0]);
     e->list_number      = opc_be16_read(&p[2]);
@@ -415,7 +426,7 @@ static void unpack_ipcfg_entry(const uint8_t *p, opc_ipcfg_entry_t *e)
     e->subnet_mask      = opc_be32_read(&p[8]);
     e->default_gateway  = opc_be32_read(&p[12]);
     e->ntp_server       = opc_be32_read(&p[16]);
-    copy_string_field(e->essid, 32, &p[20]);
+    return copy_string_field(e->essid, 32, &p[20]);
 }
 
 ssize_t opc_set_ip_config_list_req_pack(uint8_t *frame, size_t cap, uint16_t seq_no,
@@ -445,14 +456,17 @@ int opc_set_ip_config_list_req_unpack(const uint8_t *frame, size_t frame_len,
     if (opc_frame_parse(frame, frame_len, &hdr, &body, &body_len) != 0)    return -1;
     if (hdr.command_type != OPC_CMD_REQUEST)                                return -1;
     if (hdr.req_indication_id != OPC_REQ_SET_IP_CONFIG_LIST)                return -1;
-    if (body_len == 0 || (body_len % OPC_IPCFG_ENTRY_LEN) != 0)             return -1;
+    /* Frame parses but the body is not 64×n (n=1..20): §3.3.6 list-size
+     * violation — distinct return so the handler can ack 0x0017 (D1). */
+    if (body_len == 0 || (body_len % OPC_IPCFG_ENTRY_LEN) != 0)             return -2;
     size_t n = body_len / OPC_IPCFG_ENTRY_LEN;
-    if (n > OPC_IPCFG_LIST_MAX_PER_REQ)                                     return -1;
+    if (n > OPC_IPCFG_LIST_MAX_PER_REQ)                                     return -2;
 
     memset(out, 0, sizeof *out);
     out->entry_count = n;
     for (size_t i = 0; i < n; i++) {
-        unpack_ipcfg_entry(&body[i * OPC_IPCFG_ENTRY_LEN], &out->entries[i]);
+        if (unpack_ipcfg_entry(&body[i * OPC_IPCFG_ENTRY_LEN], &out->entries[i]))
+            out->essid_terminated_mask |= (1u << i);
     }
     return 0;
 }
