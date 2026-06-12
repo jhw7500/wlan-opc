@@ -935,6 +935,39 @@ int main(void)
                disk_radio.wlan1.mode == OPC_WLAN_MODE_11A,
                "async set-radio: NVRAM file written");
 
+        /* 21. A19: a same-command retransmission (new SN) while the previous
+         *     NVRAM write is still in flight supersedes the older response
+         *     duty — exactly one ack comes back, carrying the newest SN. */
+        opc_set_radio_config_req_t a19r;
+        memset(&a19r, 0, sizeof a19r);
+        a19r.station_type    = OPC_STATION_SINGLE;
+        a19r.wlan1.mode      = OPC_WLAN_MODE_11A;
+        a19r.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        a19r.wlan1.channel   = 36;
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 90, &a19r);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "A19: first request deferred");
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 91, &a19r);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "A19: retransmission (new SN) deferred too");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "A19: completion signalled");
+        opcd_store_async_on_ready(&st);
+        if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
+            opcd_store_async_on_ready(&st);   /* second job may drain separately */
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "A19: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 91,
+               "A19: the single ack carries the retransmission SN");
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "A19: no second ack for the superseded SN");
+
         st.store_async = NULL;
         opc_store_async_destroy(sa);
         close(srv);

@@ -210,9 +210,10 @@ static int wait_one_completion(opcd_state_t *st, int ms)
  * that cannot be queued surfaces as OPC_ERR_NVRAM instead of falling back
  * to a synchronous write.
  *
- * Slot exhaustion means a client issued Set* commands faster than NVRAM
- * completes — a spec-compliant VHL never does (it waits for each ack within
- * OPC_TIMER_NVRAM_WRITE_S). Waiting is bounded by OPCD_PERSIST_WAIT_MS. */
+ * Slot exhaustion means Set* commands arrived faster than NVRAM completes —
+ * either a non-compliant client, or legitimate A19 retransmissions stacking
+ * discarded response duties behind a slow write. Waiting is bounded by
+ * OPCD_PERSIST_WAIT_MS either way. */
 static int persist_blob(opcd_state_t *st, const char *path,
                         const void *data, size_t len, mode_t mode,
                         uint16_t req_id, uint32_t ip, uint16_t port,
@@ -234,6 +235,26 @@ static int persist_blob(opcd_state_t *st, const char *path,
                     .client_ip   = ip,
                     .client_port = port,
                 };
+                /* A19 (§3.1.3, 그림 3-2): a retransmission of the same
+                 * command arrives carrying a NEW sequence number while the
+                 * previous write is still in flight — the earlier response
+                 * duty is discarded and only the newest SN is answered.
+                 * Marked only now, after the replacement is definitely
+                 * queued: discarding up front could drop the original ack
+                 * with no replacement when the queue is saturated and this
+                 * request then fails. The discarded slot stays allocated
+                 * until its job drains, so a live job's token is never
+                 * handed to a new request. If the old job completed while
+                 * we waited for a slot, its ack already went out — that is
+                 * the spec's "reply crossed the retransmission" two-ack
+                 * case. */
+                for (int i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
+                    opcd_pending_ack_t *pa = &st->pending_acks[i];
+                    if (i != slot && pa->in_use && !pa->discarded &&
+                        pa->req_id == req_id && pa->client_ip == ip &&
+                        pa->client_port == port)
+                        pa->discarded = true;
+                }
                 *deferred = true;
                 return 0;
             }
@@ -943,6 +964,16 @@ void opcd_store_async_on_ready(opcd_state_t *st)
         if (done[i].token >= OPCD_PENDING_ACK_MAX) continue;
         opcd_pending_ack_t *pa = &st->pending_acks[done[i].token];
         if (!pa->in_use) continue;
+        if (pa->discarded) {
+            /* A19: superseded by a retransmission — drop the response duty.
+             * The slot is freed only now that its job has drained. */
+            if (done[i].result != 0)
+                fprintf(stderr,
+                        "opcd: NVRAM write failed (req 0x%04X, superseded ack): %s\n",
+                        pa->req_id, strerror(done[i].saved_errno));
+            *pa = (opcd_pending_ack_t){0};
+            continue;
+        }
 
         uint16_t result = (done[i].result == 0) ? OPC_RESULT_OK : OPC_RESULT_NG;
         uint16_t err    = (done[i].result == 0) ? OPC_ERR_NONE  : OPC_ERR_NVRAM;
