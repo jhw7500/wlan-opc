@@ -548,6 +548,10 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
     uint16_t result = OPC_RESULT_OK, err = OPC_ERR_NONE;
     opc_set_ip_config_list_req_t req;
 
+    /* Frame-shape checks (0x0017 / 0x0003) deliberately precede the login
+     * check: they are protocol-level properties of the datagram itself,
+     * independent of any session, mirroring every handler's unpack-first
+     * ordering. */
     int urc = opc_set_ip_config_list_req_unpack(frame, flen, &req);
     if (urc == -2) {
         /* §3.3.6 0x0017: body is not 64×n (n=1..20) — list-size violation (D1) */

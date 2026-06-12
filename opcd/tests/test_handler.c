@@ -621,6 +621,7 @@ int main(void)
         /* 14j-2. D1: body not 64×n → 0x0017 (list-size violation). */
         uint8_t body63[63];
         memset(body63, 0, sizeof body63);
+        /* header Length = reserve(56) + payload bytes (spec A1 rule) */
         vfn = opc_frame_build(vf, sizeof vf, OPC_CMD_REQUEST,
                               OPC_REQ_SET_IP_CONFIG_LIST, 92,
                               (uint16_t)(56 + 63), body63, sizeof body63);
@@ -638,7 +639,7 @@ int main(void)
         init_state(&st, OPC_PASSWORD_DEFAULT);
         opc_login_req_t lreq2;
         memset(&lreq2, 0, sizeof lreq2);
-        strcpy(lreq2.password, OPC_PASSWORD_DEFAULT);
+        strncpy(lreq2.password, OPC_PASSWORD_DEFAULT, sizeof lreq2.password - 1);
         uint8_t kf[OPC_FRAME_MAX], kresp[OPC_FRAME_MAX];
         ssize_t kfn = opc_login_req_pack(kf, sizeof kf, 95, &lreq2);
         /* password field starts at the common-header end (OPC_HEADER_SIZE) */
@@ -653,8 +654,8 @@ int main(void)
         (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
         opc_set_password_req_t preq;
         memset(&preq, 0, sizeof preq);
-        strcpy(preq.old_password, OPC_PASSWORD_DEFAULT);
-        strcpy(preq.new_password, "NewPassword1");
+        strncpy(preq.old_password, OPC_PASSWORD_DEFAULT, sizeof preq.old_password - 1);
+        strncpy(preq.new_password, "NewPassword1", sizeof preq.new_password - 1);
         kfn = opc_set_password_req_pack(kf, sizeof kf, 96, &preq);
         memset(kf + OPC_HEADER_SIZE, 'A', 128);       /* old pw: no NUL */
         krl = 0;

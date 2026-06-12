@@ -92,11 +92,14 @@
 #define OPC_ERR_IP_CHANGE_CONFLICT            0x0012  /* ChangeIpAddress during in-progress list update */
 #define OPC_ERR_RADIO_MODE                    0x0013  /* SetRadioConfig: invalid WLAN mode */
 #define OPC_ERR_RADIO_BW                      0x0014  /* SetRadioConfig: invalid WLAN bandwidth */
-/* 0x0011–0x0013 are likewise spec-overloaded: each name below intentionally
- * aliases a value already defined above, scoped to a different command.
- *   0x0011 = SLOT_EMPTY (ChangeIpAddress)        | RADIO_FREQ (SetRadioConfig)
- *   0x0012 = IP_CHANGE_CONFLICT (ChangeIpAddress)| IND_RECIPIENT_IP (SetIndicationConfig)
- *   0x0013 = RADIO_MODE (SetRadioConfig)         | IND_OTHER_IP (SetIndicationConfig)
+/* 0x0011–0x0014 are likewise spec-overloaded: each name below intentionally
+ * aliases the same wire value with a different, command-scoped meaning.
+ *   0x0011 = SLOT_EMPTY (ChangeIp) | RADIO_FREQ (SetRadio) | IPCFG_IP (SetIpConfigList)
+ *   0x0012 = IP_CHANGE_CONFLICT (ChangeIp) | IND_RECIPIENT_IP (SetIndication)
+ *            | PW_NUL (Login/SetPassword) | IPCFG_NETMASK (SetIpConfigList)
+ *            | RADIO_CH (SetRadio)
+ *   0x0013 = RADIO_MODE (SetRadio) | IND_OTHER_IP (SetIndication) | IPCFG_GW (SetIpConfigList)
+ *   0x0014 = RADIO_BW (SetRadio) | NEW_PW_NUL (SetPassword) | IPCFG_NTP (SetIpConfigList)
  * Each handler must use only its own command's names, and a single switch must
  * never mix two same-valued names — that is a duplicate-case compile error.
  * vhlctl's value→label map therefore uses literal cases with combined labels. */

@@ -294,6 +294,9 @@ typedef struct opc_set_ip_config_list_req {
     uint32_t essid_terminated_mask;
 } opc_set_ip_config_list_req_t;
 
+_Static_assert(OPC_IPCFG_LIST_MAX_PER_REQ <= 32,
+               "essid_terminated_mask (uint32_t) too narrow for max entries");
+
 typedef struct opc_set_ip_config_list_ack {
     uint16_t result;
     uint16_t error_cause;
