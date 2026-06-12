@@ -631,8 +631,9 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
                 cfg->wlan2.freq_mhz);
         /* DUAL partial-apply risk: if mlan0 succeeded above, an mlan1
          * failure here leaves the two wpa_supplicant confs out of sync.
-         * Caller gets NG (0x0050); recovery is the operator re-issuing
-         * Set-Radio. End-to-end idempotency is the reconnect PR's job. */
+         * Caller gets NG (0x0011, frequency NG — D9); recovery is the
+         * operator re-issuing Set-Radio. End-to-end idempotency is the
+         * reconnect PR's job. */
         if (run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms) != 0) return -1;
     }
     return 0;

@@ -199,7 +199,11 @@ typedef struct opcd_platform_ops {
     /* Mutations. Called from handler.c right after the parsed request passes
      * validation and right before opcd writes NVM. Return 0 means the kernel
      * has accepted the change; any non-zero is mapped by opcd to the
-     * "regulation-class" NG (Error Cause 0x0050 / vendor-specific).
+     * "regulation-class" NG (Error Cause 0x0011, frequency NG — the spec
+     * defines no apply-failure code; see ids.h OPC_ERR_RADIO_FREQ / D9).
+     * The return value carries no field attribution: EVERY apply failure —
+     * including a non-frequency one (e.g. a future bandwidth path) — reaches
+     * the wire as 0x0011.
      * Implementations MUST be non-blocking (no mlanutl exec/wait without a
      * bounded short timeout) — stalling here freezes the opcd main loop and
      * blows the regulation 1-second response budget. Long-running work must
