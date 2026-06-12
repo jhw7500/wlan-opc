@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "../handler.h"
@@ -58,6 +59,11 @@ static int bind_loopback_udp(uint16_t *port_out)
 {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
+    /* Hang-proofing: a recv() after a missed deferred ack must fail after 5s
+     * instead of blocking the whole test run forever (this hung `make check`
+     * indefinitely on 2026-06-11 when a validation bug suppressed the ack). */
+    struct timeval rcvto = { .tv_sec = 5, .tv_usec = 0 };
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvto, sizeof rcvto);
     struct sockaddr_in sa = {0};
     sa.sin_family      = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -206,15 +212,43 @@ static uint16_t do_set_ip_list(opcd_state_t *st, uint32_t cip, uint16_t slot,
     return ack.result;
 }
 
-/* Pack a SetRadioConfig request (SINGLE, 11AX/20MHz), dispatch, return ack
- * result; error cause lands in g_last_radio_err. */
-static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip)
+/* Pack one full SetIpConfigList entry as-is, dispatch, return ack result;
+ * error cause lands in g_last_iplist_err. */
+static uint16_t do_set_ip_entry(opcd_state_t *st, uint32_t cip,
+                                const opc_ipcfg_entry_t *e)
+{
+    opc_set_ip_config_list_req_t req;
+    memset(&req, 0, sizeof req);
+    req.entry_count = 1;
+    req.entries[0]  = *e;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_ip_config_list_req_pack(frame, sizeof frame, 8, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_ip_config_list_ack_t ack;
+    if (opc_set_ip_config_list_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_iplist_err = ack.error_cause;
+    return ack.result;
+}
+
+/* Pack a SetRadioConfig request (SINGLE, 11AX/20MHz, given WLAN#1 freq/ch),
+ * dispatch, return ack result; error cause lands in g_last_radio_err. */
+static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
+                             uint16_t freq, uint16_t ch)
 {
     opc_set_radio_config_req_t req;
     memset(&req, 0, sizeof req);
     req.station_type    = OPC_STATION_SINGLE;
     req.wlan1.mode      = OPC_WLAN_MODE_11AX;
     req.wlan1.bandwidth = OPC_BANDWIDTH_20;
+    req.wlan1.freq_mhz  = freq;
+    req.wlan1.channel   = ch;
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
@@ -454,12 +488,141 @@ int main(void)
 
     /* 14f. D9: platform apply refusal → frequency NG 0x0011 (0x0050 removed). */
     stub_apply_radio_set_fail(1);
-    r = do_set_radio(&st, CIP);
+    r = do_set_radio(&st, CIP, 0, 0);
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
            "D9: apply refusal → NG 0x0011");
     stub_apply_radio_set_fail(0);
-    r = do_set_radio(&st, CIP);
+    r = do_set_radio(&st, CIP, 0, 0);
     ASSERT(r == OPC_RESULT_OK, "D9: apply ok once fail toggle cleared");
+
+    /* 14g. D8/A21: SetRadio frequency / channel-band validation (§3.3.8). */
+    r = do_set_radio(&st, CIP, 6000, 0);          /* 6 GHz frequency */
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
+           "D8: unsupported frequency → 0x0011");
+    r = do_set_radio(&st, CIP, 0, (uint16_t)((OPC_BAND_6GHZ << 8) | 37));
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+           "A21: 6 GHz band channel → 0x0012");
+    r = do_set_radio(&st, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+    ASSERT(r == OPC_RESULT_OK, "D8: valid 2.4G freq+CH accepted");
+
+    /* 14h. SetIndication info-bit validation (§3.3.9 0x0010): 0x40 is the
+     *      only unassigned bit. */
+    r = do_set_indication(&st, CIP, 0x0A0A0A0A, 6000, 0x40, 5);
+    ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_BITS,
+           "ind-bits: unassigned 0x40 → 0x0010");
+
+    /* 14i. D1: SetIPConfigList per-entry value validation (§3.3.6). */
+    {
+        opc_ipcfg_entry_t ent;
+        memset(&ent, 0, sizeof ent);
+        ent.boundary_flag = OPC_LIST_BOUNDARY_START;
+        ent.list_number   = 1;
+        ent.subnet_mask   = 0xFFFFFF00u;
+
+        ent.ip_address = 0xFFFFFFFFu;                 /* broadcast */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
+               "D1: broadcast entry IP → 0x0011");
+
+        ent.ip_address  = 0xC0A80165;                 /* 192.168.1.101 */
+        ent.subnet_mask = 0xFF00FF00u;                /* non-contiguous */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_NETMASK,
+               "D1: non-contiguous netmask → 0x0012");
+
+        ent.subnet_mask     = 0xFFFFFF00u;
+        ent.default_gateway = 0x0A000001u;            /* 10.0.0.1 — other segment */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_GW,
+               "D1: off-subnet gateway → 0x0013");
+
+        ent.default_gateway = 0xC0A801FEu;            /* 192.168.1.254 — same segment */
+        ent.ntp_server      = 0xE0000001u;            /* multicast */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_NTP,
+               "D1: multicast NTP → 0x0014");
+
+        ent.ntp_server = 0;                           /* unset NTP/GW=valid: lenient */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_OK, "D1: valid entry (gw set, ntp unset) accepted");
+    }
+
+    /* 14j. D3: unterminated ESSID wire field → 0x0016. Packers always
+     *      NUL-pad, so poke the wire bytes (entry 0 ESSID @ frame+64+20). */
+    {
+        opc_set_ip_config_list_req_t vreq;
+        memset(&vreq, 0, sizeof vreq);
+        vreq.entry_count = 1;
+        vreq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START;
+        vreq.entries[0].list_number   = 1;
+        vreq.entries[0].ip_address    = 0xC0A80165;
+        vreq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        uint8_t vf[OPC_FRAME_MAX], vresp[OPC_FRAME_MAX];
+        ssize_t vfn = opc_set_ip_config_list_req_pack(vf, sizeof vf, 91, &vreq);
+        memset(vf + 64 + 20, 'A', 32);                /* ESSID: no NUL anywhere */
+        ssize_t vrl = 0;
+        (void)opcd_dispatch(&st, vf, (size_t)vfn, CIP, 5000, vresp, sizeof vresp, &vrl);
+        opc_set_ip_config_list_ack_t vack;
+        ASSERT(opc_set_ip_config_list_ack_unpack(vresp, (size_t)vrl, &vack) == 0 &&
+               vack.result == OPC_RESULT_NG &&
+               vack.error_cause == OPC_ERR_IPCFG_ESSID_NUL,
+               "D3: unterminated ESSID → 0x0016");
+
+        /* 14j-2. D1: body not 64×n → 0x0017 (list-size violation). */
+        uint8_t body63[63];
+        memset(body63, 0, sizeof body63);
+        vfn = opc_frame_build(vf, sizeof vf, OPC_CMD_REQUEST,
+                              OPC_REQ_SET_IP_CONFIG_LIST, 92,
+                              (uint16_t)(56 + 63), body63, sizeof body63);
+        vrl = 0;
+        (void)opcd_dispatch(&st, vf, (size_t)vfn, CIP, 5000, vresp, sizeof vresp, &vrl);
+        ASSERT(opc_set_ip_config_list_ack_unpack(vresp, (size_t)vrl, &vack) == 0 &&
+               vack.result == OPC_RESULT_NG &&
+               vack.error_cause == OPC_ERR_IPCFG_LIST_SIZE,
+               "D1: body not 64*n → 0x0017");
+    }
+
+    /* 14k. D5/D4: unterminated password fields. Packers NUL-pad, so poke the
+     *      wire bytes (Login pw @ frame+64; SetPassword old @ +64, new @ +192). */
+    {
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        opc_login_req_t lreq2;
+        memset(&lreq2, 0, sizeof lreq2);
+        strcpy(lreq2.password, OPC_PASSWORD_DEFAULT);
+        uint8_t kf[OPC_FRAME_MAX], kresp[OPC_FRAME_MAX];
+        ssize_t kfn = opc_login_req_pack(kf, sizeof kf, 95, &lreq2);
+        memset(kf + 64, 'A', OPC_LOGIN_REQ_BODY_LEN);
+        ssize_t krl = 0;
+        (void)opcd_dispatch(&st, kf, (size_t)kfn, CIP, 5000, kresp, sizeof kresp, &krl);
+        opc_login_ack_t kack;
+        ASSERT(opc_login_ack_unpack(kresp, (size_t)krl, &kack) == 0 &&
+               kack.result == OPC_RESULT_NG && kack.error_cause == OPC_ERR_PW_NUL,
+               "D5: unterminated login password → 0x0012");
+
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        opc_set_password_req_t preq;
+        memset(&preq, 0, sizeof preq);
+        strcpy(preq.old_password, OPC_PASSWORD_DEFAULT);
+        strcpy(preq.new_password, "NewPassword1");
+        kfn = opc_set_password_req_pack(kf, sizeof kf, 96, &preq);
+        memset(kf + 64, 'A', 128);                    /* old pw: no NUL */
+        krl = 0;
+        (void)opcd_dispatch(&st, kf, (size_t)kfn, CIP, 5000, kresp, sizeof kresp, &krl);
+        opc_set_password_ack_t pack2;
+        ASSERT(opc_set_password_ack_unpack(kresp, (size_t)krl, &pack2) == 0 &&
+               pack2.result == OPC_RESULT_NG && pack2.error_cause == OPC_ERR_PW_NUL,
+               "D4: unterminated old password → 0x0012");
+
+        kfn = opc_set_password_req_pack(kf, sizeof kf, 97, &preq);
+        memset(kf + 64 + 128, 'A', 128);              /* new pw: no NUL */
+        krl = 0;
+        (void)opcd_dispatch(&st, kf, (size_t)kfn, CIP, 5000, kresp, sizeof kresp, &krl);
+        ASSERT(opc_set_password_ack_unpack(kresp, (size_t)krl, &pack2) == 0 &&
+               pack2.result == OPC_RESULT_NG && pack2.error_cause == OPC_ERR_NEW_PW_NUL,
+               "D4: unterminated new password → 0x0014");
+        ASSERT(do_login(&st, CIP, OPC_PASSWORD_DEFAULT) == OPC_RESULT_OK,
+               "D4: stored password unchanged after NUL violations");
+    }
 
     /* ---- PERF-001: async NVRAM persist → deferred Set* ack ---- */
 

@@ -85,6 +85,29 @@ static bool valid_unicast_ipv4(uint32_t ip_host)
     return true;
 }
 
+/* §3.3.6: a netmask must be contiguous ones from the MSB (/32 allowed). */
+static bool valid_netmask(uint32_t m)
+{
+    return m != 0 && ((~m & (~m + 1u)) == 0);
+}
+
+/* §3.3.6 per-entry value validation (D1). Returns 0 or the NG error cause.
+ * default_gateway / ntp_server 0 = "unset" and is accepted: the spec text
+ * lists 0.0.0.0 as invalid, but the fields are operationally optional —
+ * recorded as a vendor inquiry in docs/spec-conformance.md. */
+static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_terminated)
+{
+    if (!valid_unicast_ipv4(e->ip_address))   return OPC_ERR_IPCFG_IP;        /* 0x0011 */
+    if (!valid_netmask(e->subnet_mask))       return OPC_ERR_IPCFG_NETMASK;   /* 0x0012 */
+    if (e->default_gateway != 0 &&
+        (e->default_gateway & e->subnet_mask) != (e->ip_address & e->subnet_mask))
+        return OPC_ERR_IPCFG_GW;                                              /* 0x0013 */
+    if (e->ntp_server != 0 && !valid_unicast_ipv4(e->ntp_server))
+        return OPC_ERR_IPCFG_NTP;                                             /* 0x0014 */
+    if (!essid_terminated)                    return OPC_ERR_IPCFG_ESSID_NUL; /* 0x0016 */
+    return 0;
+}
+
 /* Store an ack-pack result as the response length. A negative pack result
  * (capacity / argument failure) means "no response": store 0 rather than a
  * negative length, which the main loop would otherwise have to special-case.
@@ -276,6 +299,9 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_VIOLATION;
     } else if (st->logged_in && st->holder_ip != ip) {
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_CONDITION;
+    } else if (!req.password_terminated) {
+        /* §3.3.1 0x0012: password field not NUL-terminated (D5) */
+        result = OPC_RESULT_NG; err = OPC_ERR_PW_NUL;
     } else if (st->password[0] == '\0') {
         /* Empty stored password is "not provisioned" — it must never
          * authenticate. Without this, strncmp("", "") == 0 lets an empty
@@ -471,7 +497,13 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         size_t newlen = strnlen(req.new_password, sizeof st->password - 1);
-        if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0) {
+        if (!req.old_password_terminated) {
+            /* §3.3.5 0x0012: old password not NUL-terminated (D4) */
+            result = OPC_RESULT_NG; err = OPC_ERR_PW_NUL;
+        } else if (!req.new_password_terminated) {
+            /* §3.3.5 0x0014: new password not NUL-terminated (D4) */
+            result = OPC_RESULT_NG; err = OPC_ERR_NEW_PW_NUL;
+        } else if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0) {
             result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else if (newlen == 0) {
             /* Refuse an empty new password — that is how the unauthenticated
@@ -504,7 +536,11 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
     uint16_t result = OPC_RESULT_OK, err = OPC_ERR_NONE;
     opc_set_ip_config_list_req_t req;
 
-    if (opc_set_ip_config_list_req_unpack(frame, flen, &req) != 0) {
+    int urc = opc_set_ip_config_list_req_unpack(frame, flen, &req);
+    if (urc == -2) {
+        /* §3.3.6 0x0017: body is not 64×n (n=1..20) — list-size violation (D1) */
+        result = OPC_RESULT_NG; err = OPC_ERR_IPCFG_LIST_SIZE;
+    } else if (urc != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         bool committed = false;
@@ -512,6 +548,13 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             const opc_ipcfg_entry_t *e = &req.entries[i];
             if (e->list_number < 1 || e->list_number > OPC_IPCFG_LIST_MAX_SLOTS) {
                 result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
+                break;
+            }
+            uint16_t verr = ipcfg_entry_error(e, (req.essid_terminated_mask >> i) & 1u);
+            if (verr != 0) {
+                /* §3.3.6 value validation (D1) — entry rejected before any
+                 * staging mutation. */
+                result = OPC_RESULT_NG; err = verr;
                 break;
             }
             uint16_t flag = e->boundary_flag;
@@ -613,6 +656,25 @@ static bool valid_wlan_bw(uint8_t b)
            b == OPC_BANDWIDTH_80_80 || b == OPC_BANDWIDTH_320;
 }
 
+/* §3.3.8 (D8): supported bands are 2.4/5 GHz — 6 GHz rejected (A21). 0 means
+ * "not specified". Exact per-band channel lists need device confirmation (V2),
+ * so only band-level validation is done here. */
+static bool valid_radio_freq(uint16_t mhz)
+{
+    return mhz == 0 || (mhz >= 2400 && mhz <= 2500) ||
+           (mhz >= 4900 && mhz <= 5925);
+}
+
+static bool valid_radio_channel(uint16_t ch)
+{
+    uint8_t band = (uint8_t)(ch >> 8);   /* upper byte band, lower byte CH */
+    /* Reject only a present-but-unsupported band (A21: 6 GHz refused; unknown
+     * band ids likewise). band 0x00 — a bare CH number — is tolerated: the
+     * exact CH-list / encoding enforcement is pending device confirmation
+     * (V2/V12), and the legacy encoding is in operational use. */
+    return band == 0 || band == OPC_BAND_2_4GHZ || band == OPC_BAND_5GHZ;
+}
+
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
@@ -634,6 +696,18 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_MODE;
         } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_bw(req.wlan2.bandwidth)) {
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_BW;
+        } else if (!valid_radio_freq(req.wlan1.freq_mhz) ||
+                   (req.station_type == OPC_STATION_DUAL &&
+                    !valid_radio_freq(req.wlan2.freq_mhz))) {
+            /* §3.3.8 0x0011: unsupported frequency (D8) */
+            result = OPC_RESULT_NG; err = OPC_ERR_RADIO_FREQ;
+        } else if (!valid_radio_channel(req.wlan1.channel) ||
+                   (req.station_type == OPC_STATION_DUAL &&
+                    (!valid_radio_channel(req.wlan2.channel) ||
+                     !valid_radio_channel(req.priority_ch)))) {
+            /* §3.3.8 0x0012: unsupported CH/band — includes 6 GHz (A21).
+             * priority_ch is Dual-only (A16) and checked only there. */
+            result = OPC_RESULT_NG; err = OPC_ERR_RADIO_CH;
         } else {
             const opcd_platform_ops_t *plat = opcd_platform();
             if (!plat) {
@@ -676,7 +750,10 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
     if (opc_set_indication_config_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
+        if (req.info_bits & (uint8_t)~OPC_IND_BITS_ALL) {
+            /* §3.3.9 0x0010: unassigned notification bit set (D1 family) */
+            result = OPC_RESULT_NG; err = OPC_ERR_IND_BITS;
+        } else if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
             /* SEC-002: only a unicast recipient may receive indications.
              * Reject 0.0.0.0 / multicast / broadcast so the daemon cannot be
              * pointed at a group/broadcast as an amplifier. State unchanged.

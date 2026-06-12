@@ -113,6 +113,22 @@
                                                        * FIXME: wire value unconfirmed — 0x0018 is the
                                                        * vendor-answer proposal; update when the formal
                                                        * confirmation arrives. */
+#define OPC_ERR_PW_NUL                        0x0012  /* Login §3.3.1 / SetPassword(old) §3.3.5:
+                                                       * password field not NUL-terminated */
+#define OPC_ERR_NEW_PW_NUL                    0x0014  /* SetPassword: new password not NUL-terminated */
+#define OPC_ERR_IPCFG_IP                      0x0011  /* SetIpConfigList: impossible IP (0.0.0.0/bcast/mcast) */
+#define OPC_ERR_IPCFG_NETMASK                 0x0012  /* SetIpConfigList: not a valid netmask */
+#define OPC_ERR_IPCFG_GW                      0x0013  /* SetIpConfigList: gateway outside the entry's subnet */
+#define OPC_ERR_IPCFG_NTP                     0x0014  /* SetIpConfigList: impossible NTP server IP */
+#define OPC_ERR_IPCFG_ESSID_CHAR              0x0015  /* SetIpConfigList: invalid ESSID characters
+                                                       * (semantics undefined in spec — not yet emitted) */
+#define OPC_ERR_IPCFG_ESSID_NUL               0x0016  /* SetIpConfigList: ESSID not NUL-terminated */
+#define OPC_ERR_IPCFG_LIST_SIZE               0x0017  /* SetIpConfigList: Length is not 56 + 64*n */
+#define OPC_ERR_RADIO_CH                      0x0012  /* SetRadioConfig: unsupported CH/band (incl. 6 GHz — A21) */
+#define OPC_ERR_IND_BITS                      0x0010  /* SetIndicationConfig: unassigned info bit set */
+
+/* All assigned indication info bits (§3.4) — everything except 0x40. */
+#define OPC_IND_BITS_ALL                      0xBF
 
 /* Reset cause (Reset ack / ResetNotice indication). */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */

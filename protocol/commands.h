@@ -1,6 +1,7 @@
 #ifndef WLAN_OPC_COMMANDS_H
 #define WLAN_OPC_COMMANDS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -76,6 +77,7 @@ typedef struct opc_wlan_radio_cfg {
 
 typedef struct opc_login_req {
     char password[OPC_LOGIN_REQ_BODY_LEN];
+    bool password_terminated;   /* wire field had a NUL (§3.3.1 0x0012 check) */
 } opc_login_req_t;
 
 typedef struct opc_login_ack {
@@ -219,6 +221,8 @@ int     opc_get_device_info_ack_unpack(const uint8_t *frame, size_t frame_len,
 typedef struct opc_set_password_req {
     char old_password[OPC_PASSWORD_FIELD_LEN];   /* NULL-terminated, up to OPC_LOGIN_PASSWORD_MAX chars */
     char new_password[OPC_PASSWORD_FIELD_LEN];
+    bool old_password_terminated;   /* wire field had a NUL (§3.3.5 0x0012 check) */
+    bool new_password_terminated;   /* wire field had a NUL (§3.3.5 0x0014 check) */
 } opc_set_password_req_t;
 
 typedef struct opc_set_password_ack {
@@ -284,6 +288,10 @@ typedef struct opc_ipcfg_entry {
 typedef struct opc_set_ip_config_list_req {
     size_t entry_count;       /* 1..OPC_IPCFG_LIST_MAX_PER_REQ */
     opc_ipcfg_entry_t entries[OPC_IPCFG_LIST_MAX_PER_REQ];
+    /* bit i set = entries[i].essid wire field had a NUL (§3.3.6 0x0016 check).
+     * Kept out of opc_ipcfg_entry_t so the persisted NVRAM slot layout is
+     * unchanged. */
+    uint32_t essid_terminated_mask;
 } opc_set_ip_config_list_req_t;
 
 typedef struct opc_set_ip_config_list_ack {
@@ -293,6 +301,9 @@ typedef struct opc_set_ip_config_list_ack {
 
 ssize_t opc_set_ip_config_list_req_pack(uint8_t *frame, size_t cap, uint16_t seq_no,
                                         const opc_set_ip_config_list_req_t *in);
+/* Returns 0 on success, -2 when the frame parses but the body is not 64×n
+ * (n = 1..20) — the §3.3.6 list-size violation (0x0017) — and -1 for any
+ * other malformed input. */
 int     opc_set_ip_config_list_req_unpack(const uint8_t *frame, size_t frame_len,
                                           opc_set_ip_config_list_req_t *out);
 ssize_t opc_set_ip_config_list_ack_pack(uint8_t *frame, size_t cap, uint16_t seq_no,
