@@ -55,7 +55,10 @@ static void (*g_teardown)(void);
  * roaming / ap_disconnect, but the OPC indication spec (Rev 1.00 KO §3.4)
  * has no wlan_id field in any of these frames, so idx is intentionally not
  * propagated — VHL cannot distinguish wlan1 from wlan2 events at the
- * protocol level. This is a spec limitation, not an opcd routing bug. */
+ * protocol level. This is a spec limitation, not an opcd routing bug.
+ * Interim policy (2026-06-12 user decision, customer inquiry in issue #35):
+ * until the spec grows a wlan_id, indications follow the primary WLAN —
+ * the nl80211 integration (V1) should emit idx==0 (mlan0) events only. */
 static int on_platform_event(const opcd_platform_evt_t *evt, void *ctx)
 {
     opcd_state_t *st = ctx;
@@ -398,17 +401,33 @@ int main(int argc, char **argv)
                         opcd_reject_bad_length(&st, rx, (size_t)rn, cip, cprt);
                         continue;
                     }
+                    struct timespec rx_ts;
+                    clock_gettime(CLOCK_MONOTONIC, &rx_ts);
                     ssize_t tx_len = 0;
                     int rc = opcd_dispatch(&st, rx, (size_t)rn, cip, cprt,
                                            tx, sizeof tx, &tx_len);
                     if (rc == 0) {
                         /* tx_len == 0 is a legitimate no-response: a deferred
-                         * Set* ack awaiting its NVRAM completion, or a failed
-                         * ack pack (emit_ack). */
+                         * Set* ack awaiting its NVRAM completion (its T7 log
+                         * fires on the deferred send), or a failed ack pack
+                         * (emit_ack). */
                         if (tx_len > 0) {
                             ssize_t w = sendto(udp_fd, tx, (size_t)tx_len, 0,
                                                (struct sockaddr *)&src, srclen);
                             if (w != tx_len) LOG("sendto short: %zd/%zd", w, tx_len);
+                            /* T7 (proto-todo): actual service time vs the
+                             * spec budget (1 s for non-persisting commands). */
+                            opc_header_t hdr;
+                            if (opc_fixed_header_unpack(rx, (size_t)rn, &hdr) == 0) {
+                                struct timespec now;
+                                clock_gettime(CLOCK_MONOTONIC, &now);
+                                long long us =
+                                    (now.tv_sec - rx_ts.tv_sec) * 1000000LL +
+                                    (now.tv_nsec - rx_ts.tv_nsec) / 1000;
+                                LOG("req 0x%04X seq=%u served in %lld.%03lld ms",
+                                    hdr.req_indication_id, hdr.sequence_number,
+                                    us / 1000, us % 1000);
+                            }
                         }
                     } else {
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
