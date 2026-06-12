@@ -17,7 +17,8 @@
 > - **재분류**: SEC-001 → 문서화(신뢰망 전제, SECURITY.md / spec-conformance V8) ·
 >   SEC-004 → **사양 귀결 종결**(§3.3.3 "반드시 응답" + Device Status `0x00000002`="Login
 >   중 상태"가 사양 정의 — SECURITY.md 참조) · SEC-005 → 부분 완화(빈 비밀번호 차단;
->   기본 비밀번호는 운영 절차 + proto-todo T4 정책 결정 대기)
+>   기본 비밀번호는 운영 절차로 관리, 평문 저장은 2026-06-12 사용자 결정으로 확정 —
+>   proto-todo T4 RESOLVED)
 > - **잔여 (low)**: ARCH-006(flat `opcd_state_t`), PERF-002(indication 헬퍼 스택 프레임),
 >   PERF-003/004(SetIpConfigList 스택/복사 — PERF-001 해소로 fsync 가중분은 완화),
 >   STYLE-002(`.clang-format` 부재)
