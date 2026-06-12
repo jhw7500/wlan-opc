@@ -66,6 +66,8 @@ typedef struct opcd_pending_ack {
     uint16_t seq;           /* echoed sequence number */
     uint32_t client_ip;     /* host byte order */
     uint16_t client_port;   /* host byte order */
+    struct timespec rx_ts;  /* request receipt (CLOCK_MONOTONIC) — T7
+                             * served-in log on the deferred ack send */
 } opcd_pending_ack_t;
 
 /* Whole-daemon mutable state. */
