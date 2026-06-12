@@ -60,7 +60,12 @@ $(TESTDIR)/test_fault_probe: $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking (#40) — each .d sits next to its test .o. The
+# reused $(OPCDOBJ)/*.o are covered by opcd/Makefile's own .d includes (the
+# top-level `check` always runs `make native` first).
+-include $(BINS:%=%.d)
 
 $(TESTDIR):
 	mkdir -p $(TESTDIR)

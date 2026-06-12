@@ -23,7 +23,10 @@ $(TESTDIR)/test_fielddump: $(TESTDIR)/test_fielddump.o $(VHLOBJ)/fielddump.o $(P
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_fielddump.o $(VHLOBJ)/fielddump.o $(LDFLAGS) $(LDLIBS)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking (#40) — each .d sits next to its test .o.
+-include $(BINS:%=%.d)
 
 $(TESTDIR):
 	mkdir -p $(TESTDIR)

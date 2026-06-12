@@ -32,7 +32,10 @@ $(BIN): $(OBJS) $(PROTODIR)/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking (#40) — see protocol/Makefile.
+-include $(OBJS:.o=.d)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)

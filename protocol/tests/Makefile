@@ -21,7 +21,10 @@ $(TESTDIR)/test_codec: $(TESTDIR)/test_codec.o $(PROTODIR)/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_codec.o $(LDFLAGS) $(LDLIBS)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking (#40) — each .d sits next to its test .o.
+-include $(BINS:%=%.d)
 
 $(TESTDIR):
 	mkdir -p $(TESTDIR)

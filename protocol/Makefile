@@ -19,7 +19,11 @@ $(LIB): $(OBJS)
 	$(AR) rcs $@ $(OBJS)
 
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Header dependency tracking (#40): -MMD emits a .d per object so a header
+# edit recompiles every .o that includes it (two stale-ABI incidents before).
+-include $(OBJS:.o=.d)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
