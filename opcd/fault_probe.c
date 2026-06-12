@@ -117,7 +117,7 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
         out->disk_over = pct >= p->threshold_pct;
 
         /* bytes → Mbit/s: *8 bits, /elapsed_ms gives kbit/s, /1000 → Mbit/s */
-        uint64_t mbps = (d_net_bytes * 8u / elapsed_ms) / 1000u;
+        uint64_t mbps = (d_net_bytes * 8ULL / elapsed_ms) / 1000u;
         /* net_over is judged on the uncapped rate; net_mbps (the wire
          * current_val, uint16) saturates at 65535 — a capture showing 65535
          * means "at least 65.5 Gbit/s", not the exact trigger rate. */
@@ -165,7 +165,14 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
             else
                 snprintf(p->disk_dev, sizeof p->disk_dev, "%s", val);
         } else if (strcmp(key, "congestion_net_if") == 0) {
-            snprintf(p->net_dir, sizeof p->net_dir, "/sys/class/net/%s", val);
+            if (strchr(val, '/') != NULL || val[0] == '.')
+                /* interface names never contain '/' nor start with '.' —
+                 * reject so the probe cannot be pointed outside sysfs
+                 * (e.g. "../../proc"). VLAN names like eth0.100 still pass. */
+                fprintf(stderr, "opcd: fault probe: congestion_net_if '%s' "
+                                "rejected (path characters)\n", val);
+            else
+                snprintf(p->net_dir, sizeof p->net_dir, "/sys/class/net/%s", val);
         }
     }
     fclose(f);
@@ -200,6 +207,9 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
     if (!p || !out) return -1;
     memset(out, 0, sizeof *out);
 
+    /* 32 KiB stack buffer is deliberate: diskstats on the NXP target is
+     * well under 1 KiB; the headroom absorbs many-device dev/CI hosts.
+     * One frame per reporting period on the daemon stack — no recursion. */
     char buf[32768];
     uint64_t busy = 0, total = 0, disk = 0, net = 0;
     bool cpu_ok  = read_text(p->path_proc_stat, buf, sizeof buf) == 0 &&
