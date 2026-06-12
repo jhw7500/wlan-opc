@@ -983,7 +983,9 @@ int main(void)
                                 .req_indication_id = OPC_REQ_SET_PASSWORD,
                                 .sequence_number   = 77,
                                 .length            = 22 };
-            (void)opc_header_pack(badf, &bh);
+            /* fixed-header pack writes only 8 B — opc_header_pack would
+             * memset the full 64 B common header into this 30 B buffer */
+            (void)opc_fixed_header_pack(badf, &bh);
         }
         opcd_reject_bad_length(&st, badf, sizeof badf, LOOP, cli_port);
         ASSERT(wait_fd_readable(cli, 1000) == 0,

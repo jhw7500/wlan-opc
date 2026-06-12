@@ -960,11 +960,11 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
 void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport)
 {
-    if (!st->logged_in || st->holder_ip != cip) return;          /* drop */
+    if (!st || !st->logged_in || st->holder_ip != cip) return;   /* drop */
     opc_header_t hdr;
     /* fixed-header unpack (8 B): a bad-length frame is by definition shorter
      * than the 64 B common header, which opc_header_unpack would insist on. */
-    if (valid_len < OPC_FIXED_HEADER_SIZE ||
+    if (!frame || valid_len < OPC_FIXED_HEADER_SIZE ||
         opc_fixed_header_unpack(frame, valid_len, &hdr) != 0) return;
     uint8_t resp[OPC_FRAME_MAX];
     ssize_t n = opc_simple_ack_pack(resp, sizeof resp, hdr.req_indication_id,
