@@ -7,6 +7,7 @@
 
 #include "../protocol/commands.h"
 #include "../protocol/indications.h"
+#include "fault_probe.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +91,9 @@ typedef struct opcd_state {
     /* ChangeIpAddress is deferred: applied after we send the Logout ack. */
     bool     ip_change_pending;
     uint16_t ip_change_list_no;
+
+    /* FaultDetect congestion probe — T6 interim policy (fault_probe.h). */
+    opcd_fault_probe_t fault_probe;
 
     /* Indication target (volatile). */
     bool     indication_enabled;

@@ -18,10 +18,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
 #include "../handler.h"
+#include "../indication.h"
 #include "../opcd_state.h"
 #include "../platform.h"
 #include "../store.h"
@@ -29,6 +31,7 @@
 #include "../../protocol/codec.h"
 #include "../../protocol/commands.h"
 #include "../../protocol/ids.h"
+#include "../../protocol/indications.h"
 #include "../../protocol/proto.h"
 
 static int failures = 0;
@@ -1006,6 +1009,64 @@ int main(void)
                                LOOP, cli_port);
         ASSERT(wait_fd_readable(cli, 300) != 0,
                "D13: sub-header runt stays silent even for the holder");
+
+        /* 23. T6 interim: the congestion probe fires FaultDetect on the
+         *     reporting period and re-notifies while the congestion
+         *     persists. Synthetic /proc/stat source; disk/net sources are
+         *     left dead so only the CPU resource can flag. */
+        {
+            char fpd[64], fpstat[128];
+            snprintf(fpd, sizeof fpd, "test_handler_fp_%d", (int)getpid());
+            mkdir(fpd, 0755);
+            snprintf(fpstat, sizeof fpstat, "%s/stat", fpd);
+            FILE *ff = fopen(fpstat, "w");
+            ASSERT(ff != NULL, "T6: fixture write (prime)");
+            if (ff) { fputs("cpu  0 0 0 1000 0 0 0 0\n", ff); fclose(ff); }
+
+            opcd_fault_probe_init(&st.fault_probe);
+            snprintf(st.fault_probe.path_proc_stat,
+                     sizeof st.fault_probe.path_proc_stat, "%s", fpstat);
+            snprintf(st.fault_probe.path_diskstats,
+                     sizeof st.fault_probe.path_diskstats, "%s/none", fpd);
+            snprintf(st.fault_probe.net_dir,
+                     sizeof st.fault_probe.net_dir, "%s/none", fpd);
+
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_FAULT_DETECT, 1);
+            ASSERT(r == OPC_RESULT_OK, "T6: FaultDetect-only indication enabled");
+            opcd_ind_tick(&st);              /* period 1 → fires; primes probe */
+            ASSERT(wait_fd_readable(cli, 200) != 0,
+                   "T6: priming tick emits nothing");
+
+            ff = fopen(fpstat, "w");         /* +900 busy / +1000 total = 90% */
+            ASSERT(ff != NULL, "T6: fixture write (90%)");
+            if (ff) { fputs("cpu  900 0 0 1100 0 0 0 0\n", ff); fclose(ff); }
+            st.fault_probe.mono_ms -= 1000;  /* pretend one second elapsed */
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "T6: congestion frame sent");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_fault_detect_t fdi;
+            ASSERT(rn > 0 &&
+                   opc_ind_fault_detect_unpack(rx_buf, (size_t)rn, &fdi) == 0 &&
+                   fdi.congestion_id == OPC_CONGESTION_CPU &&
+                   fdi.current_val >= 80,
+                   "T6: CPU congestion id and value reported");
+
+            ff = fopen(fpstat, "w");         /* still 90% over the next period */
+            ASSERT(ff != NULL, "T6: fixture write (repeat)");
+            if (ff) { fputs("cpu  1800 0 0 1200 0 0 0 0\n", ff); fclose(ff); }
+            st.fault_probe.mono_ms -= 1000;
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "T6: persistent congestion re-notified");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 &&
+                   opc_ind_fault_detect_unpack(rx_buf, (size_t)rn, &fdi) == 0 &&
+                   fdi.congestion_id == OPC_CONGESTION_CPU,
+                   "T6: repeat frame is FaultDetect CPU");
+            unlink(fpstat);
+            rmdir(fpd);
+        }
 
         st.store_async = NULL;
         opc_store_async_destroy(sa);
