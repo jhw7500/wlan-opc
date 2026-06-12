@@ -249,7 +249,7 @@
 
 - **START_END(0x0003) 원자커밋 제거** — page-22의 단일프레임 커밋 미지원. 근거: `commands.h:267` 주석(page-24 채택, START→END 분리 송신 요구)
 - **ResetNotice 자율리셋 트리거 부재** — 사양은 "자율 리셋 전 통지", 코드는 operator Reset 경로만. 근거: proto-todo **T9**(watchdog 미연동)
-- **패스워드 평문 저장** — 사양 침묵, 1차 구현 평문(mode 0600). 근거: SECURITY.md
+- **패스워드 평문 저장** — 사양 침묵, 평문(mode 0600). **확정(2026-06-12 사용자 결정): 평문 유지 종결** — 와이어 자체가 평문 UDP라 at-rest 해시는 실익 제한 (proto-todo T4 RESOLVED). 근거: SECURITY.md
 - **기본 비밀번호 `MyPassword` 노출** — 사양 위반 조항은 없음 → 엄밀히는 "보안 위험"이지 deviation 아님. 근거: SECURITY.md(운영 최초 변경 필수)
 - **세션 UDP 소스 IP-only 식별** — 스푸핑 가능. 근거: SECURITY.md SEC-001(신뢰망 전제)
 - **wlan_id 부재 → Dual WLAN#1/#2 구분 불가** — indication에 wlan_id 필드 없음. 근거: 사양 §3.4 한계, 코드 주석(`opcd.c` on_platform_event). **처리 방침(2026-06-12 사용자 결정): 📌 고객사 문의 예정(#35 항목 6) — 답변 전까지 잠정적으로 주 WLAN(mlan0) 기준으로만 발행**
