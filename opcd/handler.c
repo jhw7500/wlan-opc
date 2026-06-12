@@ -37,6 +37,16 @@ static bool session_owns(const opcd_state_t *st, uint32_t client_ip)
     return st->logged_in && st->holder_ip == client_ip;
 }
 
+/* ARCH-005: single authority for the wire-visible station type, shared by
+ * GetBasicInfo and GetDeviceInfo. The fallback is unreachable today —
+ * state_init seeds radio.station_type with SINGLE before any frame is
+ * handled (D15) — and is kept defensively for a zeroed radio config. */
+static uint16_t effective_station_type(const opcd_state_t *st)
+{
+    return st->radio.station_type ? st->radio.station_type
+                                  : st->conf.default_station_type;
+}
+
 static int check_login_required(const opcd_state_t *st, uint32_t client_ip,
                                 uint16_t *result, uint16_t *err)
 {
@@ -411,11 +421,7 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
         .product_code    = inv->product_code,
         .product_subcode = inv->product_subcode,
         .device_status   = st->boot_status,
-        /* Fallback unreachable today — state_init seeds radio.station_type
-         * with SINGLE before any frame is handled. Kept defensively for a
-         * zeroed radio config (D15). */
-        .station_type    = st->radio.station_type ? st->radio.station_type
-                                                  : st->conf.default_station_type,
+        .station_type    = effective_station_type(st),
     };
     emit_ack(rlen, opc_get_basic_info_ack_pack(resp, rcap, seq, &ack));
     return 0;
@@ -519,13 +525,13 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             ack.ieee_11v  = inv->ieee_11v;
             session_touch(st);
             ack.device_status = st->boot_status;
-            ack.station_type  = st->radio.station_type;
+            ack.station_type  = effective_station_type(st);
             ack.priority_ch   = st->radio.priority_ch;
             ack.wlan1.freq_mhz  = st->radio.wlan1.freq_mhz;
             ack.wlan1.channel   = st->radio.wlan1.channel;
             if (!w1_mode_live) ack.wlan1.mode      = st->radio.wlan1.mode;
             if (!w1_bw_live)   ack.wlan1.bandwidth = st->radio.wlan1.bandwidth;
-            if (st->radio.station_type == OPC_STATION_DUAL) {
+            if (ack.station_type == OPC_STATION_DUAL) {
                 ack.wlan2.freq_mhz  = st->radio.wlan2.freq_mhz;
                 ack.wlan2.channel   = st->radio.wlan2.channel;
                 if (!w2_mode_live) ack.wlan2.mode      = st->radio.wlan2.mode;
