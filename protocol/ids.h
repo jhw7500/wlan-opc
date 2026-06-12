@@ -127,8 +127,9 @@
 #define OPC_ERR_RADIO_CH                      0x0012  /* SetRadioConfig: unsupported CH/band (incl. 6 GHz — A21) */
 #define OPC_ERR_IND_BITS                      0x0010  /* SetIndicationConfig: unassigned info bit set */
 
-/* All assigned indication info bits (§3.4) — everything except 0x40. */
-#define OPC_IND_BITS_ALL                      0xBF
+/* Indication info bits (§3.4): 0x40 is the only unassigned/reserved bit —
+ * the seven assigned OPC_IND_BIT_* above OR to 0xBF. */
+#define OPC_IND_BITS_RESERVED                 0x40
 
 /* Reset cause (Reset ack / ResetNotice indication). */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */

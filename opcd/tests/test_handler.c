@@ -502,8 +502,39 @@ int main(void)
     r = do_set_radio(&st, CIP, 0, (uint16_t)((OPC_BAND_6GHZ << 8) | 37));
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
            "A21: 6 GHz band channel → 0x0012");
+    r = do_set_radio(&st, CIP, 0, (uint16_t)(OPC_BAND_2_4GHZ << 8));
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+           "D8: band specified with CH 0 → 0x0012");
     r = do_set_radio(&st, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
     ASSERT(r == OPC_RESULT_OK, "D8: valid 2.4G freq+CH accepted");
+
+    /* 14g-2. A21 DUAL: wlan2.channel / priority_ch band validation. */
+    {
+        opc_set_radio_config_req_t rreq;
+        memset(&rreq, 0, sizeof rreq);
+        rreq.station_type    = OPC_STATION_DUAL;
+        rreq.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        rreq.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        rreq.wlan2.mode      = OPC_WLAN_MODE_11AX;
+        rreq.wlan2.bandwidth = OPC_BANDWIDTH_20;
+        rreq.wlan2.channel   = (uint16_t)((OPC_BAND_6GHZ << 8) | 37);
+        uint8_t rf[OPC_FRAME_MAX], rresp[OPC_FRAME_MAX];
+        ssize_t rfn = opc_set_radio_config_req_pack(rf, sizeof rf, 98, &rreq);
+        ssize_t rrl = 0;
+        (void)opcd_dispatch(&st, rf, (size_t)rfn, CIP, 5000, rresp, sizeof rresp, &rrl);
+        opc_set_radio_config_ack_t rack;
+        ASSERT(opc_set_radio_config_ack_unpack(rresp, (size_t)rrl, &rack) == 0 &&
+               rack.result == OPC_RESULT_NG && rack.error_cause == OPC_ERR_RADIO_CH,
+               "A21: DUAL wlan2 6 GHz channel → 0x0012");
+        rreq.wlan2.channel = 0;
+        rreq.priority_ch   = (uint16_t)((OPC_BAND_6GHZ << 8) | 1);
+        rfn = opc_set_radio_config_req_pack(rf, sizeof rf, 99, &rreq);
+        rrl = 0;
+        (void)opcd_dispatch(&st, rf, (size_t)rfn, CIP, 5000, rresp, sizeof rresp, &rrl);
+        ASSERT(opc_set_radio_config_ack_unpack(rresp, (size_t)rrl, &rack) == 0 &&
+               rack.result == OPC_RESULT_NG && rack.error_cause == OPC_ERR_RADIO_CH,
+               "A21: DUAL priority_ch 6 GHz → 0x0012");
+    }
 
     /* 14h. SetIndication info-bit validation (§3.3.9 0x0010): 0x40 is the
      *      only unassigned bit. */
@@ -545,6 +576,23 @@ int main(void)
         ent.ntp_server = 0;                           /* unset NTP/GW=valid: lenient */
         r = do_set_ip_entry(&st, CIP, &ent);
         ASSERT(r == OPC_RESULT_OK, "D1: valid entry (gw set, ntp unset) accepted");
+
+        ent.default_gateway = 0;
+        ent.ip_address      = 0xC0A80100u;            /* 192.168.1.0 — network addr */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
+               "D1: subnet network address as host IP → 0x0011");
+
+        ent.ip_address = 0xC0A801FFu;                 /* 192.168.1.255 — broadcast */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
+               "D1: subnet broadcast address as host IP → 0x0011");
+
+        ent.ip_address      = 0xC0A80165u;
+        ent.default_gateway = 0xC0A80165u;            /* gw == host IP */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_GW,
+               "D1: gateway equal to host IP → 0x0013");
     }
 
     /* 14j. D3: unterminated ESSID wire field → 0x0016. Packers always
@@ -559,7 +607,9 @@ int main(void)
         vreq.entries[0].subnet_mask   = 0xFFFFFF00u;
         uint8_t vf[OPC_FRAME_MAX], vresp[OPC_FRAME_MAX];
         ssize_t vfn = opc_set_ip_config_list_req_pack(vf, sizeof vf, 91, &vreq);
-        memset(vf + 64 + 20, 'A', 32);                /* ESSID: no NUL anywhere */
+        /* entry 0 starts at the common-header end (proto.h OPC_HEADER_SIZE);
+         * ESSID sits at entry offset +20 (commands.c pack_ipcfg_entry). */
+        memset(vf + OPC_HEADER_SIZE + 20, 'A', 32);   /* ESSID: no NUL anywhere */
         ssize_t vrl = 0;
         (void)opcd_dispatch(&st, vf, (size_t)vfn, CIP, 5000, vresp, sizeof vresp, &vrl);
         opc_set_ip_config_list_ack_t vack;
@@ -591,7 +641,8 @@ int main(void)
         strcpy(lreq2.password, OPC_PASSWORD_DEFAULT);
         uint8_t kf[OPC_FRAME_MAX], kresp[OPC_FRAME_MAX];
         ssize_t kfn = opc_login_req_pack(kf, sizeof kf, 95, &lreq2);
-        memset(kf + 64, 'A', OPC_LOGIN_REQ_BODY_LEN);
+        /* password field starts at the common-header end (OPC_HEADER_SIZE) */
+        memset(kf + OPC_HEADER_SIZE, 'A', OPC_LOGIN_REQ_BODY_LEN);
         ssize_t krl = 0;
         (void)opcd_dispatch(&st, kf, (size_t)kfn, CIP, 5000, kresp, sizeof kresp, &krl);
         opc_login_ack_t kack;
@@ -605,7 +656,7 @@ int main(void)
         strcpy(preq.old_password, OPC_PASSWORD_DEFAULT);
         strcpy(preq.new_password, "NewPassword1");
         kfn = opc_set_password_req_pack(kf, sizeof kf, 96, &preq);
-        memset(kf + 64, 'A', 128);                    /* old pw: no NUL */
+        memset(kf + OPC_HEADER_SIZE, 'A', 128);       /* old pw: no NUL */
         krl = 0;
         (void)opcd_dispatch(&st, kf, (size_t)kfn, CIP, 5000, kresp, sizeof kresp, &krl);
         opc_set_password_ack_t pack2;
@@ -614,7 +665,7 @@ int main(void)
                "D4: unterminated old password → 0x0012");
 
         kfn = opc_set_password_req_pack(kf, sizeof kf, 97, &preq);
-        memset(kf + 64 + 128, 'A', 128);              /* new pw: no NUL */
+        memset(kf + OPC_HEADER_SIZE + 128, 'A', 128); /* new pw: no NUL */
         krl = 0;
         (void)opcd_dispatch(&st, kf, (size_t)kfn, CIP, 5000, kresp, sizeof kresp, &krl);
         ASSERT(opc_set_password_ack_unpack(kresp, (size_t)krl, &pack2) == 0 &&

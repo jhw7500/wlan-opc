@@ -99,8 +99,17 @@ static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_termina
 {
     if (!valid_unicast_ipv4(e->ip_address))   return OPC_ERR_IPCFG_IP;        /* 0x0011 */
     if (!valid_netmask(e->subnet_mask))       return OPC_ERR_IPCFG_NETMASK;   /* 0x0012 */
+    if (e->subnet_mask != 0xFFFFFFFFu) {
+        /* the subnet's network / broadcast address is not a host IP */
+        uint32_t net   = e->ip_address & e->subnet_mask;
+        uint32_t bcast = net | ~e->subnet_mask;
+        if (e->ip_address == net || e->ip_address == bcast)
+            return OPC_ERR_IPCFG_IP;                                          /* 0x0011 */
+    }
     if (e->default_gateway != 0 &&
-        (e->default_gateway & e->subnet_mask) != (e->ip_address & e->subnet_mask))
+        (!valid_unicast_ipv4(e->default_gateway) ||
+         e->default_gateway == e->ip_address ||
+         (e->default_gateway & e->subnet_mask) != (e->ip_address & e->subnet_mask)))
         return OPC_ERR_IPCFG_GW;                                              /* 0x0013 */
     if (e->ntp_server != 0 && !valid_unicast_ipv4(e->ntp_server))
         return OPC_ERR_IPCFG_NTP;                                             /* 0x0014 */
@@ -300,7 +309,10 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
     } else if (st->logged_in && st->holder_ip != ip) {
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_CONDITION;
     } else if (!req.password_terminated) {
-        /* §3.3.1 0x0012: password field not NUL-terminated (D5) */
+        /* §3.3.1 0x0012: password field not NUL-terminated (D5). Deliberately
+         * checked after the boot / exclusive-session state checks: the spec
+         * lists 0x0001/0x0002 ahead of the field-format causes, and exclusive
+         * control is Login's primary semantic. */
         result = OPC_RESULT_NG; err = OPC_ERR_PW_NUL;
     } else if (st->password[0] == '\0') {
         /* Empty stored password is "not provisioned" — it must never
@@ -671,7 +683,9 @@ static bool valid_radio_channel(uint16_t ch)
     /* Reject only a present-but-unsupported band (A21: 6 GHz refused; unknown
      * band ids likewise). band 0x00 — a bare CH number — is tolerated: the
      * exact CH-list / encoding enforcement is pending device confirmation
-     * (V2/V12), and the legacy encoding is in operational use. */
+     * (V2/V12), and the legacy encoding is in operational use. A specified
+     * band with CH 0 is meaningless and rejected. */
+    if (band != 0 && (uint8_t)(ch & 0xFF) == 0) return false;
     return band == 0 || band == OPC_BAND_2_4GHZ || band == OPC_BAND_5GHZ;
 }
 
@@ -750,7 +764,7 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
     if (opc_set_indication_config_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        if (req.info_bits & (uint8_t)~OPC_IND_BITS_ALL) {
+        if (req.info_bits & OPC_IND_BITS_RESERVED) {
             /* §3.3.9 0x0010: unassigned notification bit set (D1 family) */
             result = OPC_RESULT_NG; err = OPC_ERR_IND_BITS;
         } else if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
