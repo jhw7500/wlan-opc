@@ -75,7 +75,9 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path);
  * unreadable source leaves its resource un-flagged. */
 int  opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out);
 
-/* Pure helpers, unit-tested directly. */
+/* Pure helpers, unit-tested directly. opcd_fault_evaluate expects
+ * elapsed_ms >= 1 (the sampler enforces a 1 ms floor); 0 silently skips the
+ * disk and network calculations. */
 int  opcd_fault_parse_proc_stat(const char *text, uint64_t *busy, uint64_t *total);
 int  opcd_fault_parse_diskstats(const char *text, const char *dev, uint64_t *io_ms);
 void opcd_fault_evaluate(const opcd_fault_probe_t *p,

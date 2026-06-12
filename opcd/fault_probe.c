@@ -8,6 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,7 +117,10 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
         out->disk_pct  = (uint16_t)pct;
         out->disk_over = pct >= p->threshold_pct;
 
-        /* bytes → Mbit/s: *8 bits, /elapsed_ms gives kbit/s, /1000 → Mbit/s */
+        /* bytes → Mbit/s: *8 bits, /elapsed_ms gives kbit/s, /1000 → Mbit/s.
+         * Clamp before the multiply: a pathological delta (sysfs counter
+         * anomaly) must saturate instead of wrapping uint64. */
+        if (d_net_bytes > UINT64_MAX / 8u) d_net_bytes = UINT64_MAX / 8u;
         uint64_t mbps = (d_net_bytes * 8ULL / elapsed_ms) / 1000u;
         /* net_over is judged on the uncapped rate; net_mbps (the wire
          * current_val, uint16) saturates at 65535 — a capture showing 65535
@@ -156,7 +160,8 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
             if (v >= 1 && v <= 100) p->threshold_pct = (unsigned)v;
         } else if (strcmp(key, "congestion_net_capacity_mbps") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
-            if (v >= 1) p->net_capacity_mbps = (unsigned)v;
+            /* upper bound guards the (unsigned) store on LP64 hosts */
+            if (v >= 1 && v <= UINT_MAX) p->net_capacity_mbps = (unsigned)v;
         } else if (strcmp(key, "congestion_disk_dev") == 0) {
             if (strlen(val) >= sizeof p->disk_dev)
                 /* silent truncation would never match diskstats — refuse loudly */
