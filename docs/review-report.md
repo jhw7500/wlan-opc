@@ -4,6 +4,24 @@
 - **생성일:** 2026-06-02
 - **감사 영역:** 아키텍처 · 보안 · 성능 · 스타일
 
+> **해소 현황 (2026-06-12 갱신)** — 아래 본문은 2026-06-02 시점 스냅샷이며, 이후 처리 내역:
+>
+> - **해소** (P0/P1 하드닝 PR #20~#31 시리즈, 코드 교차검증 완료): PERF-001(비동기
+>   NVRAM `store_async.c`), ARCH-001+STYLE-001(`ids.h` 명명 alias), ARCH-002(세션
+>   teardown 단일화 `opcd_session_logout`), ARCH-003(`emit_ack` pack 반환값 검사),
+>   SEC-002(비유니캐스트 거부 + 세션 수명 종속 — 잔여 3건은 SECURITY.md
+>   accepted-by-design), SEC-003(frame length 게이트, D12/D13 후속은 PR #38),
+>   ARCH-004(정적 디스패치 테이블), STYLE-003/004/006/007
+> - **해소 (2026-06-12)**: ARCH-005 — `effective_station_type()` 공유 accessor로
+>   GetBasicInfo/GetDeviceInfo read-path 권위 중앙화
+> - **재분류**: SEC-001 → 문서화(신뢰망 전제, SECURITY.md / spec-conformance V8) ·
+>   SEC-004 → **사양 귀결 종결**(§3.3.3 "반드시 응답" + Device Status `0x00000002`="Login
+>   중 상태"가 사양 정의 — SECURITY.md 참조) · SEC-005 → 부분 완화(빈 비밀번호 차단;
+>   기본 비밀번호는 운영 절차 + proto-todo T4 정책 결정 대기)
+> - **잔여 (low)**: ARCH-006(flat `opcd_state_t`), PERF-002(indication 헬퍼 스택 프레임),
+>   PERF-003/004(SetIpConfigList 스택/복사 — PERF-001 해소로 fsync 가중분은 완화),
+>   STYLE-002(`.clang-format` 부재)
+
 ## 실행 요약
 
 원시 발견 24건을 병합 후 **20건의 고유 이슈**로 정규화 (4쌍이 동일 file:line/근본 원인으로 병합).
