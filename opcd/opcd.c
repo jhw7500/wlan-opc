@@ -385,8 +385,12 @@ int main(int argc, char **argv)
                         rn < (ssize_t)OPC_HEADER_SIZE) {
                         /* D13: 9..63 B can never be a valid frame (frame.c
                          * rejects it) and <8 B has no header to echo (the
-                         * reject helper drops it). Previously a silent drop
-                         * for every source. */
+                         * reject helper drops it). Exactly 8 B is NOT a bad
+                         * length: it is the spec's empty request wire size
+                         * (Logout/GetBasicInfo/GetDeviceInfo/Reset — A2:
+                         * fixed header only, Length=0), accepted by
+                         * frame_parse and handled by the dispatcher.
+                         * Previously a silent drop for every source. */
                         opcd_reject_bad_length(&st, rx, (size_t)rn, cip, cprt);
                         continue;
                     }
