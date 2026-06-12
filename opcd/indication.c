@@ -103,13 +103,35 @@ int opcd_ind_keep_alive(opcd_state_t *st, const char *timestamp)
 void opcd_ind_tick(opcd_state_t *st)
 {
     if (!st->indication_enabled)             return;
-    if (st->indication_period_s == 0)        return;   /* spec: 0 disables KeepAlive */
-    if (!(st->indication_info_bits & OPC_IND_BIT_KEEP_ALIVE)) return;
+    if (st->indication_period_s == 0)        return;   /* spec: 0 disables the stream */
+    /* The reporting period drives both KeepAlive and the congestion probe
+     * (T6 interim: 판별은 보고 주기에 맞게) — advance the counter when
+     * either is enabled. */
+    if (!(st->indication_info_bits &
+          (OPC_IND_BIT_KEEP_ALIVE | OPC_IND_BIT_FAULT_DETECT))) return;
 
     st->indication_tick_counter++;
     if (st->indication_tick_counter < (int32_t)st->indication_period_s) return;
+    st->indication_tick_counter = 0;
 
-    /* Emit KeepAlive with ISO-8601 timestamp. */
+    /* T6 interim congestion probe (decision 2026-06-12, inquiry #35): one
+     * sample per reporting period, re-notified every period while the
+     * congestion persists. Memory (0x0002) is deliberately not produced —
+     * swapless target, see fault_probe.h. */
+    if (st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT) {
+        opcd_fault_report_t rep;
+        if (opcd_fault_probe_sample(&st->fault_probe, &rep) == 0) {
+            if (rep.cpu_over)
+                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_CPU, rep.cpu_pct);
+            if (rep.disk_over)
+                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct);
+            if (rep.net_over)
+                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_mbps);
+        }
+    }
+
+    /* Emit KeepAlive with ISO-8601 timestamp — its own bit-gate sits inside
+     * the emitter, so this is a no-op when only FaultDetect is enabled. */
     time_t now = time(NULL);
     struct tm tm_buf;
     char ts[32] = {0};
@@ -119,5 +141,4 @@ void opcd_ind_tick(opcd_state_t *st)
         snprintf(ts, sizeof ts, "%lld", (long long)now);
     }
     opcd_ind_keep_alive(st, ts);
-    st->indication_tick_counter = 0;
 }

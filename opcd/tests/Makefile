@@ -25,13 +25,14 @@ OPCD_OBJS_SNAPSHOT  := $(OPCDOBJ)/snapshot.o
 # test_handler drives opcd_dispatch end-to-end, so it links the handler and
 # everything it depends on, with the host-only stub platform backend.
 OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o \
-                       $(OPCDOBJ)/indication.o \
+                       $(OPCDOBJ)/indication.o $(OPCDOBJ)/fault_probe.o \
                        $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/snapshot.o \
                        $(OPCDOBJ)/platform_stub.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
+OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
-         test_store_async
+         test_store_async test_fault_probe
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -54,6 +55,9 @@ $(TESTDIR)/test_handler: $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(PROTOD
 
 $(TESTDIR)/test_store_async: $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASYNC)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASYNC) $(LDFLAGS)
+
+$(TESTDIR)/test_fault_probe: $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -c $< -o $@

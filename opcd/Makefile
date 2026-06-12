@@ -20,8 +20,8 @@ LDLIBS  += -lopcproto
 # Override on the command line: `make PLATFORM=nxp`.
 PLATFORM ?= stub
 
-SRCS := opcd.c store.c store_async.c handler.c indication.c json_util.c inventory.c \
-        ntp_parse.c snapshot.c platform_$(PLATFORM).c
+SRCS := opcd.c store.c store_async.c handler.c indication.c fault_probe.c \
+        json_util.c inventory.c ntp_parse.c snapshot.c platform_$(PLATFORM).c
 OBJS := $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 BIN  := $(OBJDIR)/opcd
 
