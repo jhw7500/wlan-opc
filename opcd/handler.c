@@ -222,6 +222,21 @@ static int persist_blob(opcd_state_t *st, const char *path,
     if (!st->store_async)
         return opc_store_write_atomic(path, data, len, mode);
 
+    /* A19 (§3.1.3, 그림 3-2): a retransmission of the same command arrives
+     * carrying a NEW sequence number while the previous write is still in
+     * flight. The earlier response duty is discarded — only the newest
+     * request is answered, once its own write completes. The discarded slot
+     * stays allocated until its job drains, so a live job's token is never
+     * handed to a new request. (A reply that crosses a retransmission on
+     * the wire is the client's defined two-ack case — each request is
+     * processed independently either way.) */
+    for (int i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
+        opcd_pending_ack_t *pa = &st->pending_acks[i];
+        if (pa->in_use && !pa->discarded &&
+            pa->req_id == req_id && pa->client_ip == ip)
+            pa->discarded = true;
+    }
+
     for (;;) {
         int slot = pending_ack_alloc(st);
         if (slot >= 0) {
@@ -943,6 +958,16 @@ void opcd_store_async_on_ready(opcd_state_t *st)
         if (done[i].token >= OPCD_PENDING_ACK_MAX) continue;
         opcd_pending_ack_t *pa = &st->pending_acks[done[i].token];
         if (!pa->in_use) continue;
+        if (pa->discarded) {
+            /* A19: superseded by a retransmission — drop the response duty.
+             * The slot is freed only now that its job has drained. */
+            if (done[i].result != 0)
+                fprintf(stderr,
+                        "opcd: NVRAM write failed (req 0x%04X, superseded ack): %s\n",
+                        pa->req_id, strerror(done[i].saved_errno));
+            *pa = (opcd_pending_ack_t){0};
+            continue;
+        }
 
         uint16_t result = (done[i].result == 0) ? OPC_RESULT_OK : OPC_RESULT_NG;
         uint16_t err    = (done[i].result == 0) ? OPC_ERR_NONE  : OPC_ERR_NVRAM;
