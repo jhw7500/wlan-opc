@@ -130,15 +130,17 @@ void opcd_ind_tick(opcd_state_t *st)
         }
     }
 
-    /* Emit KeepAlive with ISO-8601 timestamp — its own bit-gate sits inside
-     * the emitter, so this is a no-op when only FaultDetect is enabled. */
-    time_t now = time(NULL);
-    struct tm tm_buf;
-    char ts[32] = {0};
-    if (gmtime_r(&now, &tm_buf)) {
-        strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
-    } else {
-        snprintf(ts, sizeof ts, "%lld", (long long)now);
+    /* Emit KeepAlive with ISO-8601 timestamp — skipped entirely when only
+     * FaultDetect is enabled. */
+    if (st->indication_info_bits & OPC_IND_BIT_KEEP_ALIVE) {
+        time_t now = time(NULL);
+        struct tm tm_buf;
+        char ts[32] = {0};
+        if (gmtime_r(&now, &tm_buf)) {
+            strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+        } else {
+            snprintf(ts, sizeof ts, "%lld", (long long)now);
+        }
+        opcd_ind_keep_alive(st, ts);
     }
-    opcd_ind_keep_alive(st, ts);
 }

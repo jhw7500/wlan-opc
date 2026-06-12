@@ -135,6 +135,28 @@ int main(void)
            !r.cpu_over && !r.disk_over && !r.net_over,
            "sample: dead sources stay un-flagged");
 
+    /* 7. a source that appears only after priming must re-prime instead of
+     *    treating its since-boot absolute counter as one period's delta
+     *    (false-positive regression — PR #39 review, Codex P2/Gemini high). */
+    char flate[128];
+    snprintf(flate, sizeof flate, "%s/late_stat", d);
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", flate);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s/none", d);
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0,
+           "late-source: prime with absent cpu source");
+    write_file(flate, "cpu  900000 0 0 100000 0 0 0 0\n");  /* huge since-boot busy */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.cpu_over,
+           "late-source: first readable sample re-primes, no false positive");
+    write_file(flate, "cpu  900900 0 0 100100 0 0 0 0\n");  /* +900/+1000 = 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 &&
+           r.cpu_over && r.cpu_pct == 90,
+           "late-source: subsequent delta evaluated normally");
+    unlink(flate);
+
     unlink(fstat); unlink(fdisk); unlink(frx); unlink(ftx); unlink(fspd);
     rmdir(sub); rmdir(d);
 

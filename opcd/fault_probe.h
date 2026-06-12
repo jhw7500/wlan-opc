@@ -43,8 +43,13 @@ typedef struct opcd_fault_probe {
     char     path_proc_stat[96];
     char     path_diskstats[96];
     char     net_dir[96];           /* /sys/class/net/<if> */
-    /* previous counters for delta computation */
-    bool     primed;
+    /* previous counters for delta computation. Each source carries its own
+     * primed flag: a source that could not be read keeps (or drops back to)
+     * un-primed, so the first readable sample re-establishes the baseline
+     * instead of computing a since-boot delta — which would report a
+     * spurious 100% congestion. */
+    bool     primed;                /* first sample taken (nothing reported) */
+    bool     cpu_primed, disk_primed, net_primed;
     uint64_t cpu_busy, cpu_total;
     uint64_t disk_io_ms;
     uint64_t net_bytes;             /* rx + tx */

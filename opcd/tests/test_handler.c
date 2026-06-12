@@ -1020,6 +1020,7 @@ int main(void)
             mkdir(fpd, 0755);
             snprintf(fpstat, sizeof fpstat, "%s/stat", fpd);
             FILE *ff = fopen(fpstat, "w");
+            ASSERT(ff != NULL, "T6: fixture write (prime)");
             if (ff) { fputs("cpu  0 0 0 1000 0 0 0 0\n", ff); fclose(ff); }
 
             opcd_fault_probe_init(&st.fault_probe);
@@ -1038,6 +1039,7 @@ int main(void)
                    "T6: priming tick emits nothing");
 
             ff = fopen(fpstat, "w");         /* +900 busy / +1000 total = 90% */
+            ASSERT(ff != NULL, "T6: fixture write (90%)");
             if (ff) { fputs("cpu  900 0 0 1100 0 0 0 0\n", ff); fclose(ff); }
             st.fault_probe.mono_ms -= 1000;  /* pretend one second elapsed */
             opcd_ind_tick(&st);
@@ -1051,6 +1053,7 @@ int main(void)
                    "T6: CPU congestion id and value reported");
 
             ff = fopen(fpstat, "w");         /* still 90% over the next period */
+            ASSERT(ff != NULL, "T6: fixture write (repeat)");
             if (ff) { fputs("cpu  1800 0 0 1200 0 0 0 0\n", ff); fclose(ff); }
             st.fault_probe.mono_ms -= 1000;
             opcd_ind_tick(&st);
