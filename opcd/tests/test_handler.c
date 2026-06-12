@@ -499,6 +499,9 @@ int main(void)
     r = do_set_radio(&st, CIP, 6000, 0);          /* 6 GHz frequency */
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
            "D8: unsupported frequency → 0x0011");
+    r = do_set_radio(&st, CIP, 2490, 0);          /* above ch14 (2484 MHz) */
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
+           "D8: 2.4G frequency above ch14 → 0x0011");
     r = do_set_radio(&st, CIP, 0, (uint16_t)((OPC_BAND_6GHZ << 8) | 37));
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
            "A21: 6 GHz band channel → 0x0012");
@@ -593,6 +596,19 @@ int main(void)
         r = do_set_ip_entry(&st, CIP, &ent);
         ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_GW,
                "D1: gateway equal to host IP → 0x0013");
+
+        ent.ip_address      = 0x7F000001u;            /* 127.0.0.1 — loopback */
+        ent.default_gateway = 0;
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
+               "D1: loopback host IP → 0x0011");
+
+        ent.ip_address      = 0xC0A80165u;            /* /32 P2P: off-block GW ok */
+        ent.subnet_mask     = 0xFFFFFFFFu;
+        ent.default_gateway = 0x0A000001u;            /* 10.0.0.1 */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_OK,
+               "D1: /32 host with off-block gateway accepted (P2P)");
     }
 
     /* 14j. D3: unterminated ESSID wire field → 0x0016. Packers always

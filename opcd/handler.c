@@ -91,13 +91,22 @@ static bool valid_netmask(uint32_t m)
     return m != 0 && ((~m & (~m + 1u)) == 0);
 }
 
+/* §3.3.6 "impossible IP" for ipcfg fields: must be unicast and not loopback —
+ * a field device cannot live at (nor route via / sync to) 127.0.0.0/8. This
+ * is stricter than valid_unicast_ipv4, which serves indication *recipients*
+ * where loopback is at least addressable. */
+static bool valid_ipcfg_addr(uint32_t ip_host)
+{
+    return valid_unicast_ipv4(ip_host) && (ip_host >> 24) != 127u;
+}
+
 /* §3.3.6 per-entry value validation (D1). Returns 0 or the NG error cause.
  * default_gateway / ntp_server 0 = "unset" and is accepted: the spec text
  * lists 0.0.0.0 as invalid, but the fields are operationally optional —
  * recorded as a vendor inquiry in docs/spec-conformance.md. */
 static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_terminated)
 {
-    if (!valid_unicast_ipv4(e->ip_address))   return OPC_ERR_IPCFG_IP;        /* 0x0011 */
+    if (!valid_ipcfg_addr(e->ip_address))     return OPC_ERR_IPCFG_IP;        /* 0x0011 */
     if (!valid_netmask(e->subnet_mask))       return OPC_ERR_IPCFG_NETMASK;   /* 0x0012 */
     if (e->subnet_mask != 0xFFFFFFFFu) {
         /* the subnet's network / broadcast address is not a host IP */
@@ -107,11 +116,14 @@ static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_termina
             return OPC_ERR_IPCFG_IP;                                          /* 0x0011 */
     }
     if (e->default_gateway != 0 &&
-        (!valid_unicast_ipv4(e->default_gateway) ||
+        (!valid_ipcfg_addr(e->default_gateway) ||
          e->default_gateway == e->ip_address ||
-         (e->default_gateway & e->subnet_mask) != (e->ip_address & e->subnet_mask)))
+         /* same-subnet rule does not apply to /32 — a point-to-point host
+          * routinely uses a gateway from another block */
+         (e->subnet_mask != 0xFFFFFFFFu &&
+          (e->default_gateway & e->subnet_mask) != (e->ip_address & e->subnet_mask))))
         return OPC_ERR_IPCFG_GW;                                              /* 0x0013 */
-    if (e->ntp_server != 0 && !valid_unicast_ipv4(e->ntp_server))
+    if (e->ntp_server != 0 && !valid_ipcfg_addr(e->ntp_server))
         return OPC_ERR_IPCFG_NTP;                                             /* 0x0014 */
     if (!essid_terminated)                    return OPC_ERR_IPCFG_ESSID_NUL; /* 0x0016 */
     return 0;
@@ -677,7 +689,9 @@ static bool valid_wlan_bw(uint8_t b)
  * so only band-level validation is done here. */
 static bool valid_radio_freq(uint16_t mhz)
 {
-    return mhz == 0 || (mhz >= 2400 && mhz <= 2500) ||
+    /* 2.4 GHz tops out at ch14 = 2484 MHz; 5 GHz from the Japanese 4.9 GHz
+     * public-safety band up to the 5/6 GHz boundary. */
+    return mhz == 0 || (mhz >= 2400 && mhz <= 2484) ||
            (mhz >= 4900 && mhz <= 5925);
 }
 
