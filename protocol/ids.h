@@ -92,7 +92,27 @@
 #define OPC_ERR_IP_CHANGE_CONFLICT            0x0012  /* ChangeIpAddress during in-progress list update */
 #define OPC_ERR_RADIO_MODE                    0x0013  /* SetRadioConfig: invalid WLAN mode */
 #define OPC_ERR_RADIO_BW                      0x0014  /* SetRadioConfig: invalid WLAN bandwidth */
-#define OPC_ERR_RADIO_APPLY                   0x0050  /* SetRadioConfig: platform refused the change */
+/* 0x0011–0x0013 are likewise spec-overloaded: each name below intentionally
+ * aliases a value already defined above, scoped to a different command.
+ *   0x0011 = SLOT_EMPTY (ChangeIpAddress)        | RADIO_FREQ (SetRadioConfig)
+ *   0x0012 = IP_CHANGE_CONFLICT (ChangeIpAddress)| IND_RECIPIENT_IP (SetIndicationConfig)
+ *   0x0013 = RADIO_MODE (SetRadioConfig)         | IND_OTHER_IP (SetIndicationConfig)
+ * Each handler must use only its own command's names, and a single switch must
+ * never mix two same-valued names — that is a duplicate-case compile error.
+ * vhlctl's value→label map therefore uses literal cases with combined labels. */
+#define OPC_ERR_RADIO_FREQ                    0x0011  /* SetRadioConfig: frequency NG — also reports a
+                                                       * platform apply refusal: the spec defines no
+                                                       * apply-failure code and the apply step is the
+                                                       * frequency change (D9) */
+#define OPC_ERR_IND_RECIPIENT_IP              0x0012  /* SetIndicationConfig: recipient IP invalid
+                                                       * (non-unicast) — spec "IP 주소 이상" (D10) */
+#define OPC_ERR_IND_OTHER_IP                  0x0013  /* SetIndicationConfig: issued from a non-login IP
+                                                       * (A14; overlap with 0x0002 — vendor inquiry) */
+#define OPC_ERR_LIST_SEQUENCE                 0x0018  /* SetIpConfigList: CONTINUE/END without prior
+                                                       * START (A17).
+                                                       * FIXME: wire value unconfirmed — 0x0018 is the
+                                                       * vendor-answer proposal; update when the formal
+                                                       * confirmation arrives. */
 
 /* Reset cause (Reset ack / ResetNotice indication). */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */

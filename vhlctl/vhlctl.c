@@ -81,15 +81,18 @@ static const char *err_str(uint16_t e)
     case 0x0002: return "login-condition";
     case 0x0003: return "packet-size";
     case 0x0004: return "nvram";
-    /* 0x0010 is spec-overloaded across four meanings (see ids.h), so it cannot
-     * map to a single named constant — keep the literal with a combined label.
-     * The unambiguous values below use their ids.h names. */
+    /* 0x0010..0x0013 are spec-overloaded across command-specific meanings
+     * (see ids.h), so they cannot map to a single named constant — keep the
+     * literals with combined labels. Interpret by the issuing command. */
     case 0x0010:                     return "0x0010 (indication-violation/pw-mismatch/slot-range/station-type)";
-    case OPC_ERR_SLOT_EMPTY:         return "0x0011 (slot-empty)";
-    case OPC_ERR_IP_CHANGE_CONFLICT: return "0x0012 (ip-change-conflict)";
-    case OPC_ERR_RADIO_MODE:         return "0x0013 (radio-mode)";
+    case 0x0011:                     return "0x0011 (slot-empty/radio-freq)";
+    case 0x0012:                     return "0x0012 (ip-change-conflict/ind-recipient-ip)";
+    case 0x0013:                     return "0x0013 (radio-mode/ind-other-ip)";
     case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
-    case OPC_ERR_RADIO_APPLY:        return "0x0050 (radio-apply)";
+    case OPC_ERR_LIST_SEQUENCE:      return "0x0018 (list-sequence)";
+    /* Sent by firmware predating the D9 fix (PR #34) — kept for decode of
+     * mixed-version fleets. */
+    case 0x0050:                     return "0x0050 (radio-apply, deprecated)";
     default:     return "other";
     }
 }
