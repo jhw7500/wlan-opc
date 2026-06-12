@@ -265,6 +265,15 @@ static bool ts_at_or_past(const struct timespec *a, const struct timespec *b)
     return a->tv_nsec >= b->tv_nsec;
 }
 
+/* Elapsed milliseconds from `start` to `end` (monotonic clock, C99
+ * truncation-toward-zero — always non-negative when end >= start). */
+static long timespec_diff_ms(const struct timespec *end,
+                             const struct timespec *start)
+{
+    return (end->tv_sec  - start->tv_sec)  * 1000L
+         + (end->tv_nsec - start->tv_nsec) / 1000000L;
+}
+
 /* Run `dpkg-query -W -f='${Version}' wlan-proc` once and copy stdout into
  * g_fw_cache (truncated to fit). Stays silent on every failure mode — the
  * empty cache string is the documented "unknown" response. fork+exec rather
@@ -495,14 +504,15 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
  * with a bounded wait: poll waitpid(WNOHANG) against a monotonic deadline and
  * SIGKILL+reap on overrun, so a stalled child (SD/NFS fsync) cannot exceed the
  * OPC 1-second response budget. `label` tags diagnostics. Returns 0 on child
- * exit status 0, -1 otherwise. */
+ * exit status 0, -errno otherwise (platform.h contract). */
 static int run_argv_bounded(const char *label, const char *path,
                             char *const argv[], long timeout_ms)
 {
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "opcd: %s: fork failed: %s\n", label, strerror(errno));
-        return -1;
+        int err = errno;
+        fprintf(stderr, "opcd: %s: fork failed: %s\n", label, strerror(err));
+        return -err;
     }
     if (pid == 0) {
         execv(path, argv);
@@ -531,18 +541,18 @@ static int run_argv_bounded(const char *label, const char *path,
              * unreachable for our own forked pid under the current model.
              * Still SIGKILL+reap defensively so a future signal-handling
              * change cannot cause this branch to leak the child. */
-            fprintf(stderr, "opcd: %s: waitpid failed: %s\n", label, strerror(errno));
+            int err = errno;
+            fprintf(stderr, "opcd: %s: waitpid failed: %s\n", label, strerror(err));
             kill(pid, SIGKILL);
             pid_t wr;
             while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
             if (wr < 0)
                 fprintf(stderr, "opcd: %s: defensive reap failed: %s\n", label, strerror(errno));
-            return -1;
+            return -err;
         }
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
-        long elapsed_ms = (now.tv_sec  - start.tv_sec)  * 1000L
-                        + (now.tv_nsec - start.tv_nsec) / 1000000L;
+        long elapsed_ms = timespec_diff_ms(&now, &start);
         if (elapsed_ms >= timeout_ms) {
             fprintf(stderr, "opcd: %s: '%s' timed out after %ldms, sending SIGKILL\n",
                     label, path, elapsed_ms);
@@ -553,7 +563,7 @@ static int run_argv_bounded(const char *label, const char *path,
             if (wr < 0)
                 fprintf(stderr, "opcd: %s: waitpid reap after SIGKILL failed: %s\n",
                         label, strerror(errno));
-            return -1;
+            return -ETIMEDOUT;
         }
         /* Cap the sleep so the last poll never overruns the deadline.
          * Without this, child can live up to timeout_ms + POLL_MS. */
@@ -565,7 +575,7 @@ static int run_argv_bounded(const char *label, const char *path,
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "opcd: %s: '%s' failed (status=0x%x)\n",
                 label, path, (unsigned)status);
-        return -1;
+        return -EPROTO;
     }
     return 0;
 }
@@ -617,7 +627,8 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
      * wpa_supplicant.conf untouched. Mode / bandwidth mapping is deferred to
      * a follow-up PR; this PR only wires the wpa_supplicant freq list. */
     if (cfg->wlan1.freq_mhz != 0) {
-        if (run_wifi_sh_freq("mlan0", cfg->wlan1.freq_mhz, per_call_ms) != 0) return -1;
+        int rc = run_wifi_sh_freq("mlan0", cfg->wlan1.freq_mhz, per_call_ms);
+        if (rc != 0) return rc;
     }
     if (cfg->station_type == OPC_STATION_DUAL && cfg->wlan2.freq_mhz != 0) {
         /* Make the partial-apply state visible in the journal so a post-NG
@@ -634,7 +645,8 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
          * Caller gets NG (0x0011, frequency NG — D9); recovery is the
          * operator re-issuing Set-Radio. End-to-end idempotency is the
          * reconnect PR's job. */
-        if (run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms) != 0) return -1;
+        int rc = run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms);
+        if (rc != 0) return rc;
     }
     return 0;
 }
@@ -672,7 +684,7 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
     if (prefix < 1 || prefix > 32 || recon != slot->subnet_mask) {
         fprintf(stderr, "opcd: nxp_apply_ip_change: non-contiguous netmask 0x%08x\n",
                 slot->subnet_mask);
-        return -1;
+        return -EINVAL;
     }
 
     /* Reject non-unicast targets BEFORE touching eth0: deleting the current
@@ -682,7 +694,7 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
     uint8_t  hi = (uint8_t)((ip >> 24) & 0xff);
     if (ip == 0 || ip == 0xFFFFFFFFu || hi == 127 || hi >= 224) {  /* 0/loopback/bcast/mcast+ */
         fprintf(stderr, "opcd: nxp_apply_ip_change: non-unicast target 0x%08x\n", ip);
-        return -1;
+        return -EINVAL;
     }
 
     char ipbuf[16];
@@ -702,7 +714,7 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
         "xargs -r -I{} ip addr del {} dev eth0", ipbuf, prefix, ipbuf, prefix);
     if (n < 0 || (size_t)n >= sizeof cmd) {
         fprintf(stderr, "opcd: nxp_apply_ip_change: command too long\n");
-        return -1;
+        return -ENAMETOOLONG;
     }
 
     /* const char *[] + cast: execv never writes argv, and cmd/literals must not
