@@ -222,23 +222,25 @@
 - **사양 §3.3.4:** 기동중 발행 = 0x0001
 - **재검증:** booting 중에는 로그인이 성립할 수 없으므로 `check_login_required`의 미로그인 분기가 **0x0001**(LOGIN_VIOLATION)을 반환 — 사양값과 와이어 동일. 0x0002는 "타 IP가 로그인 보유" 시에만 반환되며 booting과 동시 성립 불가 — 주장한 시나리오는 도달 불가
 
-**D12 · 수신 1424B 초과 silent 잘림** — `opcd.c:359-360`
+**D12 · 수신 1424B 초과 silent 잘림** — `opcd.c:359-360` — ✅ 해소(2026-06-12)
 - **사양:** 페이로드 최대 1424B
 - **구현:** recvfrom 버퍼 한정 + `MSG_TRUNC` 미사용 → 초과분 조용히 절단
+- **해소:** `MSG_TRUNC`로 초과 감지 — 잘린 prefix를 처리하지 않고 거부. 로그인 세션 IP 발신이면 0x0003 NG(헤더 prefix에서 req/seq 에코), 그 외 drop (사용자 결정 방침)
 
 **D13 · 9~63B 프레임 드롭 (0x0003 미발행)** — `frame.c:73`
 - **사양 §3.3:** "Length 잘못 = 0x0003 NG"
 - **구현:** `frame_parse`가 -1로 드롭 (SEC-003 drop 설계와 동일 맥락)
-- **방침(2026-06-11 사용자 결정):** D12와 공통 — **로그인 세션 IP 발신 프레임에만 0x0003 NG 응답, 그 외 drop 유지** (사양 적합성과 반사 방지 절충). 후속 PR에서 구현
+- **방침(2026-06-11 사용자 결정):** D12와 공통 — **로그인 세션 IP 발신 프레임에만 0x0003 NG 응답, 그 외 drop 유지** (사양 적합성과 반사 방지 절충)
+- **해소(2026-06-12):** 방침대로 구현 — `opcd_reject_bad_length()` (9~63B는 8B 헤더에서 req/seq 에코, 8B 미만 runt는 에코 불가로 drop). 길이 필드 불일치(SEC-003 거짓 Length)는 ③-B 의도적 drop 유지
 
 **D14 · SetRadio WLAN#2 와이어 순서** — ~~deviation~~ → **기각 (2026-06-11)**
 - 원본 docx(§3.3.8 요구 포맷 도면 image33.emf) 직접 확인: **WLAN#2도 FREQ→CH** — WLAN#1·GetDevInfo와 일관
 - md 번역본의 "CH | FREQ"(696행)는 docx→md 변환 시 **전사 오류**였음 (정정 완료)
 - **코드(`commands.c:541-543`, FREQ→CH)는 원본과 정확히 일치 — 변경 불필요.** proto-todo T13 RESOLVED
 
-**D15 · dead branch 2건** — `opcd.c:108`, `handler.c:329`
+**D15 · dead branch 2건** — `opcd.c:108`, `handler.c:329` — ✅ 종결(2026-06-12, 문서화)
 - Login '기동중'(0x0001) 도달불가(boot 즉시 READY), GetBasicInfo station_type fallback 미도달
-- 후속 정리 PR(D12·D13 프레임 경계 처리와 묶음)에서 처리 예정
+- **종결:** 두 분기 모두 제거 대신 **유지 + 도달 불가 사유 주석** — 기동중 0x0001은 사양 요구 동작이라 init이 비동기화되면 필요하고, station_type fallback은 zeroed config에 대한 방어. 코드 주석으로 의도 고정
 
 ### 3.2 ③-B 의도적 / 문서화된 불일치 (알려진 결정)
 

@@ -36,6 +36,12 @@ void opcd_apply_pending_ip_change(opcd_state_t *st);
  * idle check so all three paths share one set of side effects. */
 void opcd_session_logout(opcd_state_t *st);
 
+/* D12/D13: bad-length datagram → 0x0003 NG toward the logged-in session's
+ * IP only; every other source is dropped silently (SEC-003). `valid_len`
+ * is how many bytes of `frame` actually landed in the buffer. */
+void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
+                            size_t valid_len, uint32_t cip, uint16_t cport);
+
 /* Drain finished async NVRAM writes (PERF-001) and transmit the deferred
  * Set* acks they correspond to. Call when st->store_async's event fd is
  * readable. No-op when no async store is attached. */

@@ -289,8 +289,9 @@ typedef struct opc_set_ip_config_list_req {
     size_t entry_count;       /* 1..OPC_IPCFG_LIST_MAX_PER_REQ */
     opc_ipcfg_entry_t entries[OPC_IPCFG_LIST_MAX_PER_REQ];
     /* bit i set = entries[i].essid wire field had a NUL (§3.3.6 0x0016 check).
-     * Kept out of opc_ipcfg_entry_t so the persisted NVRAM slot layout is
-     * unchanged. */
+     * Polarity: a SET bit means terminated/valid — a CLEAR bit is the
+     * violation. Kept out of opc_ipcfg_entry_t so the persisted NVRAM slot
+     * layout is unchanged. */
     uint32_t essid_terminated_mask;
 } opc_set_ip_config_list_req_t;
 
@@ -304,9 +305,14 @@ typedef struct opc_set_ip_config_list_ack {
 
 ssize_t opc_set_ip_config_list_req_pack(uint8_t *frame, size_t cap, uint16_t seq_no,
                                         const opc_set_ip_config_list_req_t *in);
-/* Returns 0 on success, -2 when the frame parses but the body is not 64×n
- * (n = 1..20) — the §3.3.6 list-size violation (0x0017) — and -1 for any
- * other malformed input. */
+/* Distinct unpack error for the §3.3.6 list-size violation (0x0017): the
+ * frame parses but the body is not 64×n (n = 1..20). Callers must compare
+ * against this value — a bare `!= 0` check misclassifies it as a generic
+ * packet-size error. */
+#define OPC_UNPACK_ERR_LIST_SIZE (-2)
+
+/* Returns 0 on success, OPC_UNPACK_ERR_LIST_SIZE (-2) for the list-size
+ * violation above, and -1 for any other malformed input. */
 int     opc_set_ip_config_list_req_unpack(const uint8_t *frame, size_t frame_len,
                                           opc_set_ip_config_list_req_t *out);
 ssize_t opc_set_ip_config_list_ack_pack(uint8_t *frame, size_t cap, uint16_t seq_no,

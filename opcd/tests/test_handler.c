@@ -502,6 +502,9 @@ int main(void)
     r = do_set_radio(&st, CIP, 2490, 0);          /* above ch14 (2484 MHz) */
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
            "D8: 2.4G frequency above ch14 → 0x0011");
+    r = do_set_radio(&st, CIP, 3000, 0);          /* inter-band gap */
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
+           "D8: inter-band gap frequency → 0x0011");
     r = do_set_radio(&st, CIP, 0, (uint16_t)((OPC_BAND_6GHZ << 8) | 37));
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
            "A21: 6 GHz band channel → 0x0012");
@@ -963,10 +966,46 @@ int main(void)
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 91,
-               "A19: the single ack carries the retransmission SN");
+               ahdr.sequence_number == 91 &&
+               opc_set_radio_config_ack_unpack(rx_buf, (size_t)rn, &rack) == 0 &&
+               rack.result == OPC_RESULT_OK,
+               "A19: the single ack carries the retransmission SN and OK");
         ASSERT(wait_fd_readable(cli, 300) != 0,
                "A19: no second ack for the superseded SN");
+
+        /* 22. D12/D13: a bad-length datagram is NG'd (0x0003) only toward
+         *     the logged-in session's IP; any other source stays silent. */
+        uint8_t badf[30];
+        memset(badf, 0, sizeof badf);
+        {
+            opc_header_t bh = { .protocol_version  = OPC_PROTOCOL_VERSION,
+                                .command_type      = OPC_CMD_REQUEST,
+                                .req_indication_id = OPC_REQ_SET_PASSWORD,
+                                .sequence_number   = 77,
+                                .length            = 22 };
+            /* fixed-header pack writes only 8 B — opc_header_pack would
+             * memset the full 64 B common header into this 30 B buffer */
+            (void)opc_fixed_header_pack(badf, &bh);
+        }
+        opcd_reject_bad_length(&st, badf, sizeof badf, LOOP, cli_port);
+        ASSERT(wait_fd_readable(cli, 1000) == 0,
+               "D13: NG sent to the session holder");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        opc_set_password_ack_t bad_ack;
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 77 &&
+               opc_set_password_ack_unpack(rx_buf, (size_t)rn, &bad_ack) == 0 &&
+               bad_ack.result == OPC_RESULT_NG &&
+               bad_ack.error_cause == OPC_ERR_PACKET_SIZE,
+               "D13: NG echoes req/seq with 0x0003");
+        opcd_reject_bad_length(&st, badf, sizeof badf, LOOP + 1, cli_port);
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "D13: non-session source stays silent");
+        opcd_reject_bad_length(&st, badf, 4 /* <8 B: no header to echo */,
+                               LOOP, cli_port);
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "D13: sub-header runt stays silent even for the holder");
 
         st.store_async = NULL;
         opc_store_async_destroy(sa);
