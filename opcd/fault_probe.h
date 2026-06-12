@@ -38,7 +38,8 @@ typedef struct opcd_fault_probe {
     /* config */
     unsigned threshold_pct;         /* NG threshold, percent (1..100) */
     unsigned net_capacity_mbps;     /* fallback when <net_dir>/speed unusable */
-    char     disk_dev[24];          /* /proc/diskstats device name */
+    char     disk_dev[33];          /* /proc/diskstats device name —
+                                     * kernel DISK_NAME_LEN(32) + NUL */
     /* source paths (overridable for tests) */
     char     path_proc_stat[96];
     char     path_diskstats[96];

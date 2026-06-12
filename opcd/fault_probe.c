@@ -6,6 +6,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,13 +24,16 @@ static int read_text(const char *path, char *buf, size_t cap)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
-    ssize_t n = read(fd, buf, cap - 1);
+    ssize_t n;
+    do { n = read(fd, buf, cap - 1); } while (n < 0 && errno == EINTR);
     close(fd);
     if (n < 0) return -1;
     if ((size_t)n == cap - 1) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        /* warn once per path (re-warn only if a different path fills) —
+         * a truncated diskstats could silently hide the device row */
+        static char warned_path[96];
+        if (strncmp(warned_path, path, sizeof warned_path - 1) != 0) {
+            snprintf(warned_path, sizeof warned_path, "%s", path);
             fprintf(stderr, "opcd: fault probe: %s filled the %zu B buffer — "
                             "content may be truncated\n", path, cap);
         }
@@ -77,11 +81,11 @@ int opcd_fault_parse_diskstats(const char *text, const char *dev, uint64_t *io_m
     if (!text || !dev || !io_ms) return -1;
     const char *line = text;
     while (*line) {
-        char name[24];
+        char name[33];                 /* kernel DISK_NAME_LEN(32) + NUL */
         unsigned long long ticks;
         /* per line: maj min name + stat fields; the 10th stat field is
          * io_ticks — milliseconds the device spent doing I/O. */
-        if (sscanf(line, "%*u %*u %23s %*u %*u %*u %*u %*u %*u %*u %*u %*u %llu",
+        if (sscanf(line, "%*u %*u %32s %*u %*u %*u %*u %*u %*u %*u %*u %*u %llu",
                    name, &ticks) == 2 && strcmp(name, dev) == 0) {
             *io_ms = (uint64_t)ticks;
             return 0;
@@ -114,6 +118,9 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
 
         /* bytes → Mbit/s: *8 bits, /elapsed_ms gives kbit/s, /1000 → Mbit/s */
         uint64_t mbps = (d_net_bytes * 8u / elapsed_ms) / 1000u;
+        /* net_over is judged on the uncapped rate; net_mbps (the wire
+         * current_val, uint16) saturates at 65535 — a capture showing 65535
+         * means "at least 65.5 Gbit/s", not the exact trigger rate. */
         out->net_mbps = (uint16_t)(mbps > 65535u ? 65535u : mbps);
         if (link_mbps > 0)
             out->net_over = mbps * 100u >= (uint64_t)link_mbps * p->threshold_pct;
@@ -139,10 +146,10 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
     char line[160];
     while (fgets(line, sizeof line, f)) {
         char key[48], val[64];
-        /* "key = value"; '#' comment lines fail the key match and are
-         * skipped. Unknown keys (e.g. a future udp_port) are ignored.
-         * Lines beyond 159 chars are split by fgets — far above any
-         * congestion_* key=value pair, so no recovery logic. */
+        /* accepts both "key=value" and "key = value"; '#' comment lines
+         * fail the key match and are skipped. Unknown keys (e.g. a future
+         * udp_port) are ignored. Lines beyond 159 chars are split by fgets
+         * — far above any congestion_* key=value pair, so no recovery. */
         if (sscanf(line, " %47[A-Za-z0-9_] = %63s", key, val) != 2) continue;
         if (strcmp(key, "congestion_threshold_pct") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
@@ -151,7 +158,12 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
             unsigned long v = strtoul(val, NULL, 10);
             if (v >= 1) p->net_capacity_mbps = (unsigned)v;
         } else if (strcmp(key, "congestion_disk_dev") == 0) {
-            snprintf(p->disk_dev, sizeof p->disk_dev, "%s", val);
+            if (strlen(val) >= sizeof p->disk_dev)
+                /* silent truncation would never match diskstats — refuse loudly */
+                fprintf(stderr, "opcd: fault probe: congestion_disk_dev '%s' "
+                                "too long — ignored\n", val);
+            else
+                snprintf(p->disk_dev, sizeof p->disk_dev, "%s", val);
         } else if (strcmp(key, "congestion_net_if") == 0) {
             snprintf(p->net_dir, sizeof p->net_dir, "/sys/class/net/%s", val);
         }
