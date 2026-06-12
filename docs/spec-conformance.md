@@ -199,9 +199,10 @@
 - **구현:** 코드 = page-24(START=0x0000, `commands.h:270` "vendor confirmed") — **원본 다수 증거와 일치, 변경 불필요**
 - **조치:** stale했던 proto-todo T2를 RESOLVED(page-24 확정)로 갱신, 번역본에 누락 문장 보완. seed.yaml(page-22 기록)은 이력 문서라 미수정 — 드리프트 해소
 
-**D7 · 이벤트성 indication 4종 발행 경로 없음** — `indication.c`, `platform_nxp.c`
+**D7 · 이벤트성 indication 4종 발행 경로 없음** — `indication.c`, `platform_nxp.c` — ✅ 부분 해소(2026-06-12, FaultDetect)
 - **사양 §3.4:** WlanStatusChange/Roaming/ApDisconnect/FaultDetect
 - **구현:** `drain_events` no-op → 실제 트리거 없음. InitComplete/ResetNotice/KeepAlive만 발행
+- **부분 해소:** **FaultDetect(0x0010)는 폴링 폭주 프로브로 발행 경로 구현**(`fault_probe.c`, `opcd_ind_tick`) — **T6 임시 정책(전부 발주처 확인 대기 #35)**: 임계 80%(opc.conf `congestion_*` 키로 가변) · 판별은 indication 보고 주기 · 지속 시 매 주기 재통지 · Current Val 단위 CPU/Disk=%, Network=Mbps · **Memory(0x0002)는 swapless 타깃이라 사양 정의(페이징) 성립 불가 → 미발행, Disk I/O(0x0003)로 일원화**. 잔여 3종(WlanStatusChange/Roaming/ApDisconnect)은 nl80211 연동 필요(V1)
 
 **D8 · SetRadio 주파수/CH 값 검증 없음** — `handler.c:609-655` — ✅ 부분 해결(2026-06-12)
 - **사양 §3.3.8:** 0x0011(주파수)/0x0012(CH)
