@@ -147,7 +147,7 @@
 | V2 | **set-radio mode/bw/channel 실드라이버 반영** | 현재 wifi.sh freq만 적용, 나머지 실HW 반영 범위 |
 | V3 | **ChangeIp ESSID/GW/NTP 전환** | wpa_supplicant 재설정 필요 — 현재 eth0 IP/netmask만 적용 |
 | V4 | **스텔스 AP ESSID NULL 처리** | platform `get_essid` 실 NXP 동작 (스텔스 시 빈 문자열 보장?) |
-| V5 | **11r/ai/k/v capability 비트** | `device_info.json` 정적값 vs 실 silicon 광고 |
+| V5 | **11r/ai/k/v capability 비트** | `device_info.json` 정적값 vs 실 silicon 광고 — 📌 고객사 문의 후 확정(2026-06-12 결정, #35 등록) |
 | V6 | **Dual radio WLAN#2/priority_ch 채움** | 실 dual-radio 동작 |
 | V7 | **Protocol Version 협상** | 멀티버전 장치 상호운용 (현재 version 미검증) |
 | V8 | **세션 IP-only 식별 (스푸핑)** | 신뢰망/L2/방화벽 격리 필요성 (SEC-001) |
@@ -252,7 +252,7 @@
 - **패스워드 평문 저장** — 사양 침묵, 1차 구현 평문(mode 0600). 근거: SECURITY.md
 - **기본 비밀번호 `MyPassword` 노출** — 사양 위반 조항은 없음 → 엄밀히는 "보안 위험"이지 deviation 아님. 근거: SECURITY.md(운영 최초 변경 필수)
 - **세션 UDP 소스 IP-only 식별** — 스푸핑 가능. 근거: SECURITY.md SEC-001(신뢰망 전제)
-- **wlan_id 부재 → Dual WLAN#1/#2 구분 불가** — indication에 wlan_id 필드 없음. 근거: 사양 §3.4 한계, 코드 주석
+- **wlan_id 부재 → Dual WLAN#1/#2 구분 불가** — indication에 wlan_id 필드 없음. 근거: 사양 §3.4 한계, 코드 주석(`opcd.c` on_platform_event). **처리 방침(2026-06-12 사용자 결정): 📌 고객사 문의 예정(#35 항목 6) — 답변 전까지 잠정적으로 주 WLAN(mlan0) 기준으로만 발행**
 - **Reset Ack Length=60** — 사양 표기 0 vs body(4)+reserve 해석. 근거: `commands.h:406`. **[보강 2026-06-11]** 원본 도면(image38)도 Length=0 표기 확정(Reserve 8~63 + Result 64~67을 그리면서도 0) — 도면 자체가 Length 규칙(전체−8=60)과 자기모순. 코드는 일관 규칙(60)을 채택. **벤더의 VHL이 도면 문자 그대로(0) 구현했을 경우 비호환 위험 → 벤더 확인 필요 (proto-todo T15 신설)**
 - **proto-todo T6/T9 call-site 참조 stale** — 문서가 코드와 불일치. 근거: 문서 정리 필요
 

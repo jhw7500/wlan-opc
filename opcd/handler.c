@@ -222,6 +222,11 @@ static int persist_blob(opcd_state_t *st, const char *path,
                         uint16_t req_id, uint32_t ip, uint16_t port,
                         uint16_t seq, bool *deferred)
 {
+    /* T7 (proto-todo): captured before any slot wait so the served-in log
+     * on the deferred ack covers the full request→response interval. */
+    struct timespec rx_ts;
+    clock_gettime(CLOCK_MONOTONIC, &rx_ts);
+
     *deferred = false;
     if (!st->store_async)
         return opc_store_write_atomic(path, data, len, mode);
@@ -237,6 +242,7 @@ static int persist_blob(opcd_state_t *st, const char *path,
                     .seq         = seq,
                     .client_ip   = ip,
                     .client_port = port,
+                    .rx_ts       = rx_ts,
                 };
                 /* A19 (§3.1.3, 그림 3-2): a retransmission of the same
                  * command arrives carrying a NEW sequence number while the
@@ -1046,9 +1052,20 @@ void opcd_store_async_on_ready(opcd_state_t *st)
             dst.sin_addr.s_addr = htonl(pa->client_ip);
             ssize_t w = sendto(st->udp_fd, resp, (size_t)rlen, 0,
                                (struct sockaddr *)&dst, sizeof dst);
-            if (w != rlen)
+            if (w != rlen) {
                 fprintf(stderr, "opcd: deferred ack send failed (req 0x%04X): %s\n",
                         pa->req_id, strerror(errno));
+            } else {
+                /* T7 (proto-todo): actual service time vs the spec budget
+                 * (2 min for NVRAM-persisting commands). */
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long long us = (now.tv_sec - pa->rx_ts.tv_sec) * 1000000LL +
+                               (now.tv_nsec - pa->rx_ts.tv_nsec) / 1000;
+                fprintf(stderr,
+                        "opcd: req 0x%04X seq=%u served in %lld.%03lld ms (deferred)\n",
+                        pa->req_id, pa->seq, us / 1000, us % 1000);
+            }
         }
         pa->in_use = false;
     }
