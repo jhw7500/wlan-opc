@@ -254,7 +254,7 @@
 - **세션 UDP 소스 IP-only 식별** — 스푸핑 가능. 근거: SECURITY.md SEC-001(신뢰망 전제)
 - **wlan_id 부재 → Dual WLAN#1/#2 구분 불가** — indication에 wlan_id 필드 없음. 근거: 사양 §3.4 한계, 코드 주석(`opcd.c` on_platform_event). **처리 방침(2026-06-12 사용자 결정): 📌 고객사 문의 예정(#35 항목 6) — 답변 전까지 잠정적으로 주 WLAN(mlan0) 기준으로만 발행**
 - **Reset Ack Length=60** — 사양 표기 0 vs body(4)+reserve 해석. 근거: `commands.h:406`. **[보강 2026-06-11]** 원본 도면(image38)도 Length=0 표기 확정(Reserve 8~63 + Result 64~67을 그리면서도 0) — 도면 자체가 Length 규칙(전체−8=60)과 자기모순. 코드는 일관 규칙(60)을 채택. **벤더의 VHL이 도면 문자 그대로(0) 구현했을 경우 비호환 위험 → 벤더 확인 필요 (proto-todo T15 신설)**
-- **proto-todo T6/T9 call-site 참조 stale** — 문서가 코드와 불일치. 근거: 문서 정리 필요
+- **proto-todo T6/T9 call-site 참조 stale** — ✅ 해소(2026-06-12, 문서 갱신: T6 INTERIM 구현 반영 + 실제 심볼로 정정, T9 producer 부재/배관 현황 명시)
 
 ---
 
