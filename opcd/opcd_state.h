@@ -59,6 +59,8 @@ struct opc_store_async;
 #define OPCD_PENDING_ACK_MAX 4
 typedef struct opcd_pending_ack {
     bool     in_use;
+    bool     discarded;     /* A19: superseded by a same-command retransmission
+                             * — completion frees the slot without replying */
     uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */
     uint16_t seq;           /* echoed sequence number */
     uint32_t client_ip;     /* host byte order */
