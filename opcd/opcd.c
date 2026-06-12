@@ -106,6 +106,7 @@ static void state_set_defaults(opcd_state_t *st)
     st->radio.station_type = OPC_STATION_SINGLE;
     st->udp_fd     = -1;
     st->boot_status = OPC_DEVICE_BOOTING;
+    opcd_fault_probe_init(&st->fault_probe);
 }
 
 static void state_load_from_disk(opcd_state_t *st)
@@ -220,6 +221,9 @@ int main(int argc, char **argv)
     }
     if (port_override > 0) st.conf.udp_port     = (uint16_t)port_override;
     if (idle_override > 0) st.conf.login_idle_s = (uint32_t)idle_override;
+    /* opc.conf currently carries only the congestion_* overrides (T6 interim
+     * thresholds); other settings still come from defaults / CLI options. */
+    opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
 
     ensure_dirs(&st);
     state_load_from_disk(&st);
