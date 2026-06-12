@@ -130,11 +130,15 @@ static int stub_get_link(int idx, opcd_platform_link_t *out)
 /* Mutations — stub accepts everything (kernel-less)                  */
 /* ------------------------------------------------------------------ */
 
+static int s_apply_radio_fail = 0;
 static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
     (void)cfg;
-    return 0;
+    return s_apply_radio_fail ? -1 : 0;
 }
+
+/* Test-only accessor (declared extern in test_handler.c). */
+void stub_apply_radio_set_fail(int fail) { s_apply_radio_fail = fail; }
 
 /* Test observability: count apply_ip_change calls and record the last slot's IP
  * so the change-ip → platform wiring (deferred until logout) is verifiable from
