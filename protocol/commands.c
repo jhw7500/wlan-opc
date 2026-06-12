@@ -458,9 +458,11 @@ int opc_set_ip_config_list_req_unpack(const uint8_t *frame, size_t frame_len,
     if (hdr.req_indication_id != OPC_REQ_SET_IP_CONFIG_LIST)                return -1;
     /* Frame parses but the body is not 64×n (n=1..20): §3.3.6 list-size
      * violation — distinct return so the handler can ack 0x0017 (D1). */
-    if (body_len == 0 || (body_len % OPC_IPCFG_ENTRY_LEN) != 0)             return -2;
+    if (body_len == 0 || (body_len % OPC_IPCFG_ENTRY_LEN) != 0)
+        return OPC_UNPACK_ERR_LIST_SIZE;
     size_t n = body_len / OPC_IPCFG_ENTRY_LEN;
-    if (n > OPC_IPCFG_LIST_MAX_PER_REQ)                                     return -2;
+    if (n > OPC_IPCFG_LIST_MAX_PER_REQ)
+        return OPC_UNPACK_ERR_LIST_SIZE;
 
     memset(out, 0, sizeof *out);
     out->entry_count = n;

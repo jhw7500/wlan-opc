@@ -85,7 +85,8 @@ static bool valid_unicast_ipv4(uint32_t ip_host)
     return true;
 }
 
-/* §3.3.6: a netmask must be contiguous ones from the MSB (/32 allowed). */
+/* §3.3.6: a netmask must be contiguous ones from the MSB (/32 allowed) —
+ * valid iff ~m == 2^k - 1, which the (~m & (~m + 1)) == 0 test checks. */
 static bool valid_netmask(uint32_t m)
 {
     return m != 0 && ((~m & (~m + 1u)) == 0);
@@ -101,9 +102,11 @@ static bool valid_ipcfg_addr(uint32_t ip_host)
 }
 
 /* §3.3.6 per-entry value validation (D1). Returns 0 or the NG error cause.
- * default_gateway / ntp_server 0 = "unset" and is accepted: the spec text
- * lists 0.0.0.0 as invalid, but the fields are operationally optional —
- * recorded as a vendor inquiry in docs/spec-conformance.md. */
+ * Check order follows the spec's cause listing; the network/broadcast
+ * re-check returns 0x0011 again but sits after the netmask check because
+ * it needs a valid mask. default_gateway / ntp_server 0 = "unset" and is
+ * accepted: the spec text lists 0.0.0.0 as invalid, but the fields are
+ * operationally optional — recorded as a vendor inquiry (#35). */
 static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_terminated)
 {
     if (!valid_ipcfg_addr(e->ip_address))     return OPC_ERR_IPCFG_IP;        /* 0x0011 */
@@ -402,6 +405,9 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
         .product_code    = inv->product_code,
         .product_subcode = inv->product_subcode,
         .device_status   = st->boot_status,
+        /* Fallback unreachable today — state_init seeds radio.station_type
+         * with SINGLE before any frame is handled. Kept defensively for a
+         * zeroed radio config (D15). */
         .station_type    = st->radio.station_type ? st->radio.station_type
                                                   : st->conf.default_station_type,
     };
@@ -586,7 +592,7 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
      * independent of any session, mirroring every handler's unpack-first
      * ordering. */
     int urc = opc_set_ip_config_list_req_unpack(frame, flen, &req);
-    if (urc == -2) {
+    if (urc == OPC_UNPACK_ERR_LIST_SIZE) {
         /* §3.3.6 0x0017: body is not 64×n (n=1..20) — list-size violation (D1) */
         result = OPC_RESULT_NG; err = OPC_ERR_IPCFG_LIST_SIZE;
     } else if (urc != 0) {
@@ -711,7 +717,9 @@ static bool valid_wlan_bw(uint8_t b)
 static bool valid_radio_freq(uint16_t mhz)
 {
     /* 2.4 GHz tops out at ch14 = 2484 MHz; 5 GHz from the Japanese 4.9 GHz
-     * public-safety band up to the 5/6 GHz boundary. */
+     * public-safety band up to the 5/6 GHz boundary.
+     * TODO(#35): tighten to the device's confirmed channel set (V2) — e.g.
+     * 2412 lower bound, 5850 UNII-3 upper bound — once the vendor answers. */
     return mhz == 0 || (mhz >= 2400 && mhz <= 2484) ||
            (mhz >= 4900 && mhz <= 5925);
 }
@@ -941,6 +949,34 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
 
     st->ip_change_pending = false;
     memset(&st->ip_change_list_no, 0, sizeof st->ip_change_list_no);
+}
+
+/* D12/D13 (decision 2026-06-11): a bad-length datagram earns the spec's
+ * 0x0003 NG only when it originates from the logged-in session's IP — any
+ * other source is dropped silently, preserving the SEC-003 no-reflection
+ * stance. The first OPC_FIXED_HEADER_SIZE bytes of `frame` must hold the
+ * (possibly truncated) datagram's start; req_id and seq are echoed from
+ * them so the client can correlate the NG. */
+void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
+                            size_t valid_len, uint32_t cip, uint16_t cport)
+{
+    if (!st->logged_in || st->holder_ip != cip) return;          /* drop */
+    opc_header_t hdr;
+    /* fixed-header unpack (8 B): a bad-length frame is by definition shorter
+     * than the 64 B common header, which opc_header_unpack would insist on. */
+    if (valid_len < OPC_FIXED_HEADER_SIZE ||
+        opc_fixed_header_unpack(frame, valid_len, &hdr) != 0) return;
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t n = opc_simple_ack_pack(resp, sizeof resp, hdr.req_indication_id,
+                                    hdr.sequence_number, OPC_SIMPLE_ACK_LENGTH,
+                                    OPC_RESULT_NG, OPC_ERR_PACKET_SIZE);
+    if (n <= 0 || st->udp_fd < 0) return;
+    struct sockaddr_in dst = {0};
+    dst.sin_family      = AF_INET;
+    dst.sin_port        = htons(cport);
+    dst.sin_addr.s_addr = htonl(cip);
+    (void)sendto(st->udp_fd, resp, (size_t)n, 0,
+                 (struct sockaddr *)&dst, sizeof dst);
 }
 
 void opcd_store_async_on_ready(opcd_state_t *st)

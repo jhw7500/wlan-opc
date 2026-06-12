@@ -245,6 +245,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Boot completes synchronously, so BOOTING is never observable from the
+     * wire today — handle_login's "boot in progress" (0x0001) branch is kept
+     * for the spec's boot-window semantics in case init ever becomes
+     * asynchronous (D15). */
     st.boot_status = OPC_DEVICE_READY;
     LOG("starting on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
 
@@ -356,7 +360,10 @@ int main(int argc, char **argv)
                 while (1) {
                     struct sockaddr_in src;
                     socklen_t srclen = sizeof src;
-                    ssize_t rn = recvfrom(udp_fd, rx, sizeof rx, 0,
+                    /* MSG_TRUNC: rn reports the true datagram size even when
+                     * it exceeds rx — an oversize frame is detected instead
+                     * of silently processing a truncated prefix (D12). */
+                    ssize_t rn = recvfrom(udp_fd, rx, sizeof rx, MSG_TRUNC,
                                           (struct sockaddr *)&src, &srclen);
                     if (rn < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -366,6 +373,23 @@ int main(int argc, char **argv)
                     }
                     uint32_t cip  = ntohl(src.sin_addr.s_addr);
                     uint16_t cprt = ntohs(src.sin_port);
+                    if ((size_t)rn > sizeof rx) {
+                        /* D12: oversize datagram — only sizeof rx bytes
+                         * landed in rx; the header prefix is intact for the
+                         * NG echo. */
+                        LOG("oversize frame (%zd B) rejected", rn);
+                        opcd_reject_bad_length(&st, rx, sizeof rx, cip, cprt);
+                        continue;
+                    }
+                    if (rn != OPC_FIXED_HEADER_SIZE &&
+                        rn < (ssize_t)OPC_HEADER_SIZE) {
+                        /* D13: 9..63 B can never be a valid frame (frame.c
+                         * rejects it) and <8 B has no header to echo (the
+                         * reject helper drops it). Previously a silent drop
+                         * for every source. */
+                        opcd_reject_bad_length(&st, rx, (size_t)rn, cip, cprt);
+                        continue;
+                    }
                     ssize_t tx_len = 0;
                     int rc = opcd_dispatch(&st, rx, (size_t)rn, cip, cprt,
                                            tx, sizeof tx, &tx_len);

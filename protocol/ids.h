@@ -123,8 +123,9 @@
 #define OPC_ERR_IPCFG_NETMASK                 0x0012  /* SetIpConfigList: not a valid netmask */
 #define OPC_ERR_IPCFG_GW                      0x0013  /* SetIpConfigList: gateway outside the entry's subnet */
 #define OPC_ERR_IPCFG_NTP                     0x0014  /* SetIpConfigList: impossible NTP server IP */
-#define OPC_ERR_IPCFG_ESSID_CHAR              0x0015  /* SetIpConfigList: invalid ESSID characters
-                                                       * (semantics undefined in spec — not yet emitted) */
+#define OPC_ERR_IPCFG_ESSID_CHAR              0x0015  /* SetIpConfigList: invalid ESSID characters.
+                                                       * UNUSED — semantics undefined in the spec;
+                                                       * reserved pending the A5 inquiry (#35) */
 #define OPC_ERR_IPCFG_ESSID_NUL               0x0016  /* SetIpConfigList: ESSID not NUL-terminated */
 #define OPC_ERR_IPCFG_LIST_SIZE               0x0017  /* SetIpConfigList: Length is not 56 + 64*n */
 #define OPC_ERR_RADIO_CH                      0x0012  /* SetRadioConfig: unsupported CH/band (incl. 6 GHz — A21) */
