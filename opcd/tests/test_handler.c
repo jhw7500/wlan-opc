@@ -935,7 +935,7 @@ int main(void)
                disk_radio.wlan1.mode == OPC_WLAN_MODE_11A,
                "async set-radio: NVRAM file written");
 
-        /* 20. A19: a same-command retransmission (new SN) while the previous
+        /* 21. A19: a same-command retransmission (new SN) while the previous
          *     NVRAM write is still in flight supersedes the older response
          *     duty — exactly one ack comes back, carrying the newest SN. */
         opc_set_radio_config_req_t a19r;
