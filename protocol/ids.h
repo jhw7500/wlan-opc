@@ -92,11 +92,14 @@
 #define OPC_ERR_IP_CHANGE_CONFLICT            0x0012  /* ChangeIpAddress during in-progress list update */
 #define OPC_ERR_RADIO_MODE                    0x0013  /* SetRadioConfig: invalid WLAN mode */
 #define OPC_ERR_RADIO_BW                      0x0014  /* SetRadioConfig: invalid WLAN bandwidth */
-/* 0x0011–0x0013 are likewise spec-overloaded: each name below intentionally
- * aliases a value already defined above, scoped to a different command.
- *   0x0011 = SLOT_EMPTY (ChangeIpAddress)        | RADIO_FREQ (SetRadioConfig)
- *   0x0012 = IP_CHANGE_CONFLICT (ChangeIpAddress)| IND_RECIPIENT_IP (SetIndicationConfig)
- *   0x0013 = RADIO_MODE (SetRadioConfig)         | IND_OTHER_IP (SetIndicationConfig)
+/* 0x0011–0x0014 are likewise spec-overloaded: each name below intentionally
+ * aliases the same wire value with a different, command-scoped meaning.
+ *   0x0011 = SLOT_EMPTY (ChangeIp) | RADIO_FREQ (SetRadio) | IPCFG_IP (SetIpConfigList)
+ *   0x0012 = IP_CHANGE_CONFLICT (ChangeIp) | IND_RECIPIENT_IP (SetIndication)
+ *            | PW_NUL (Login/SetPassword) | IPCFG_NETMASK (SetIpConfigList)
+ *            | RADIO_CH (SetRadio)
+ *   0x0013 = RADIO_MODE (SetRadio) | IND_OTHER_IP (SetIndication) | IPCFG_GW (SetIpConfigList)
+ *   0x0014 = RADIO_BW (SetRadio) | NEW_PW_NUL (SetPassword) | IPCFG_NTP (SetIpConfigList)
  * Each handler must use only its own command's names, and a single switch must
  * never mix two same-valued names — that is a duplicate-case compile error.
  * vhlctl's value→label map therefore uses literal cases with combined labels. */
@@ -113,6 +116,23 @@
                                                        * FIXME: wire value unconfirmed — 0x0018 is the
                                                        * vendor-answer proposal; update when the formal
                                                        * confirmation arrives. */
+#define OPC_ERR_PW_NUL                        0x0012  /* Login §3.3.1 / SetPassword(old) §3.3.5:
+                                                       * password field not NUL-terminated */
+#define OPC_ERR_NEW_PW_NUL                    0x0014  /* SetPassword: new password not NUL-terminated */
+#define OPC_ERR_IPCFG_IP                      0x0011  /* SetIpConfigList: impossible IP (0.0.0.0/bcast/mcast) */
+#define OPC_ERR_IPCFG_NETMASK                 0x0012  /* SetIpConfigList: not a valid netmask */
+#define OPC_ERR_IPCFG_GW                      0x0013  /* SetIpConfigList: gateway outside the entry's subnet */
+#define OPC_ERR_IPCFG_NTP                     0x0014  /* SetIpConfigList: impossible NTP server IP */
+#define OPC_ERR_IPCFG_ESSID_CHAR              0x0015  /* SetIpConfigList: invalid ESSID characters
+                                                       * (semantics undefined in spec — not yet emitted) */
+#define OPC_ERR_IPCFG_ESSID_NUL               0x0016  /* SetIpConfigList: ESSID not NUL-terminated */
+#define OPC_ERR_IPCFG_LIST_SIZE               0x0017  /* SetIpConfigList: Length is not 56 + 64*n */
+#define OPC_ERR_RADIO_CH                      0x0012  /* SetRadioConfig: unsupported CH/band (incl. 6 GHz — A21) */
+#define OPC_ERR_IND_BITS                      0x0010  /* SetIndicationConfig: unassigned info bit set */
+
+/* Indication info bits (§3.4): 0x40 is the only unassigned/reserved bit —
+ * the seven assigned OPC_IND_BIT_* above OR to 0xBF. */
+#define OPC_IND_BITS_RESERVED                 0x40
 
 /* Reset cause (Reset ack / ResetNotice indication). */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */
