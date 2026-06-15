@@ -515,6 +515,24 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "#43 P2c: change applies after Logout despite re-login");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2c: applies the staged slot");
 
+    /* 13h. #43 (Claude review): successive ChangeIp within ONE session — the
+     *      second restage (slot 2) overrides the first (slot 1), and the Logout
+     *      commits slot 2, never the stale slot 1 (slot confusion was part of the
+     *      original bug, so guard it explicitly). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START, 0xC0A80166);
+    (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END, 0xC0A80166);
+    (void)do_change_ip(&st, CIP, 1);                   /* stage slot 1 */
+    (void)do_change_ip(&st, CIP, 2);                   /* restage slot 2 — overrides slot 1 */
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2d: logout arms the latest stage");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2d: applies once on logout");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80166, "#43 P2d: commits slot 2 (latest), not slot 1");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);

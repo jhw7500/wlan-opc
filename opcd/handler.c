@@ -388,8 +388,11 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
          *  - !armed: an explicit Logout earlier in the same UDP drain armed a
          *    commit that must survive to the apply pass. */
         if (!was_active && !st->ip_change_commit_armed) {
-            st->ip_change_pending = false;
-            st->ip_change_list_no = 0;
+            st->ip_change_pending      = false;
+            st->ip_change_list_no      = 0;
+            st->ip_change_commit_armed = false;  /* already false per the guard;
+                                                  * kept so the invariant survives
+                                                  * a future relaxation of it */
         }
         session_touch(st);
         opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
