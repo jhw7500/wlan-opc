@@ -100,7 +100,6 @@
 
 static int      g_nl_fd = -1;
 static uint16_t g_nl80211_family_id;
-static uint16_t g_mlme_grp_id;
 
 /* Parse "-66 dBm" / "-66dBm" into an int8 (signed dBm). */
 static int parse_signed_dbm(const char *s, int8_t *out)
@@ -219,8 +218,9 @@ static int nl_resolve_family(int fd, uint16_t *fam, uint16_t *grp)
                         (struct sockaddr *)&kernel, sizeof kernel);
     if (sn < 0 || (size_t)sn != reqlen) return -1;
 
-    /* Blocking recv bounded by SO_RCVTIMEO (set by the caller). One datagram
-     * carries the whole NEWFAMILY reply for nl80211. */
+    /* Blocking recv bounded by SO_RCVTIMEO (set by the caller). The CTRL
+     * GETFAMILY reply for nl80211 is single-part (no NLM_F_MULTI / trailing
+     * NLMSG_DONE datagram), so one recv carries the whole NEWFAMILY reply. */
     uint8_t reply[NL_RECV_BUF];
     ssize_t rn = recv(fd, reply, sizeof reply, 0);
     if (rn < (ssize_t)(NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN)) return -1;
@@ -301,7 +301,6 @@ static int nl_event_socket_open(void)
     }
 
     g_nl80211_family_id = fam;
-    g_mlme_grp_id       = grp;
     g_nl_fd             = fd;
     fprintf(stderr, "opcd: nl80211 events live: family=%u mlme-grp=%u\n",
             fam, grp);
@@ -1007,7 +1006,7 @@ static uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
     if (freq_mhz >= 2412 && freq_mhz <= 2484)      band = OPC_BAND_2_4GHZ;
     else if (freq_mhz >= 5000 && freq_mhz <= 5895) band = OPC_BAND_5GHZ;
     else if (freq_mhz >= 5955 && freq_mhz <= 7115) band = OPC_BAND_6GHZ;
-    return (uint16_t)((uint16_t)band << 8) | ch;
+    return (uint16_t)(((uint16_t)band << 8) | ch);
 }
 
 /* Translate one decoded nl80211 event into 0..2 platform events and stage them
@@ -1048,6 +1047,9 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
             pe.u.ap_disconnect.idx        = (uint8_t)idx;
             pe.u.ap_disconnect.reason_msg_id = OPC_AP_MSG_DEAUTHENTICATION;
             pe.u.ap_disconnect.result_code   = nev->reason_code;
+            /* nev->mac is zeroed when NL80211_ATTR_MAC is absent (mac_present
+             * false) — best-effort: the AP MAC is reported as 00:00:00:00:00:00
+             * rather than dropping the indication. */
             memcpy(pe.u.ap_disconnect.mac, nev->mac, 6);
             nl_coalesce_put(tab, count, &pe);
         }
