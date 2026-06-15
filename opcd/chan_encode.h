@@ -1,5 +1,5 @@
-#ifndef OPCD_CHAN_ENCODE_H
-#define OPCD_CHAN_ENCODE_H
+#ifndef WLAN_OPC_OPCD_CHAN_ENCODE_H
+#define WLAN_OPC_OPCD_CHAN_ENCODE_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,4 +28,4 @@ uint16_t opc_assoc_chan_field(uint32_t evt_freq, uint16_t evt_ch,
                               bool link_assoc, uint32_t link_freq,
                               uint16_t link_ch);
 
-#endif /* OPCD_CHAN_ENCODE_H */
+#endif /* WLAN_OPC_OPCD_CHAN_ENCODE_H */

@@ -44,6 +44,18 @@ int main(void)
     /* Frequency outside every known band → band 0, channel preserved. */
     ASSERT(opc_chan_field(3000, 50) == CH(0, 50), "chan_field: unknown band → ch only");
 
+    /* 5 GHz lower edge (symmetry with the 2.4/6 GHz edges above). */
+    ASSERT(opc_chan_field(5000, 1) == CH(OPC_BAND_5GHZ, 1), "chan_field: 5000 → 5G ch1 (lower edge)");
+
+    /* Off-by-one just outside the 2.4 GHz band → no band (band byte 0). */
+    ASSERT(opc_chan_field(2411, 1) == CH(0, 1), "chan_field: 2411 (below 2.4G) → no band");
+    ASSERT(opc_chan_field(2485, 1) == CH(0, 1), "chan_field: 2485 (above 2.4G) → no band");
+
+    /* Channel must fit the 8-bit wire field; a >255 value (e.g. corrupt
+     * link.json) would overflow into the band byte — reject defensively. */
+    ASSERT(opc_chan_field(2412, 256) == 0, "chan_field: ch >255 → 0 (overflow guard)");
+    ASSERT(opc_chan_field(0, 256) == 0, "chan_field: band-less ch >255 → 0");
+
     /* ---- opc_assoc_chan_field: event-preferred, link fallback ------------ */
 
     /* Event carries its own freq/channel → use it, ignore the link readback. */
@@ -80,6 +92,11 @@ int main(void)
            "assoc: link ch without freq → 0 (no band)");
     ASSERT(opc_assoc_chan_field(0, 0, true, 5900, 40) == 0,
            "assoc: link band-gap freq (5896-5954) → 0");
+
+    /* Corrupt link channel (>255) must not overflow into the band byte and be
+     * mistaken for a valid band-qualified fallback. */
+    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 256) == 0,
+           "assoc: link overflow ch (>255) → 0");
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);

@@ -9,7 +9,9 @@
  * arises from the link-readback fallback (see opc_assoc_chan_field). */
 uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
 {
-    if (ch == 0) return 0;            /* unknown channel → 0 (no band) */
+    /* ch 0 = unknown; ch >255 cannot fit the 8-bit wire field and would
+     * overflow into the band byte (e.g. corrupt link.json) — both → 0. */
+    if (ch == 0 || ch > 0xFF) return 0;
     uint8_t band = 0;
     if (freq_mhz >= 2412 && freq_mhz <= 2484)      band = OPC_BAND_2_4GHZ;
     else if (freq_mhz >= 5000 && freq_mhz <= 5895) band = OPC_BAND_5GHZ;
