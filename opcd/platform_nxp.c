@@ -1010,8 +1010,8 @@ static void nl_coalesce_put(opcd_platform_evt_t *tab, size_t *count,
  * Authoritative channel source at association time: the kernel knows the
  * operating freq the instant CONNECT fires, whereas link.json lags (the logger
  * polls ~1 s and clears the file on disconnect — the on-target race that left
- * the link.json fallback reading channel 0). Bounded by a 1 s SO_RCVTIMEO so a
- * silent kernel cannot stall the drain. */
+ * the link.json fallback reading channel 0). Bounded by a 250 ms SO_RCVTIMEO so
+ * a silent kernel cannot stall the single-threaded drain loop. */
 static int nxp_get_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel)
 {
     if (g_nl80211_family_id == 0 || ifindex <= 0) return -1;
@@ -1023,7 +1023,9 @@ static int nxp_get_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel
     struct sockaddr_nl addr = { .nl_family = AF_NETLINK };
     if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0) goto out;
 
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    /* 250 ms: a local-kernel netlink reply is immediate (no network I/O); this
+     * just bounds the drain-loop stall if the kernel ever goes silent. */
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 250000 };
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0) goto out;
 
     uint8_t req[64];
@@ -1037,8 +1039,14 @@ static int nxp_get_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel
                         (struct sockaddr *)&kernel, sizeof kernel);
     if (sn < 0 || (size_t)sn != reqlen) goto out;
 
+    /* GET_INTERFACE reply is single-part (no NLM_F_MULTI / trailing NLMSG_DONE),
+     * so one recv carries it. Retry on EINTR like the rest of the drain path
+     * (nxp_drain_events / run_argv_bounded). */
     uint8_t reply[NL_RECV_BUF];
-    ssize_t rn = recv(fd, reply, sizeof reply, 0);
+    ssize_t rn;
+    do {
+        rn = recv(fd, reply, sizeof reply, 0);
+    } while (rn < 0 && errno == EINTR);
     if (rn < (ssize_t)(NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN)) goto out;
 
     uint16_t reply_type;
