@@ -67,14 +67,21 @@ static int on_platform_event(const opcd_platform_evt_t *evt, void *ctx)
         opcd_ind_init_complete(st, evt->u.init_complete.status);
         break;
     case OPCD_PEVT_WLAN_STATUS:
+        /* mlan0-only interim policy (#35 item 6): drop mlan1 events until the
+         * OPC spec grows a wlan_id field — see the function header note. */
+        if (evt->u.wlan_status.idx != 0) return 0;
         opcd_ind_wlan_status(st, evt->u.wlan_status.status,
                                 evt->u.wlan_status.channel);
         break;
     case OPCD_PEVT_ROAMING:
+        /* mlan0-only interim policy (#35 item 6) — drop mlan1 roaming. */
+        if (evt->u.roaming.idx != 0) return 0;
         opcd_ind_roaming(st, evt->u.roaming.snr, evt->u.roaming.rssi,
                             evt->u.roaming.mac, evt->u.roaming.channel);
         break;
     case OPCD_PEVT_AP_DISCONNECT:
+        /* mlan0-only interim policy (#35 item 6) — drop mlan1 disconnects. */
+        if (evt->u.ap_disconnect.idx != 0) return 0;
         opcd_ind_ap_disconnect(st, evt->u.ap_disconnect.reason_msg_id,
                                   evt->u.ap_disconnect.result_code,
                                   evt->u.ap_disconnect.mac);
