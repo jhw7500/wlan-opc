@@ -374,17 +374,20 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
     } else if (strncmp(req.password, st->password, sizeof st->password - 1) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
     } else {
+        bool was_active = st->logged_in;
         st->logged_in   = true;
         st->holder_ip   = ip;
         st->holder_port = port;
         st->boot_status = OPC_DEVICE_LOGGED_IN;
-        /* A fresh session never inherits a prior session's ABANDONED ChangeIp
-         * (idle-logged-out, never armed): clearing the unarmed staging stops this
-         * session's eventual Logout from committing it (#43 cross-session guard).
-         * An already-ARMED commit — an explicit Logout earlier in the same UDP
-         * drain, before the loop-tail apply pass — must survive untouched, else
-         * the requested IP switch is silently lost (#43). */
-        if (!st->ip_change_commit_armed) {
+        /* Drop a prior session's ABANDONED ChangeIp (idle-logged-out, never
+         * armed) so this fresh session's eventual Logout cannot commit it (#43
+         * cross-session guard). Gated on two conditions:
+         *  - !was_active: only a genuinely fresh login (no session was held)
+         *    clears. A same-holder re-login / Login retransmission continues the
+         *    SAME session and must keep its own still-pending change (#43).
+         *  - !armed: an explicit Logout earlier in the same UDP drain armed a
+         *    commit that must survive to the apply pass. */
+        if (!was_active && !st->ip_change_commit_armed) {
             st->ip_change_pending = false;
             st->ip_change_list_no = 0;
         }

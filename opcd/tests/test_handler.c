@@ -497,6 +497,24 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "#43 P2b: B's change applies on B's own Logout");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80166, "#43 P2b: applies B's slot, not A's");
 
+    /* 13g. #43 (Codex re-review): a same-holder re-login / Login retransmission
+     *      (same IP, session still active) must NOT drop the session's own
+     *      still-pending ChangeIp. Only a genuinely fresh login after teardown
+     *      clears inherited staging. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    ASSERT(st.ip_change_pending, "#43 P2c: change staged");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);    /* same-holder re-login (UDP retransmit) */
+    ASSERT(st.ip_change_pending, "#43 P2c: same-session re-login keeps the pending change");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2c: logout arms");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2c: change applies after Logout despite re-login");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2c: applies the staged slot");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
