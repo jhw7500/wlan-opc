@@ -374,10 +374,26 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
     } else if (strncmp(req.password, st->password, sizeof st->password - 1) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
     } else {
+        bool was_active = st->logged_in;
         st->logged_in   = true;
         st->holder_ip   = ip;
         st->holder_port = port;
         st->boot_status = OPC_DEVICE_LOGGED_IN;
+        /* Drop a prior session's ABANDONED ChangeIp (idle-logged-out, never
+         * armed) so this fresh session's eventual Logout cannot commit it (#43
+         * cross-session guard). Gated on two conditions:
+         *  - !was_active: only a genuinely fresh login (no session was held)
+         *    clears. A same-holder re-login / Login retransmission continues the
+         *    SAME session and must keep its own still-pending change (#43).
+         *  - !armed: an explicit Logout earlier in the same UDP drain armed a
+         *    commit that must survive to the apply pass. */
+        if (!was_active && !st->ip_change_commit_armed) {
+            st->ip_change_pending      = false;
+            st->ip_change_list_no      = 0;
+            st->ip_change_commit_armed = false;  /* already false per the guard;
+                                                  * kept so the invariant survives
+                                                  * a future relaxation of it */
+        }
         session_touch(st);
         opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
     }
@@ -400,6 +416,30 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
     } else if (!session_owns(st, ip)) {
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_CONDITION;
     } else {
+        /* The explicit Logout is the SOLE commit signal for a deferred ChangeIp
+         * (#43): snapshot the resolved target entry and arm before teardown so
+         * the main-loop apply — which runs after this ack is sent — performs the
+         * switch against an immutable copy (a later session cannot rewrite the
+         * slot out from under it). The `!armed` guard makes that snapshot
+         * write-once: once a Logout has armed a commit, a later session's own
+         * Logout (in the same UDP drain, before apply) must not re-snapshot it
+         * with the rewritten slot. Idle auto-logout reaches opcd_session_logout()
+         * without arming and therefore never commits. */
+        if (st->ip_change_pending && !st->ip_change_commit_armed) {
+            uint16_t n = st->ip_change_list_no;
+            if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS) {
+                st->ip_change_armed_entry  = st->ip_list.slots[n - 1];
+                st->ip_change_armed_no     = n;
+                st->ip_change_commit_armed = true;
+            } else {
+                /* Defensive dead path: handle_change_ip_address validates the
+                 * slot before staging, so n is always in range here. Log if the
+                 * invariant is ever violated so a future regression is visible
+                 * rather than a silently dropped commit (Claude review). */
+                fprintf(stderr,
+                        "opcd: logout: pending IP change has invalid slot %u — not armed\n", n);
+            }
+        }
         opcd_session_logout(st);
     }
     opc_logout_ack_t ack = { .result = result, .error_cause = err };
@@ -692,13 +732,24 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
     if (opc_change_ip_address_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        if (st->ip_list_staging_active) {
+        if (st->ip_change_commit_armed) {
+            /* A prior session's Logout armed a commit that the main loop will
+             * apply imminently; refuse to stage a new change so a returned OK is
+             * never silently dropped by that apply's clear (#43, Codex review).
+             * Only reachable in a same-drain race — the armed commit is about to
+             * switch the device IP regardless. This also keeps the armed window
+             * exclusive: no live pending state exists for the apply to discard. */
+            result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
+        } else if (st->ip_list_staging_active) {
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
         } else if (req.list_number < 1 || req.list_number > OPC_IPCFG_LIST_MAX_SLOTS) {
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
         } else if (!st->ip_list.present[req.list_number - 1]) {
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_EMPTY;
         } else {
+            /* Reachable only when no commit is armed (rejected above), so this
+             * fresh stage never collides with an armed snapshot. It commits when
+             * THIS session explicitly Logs out, which snapshots + arms it. */
             st->ip_change_pending = true;
             st->ip_change_list_no = req.list_number;
             session_touch(st);
@@ -939,12 +990,16 @@ int opcd_dispatch(opcd_state_t *st,
 
 void opcd_apply_pending_ip_change(opcd_state_t *st)
 {
-    if (!st->ip_change_pending) return;
-    uint16_t n = st->ip_change_list_no;
-    if (n < 1 || n > OPC_IPCFG_LIST_MAX_SLOTS) { st->ip_change_pending = false; return; }
-    const opc_ipcfg_entry_t *e = &st->ip_list.slots[n - 1];
+    /* Commit only when an explicit Logout armed it (#43). The main loop calls
+     * this every iteration; gating on the arm flag (not merely ip_change_pending)
+     * keeps a staged-but-not-logged-out change deferred, and makes idle/abandon
+     * teardown a no-op so the device never migrates its IP unattended. The target
+     * is a snapshot taken at arm time, so the commit depends on no mutable shared
+     * state — a later session rewriting the slot cannot change what is applied. */
+    if (!st->ip_change_commit_armed) return;
+    const opc_ipcfg_entry_t *e = &st->ip_change_armed_entry;
     fprintf(stderr, "opcd: apply pending IP change → slot %u ip=0x%08X essid=%s\n",
-            n, e->ip_address, e->essid);
+            st->ip_change_armed_no, e->ip_address, e->essid);
 
     /* Hand off to the platform backend to rewrite the active IP (stub no-ops;
      * nxp reconfigures eth0's management IP directly via ip addr). Clear the
@@ -959,8 +1014,16 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     else
         st->indication_enabled = false;   /* IP changed → indication target invalid */
 
-    st->ip_change_pending = false;
-    memset(&st->ip_change_list_no, 0, sizeof st->ip_change_list_no);
+    /* Fully reset the deferred-commit state. The arm gate already prevents a
+     * stale snapshot from being reused, but zeroing the snapshot too means a
+     * future relaxation of that gate cannot resurrect this entry (Claude review).
+     * ip_change_list_no is staging state the apply no longer reads — cleared
+     * here as belt-and-suspenders. */
+    st->ip_change_pending      = false;
+    st->ip_change_commit_armed = false;
+    st->ip_change_list_no      = 0;
+    st->ip_change_armed_no     = 0;
+    memset(&st->ip_change_armed_entry, 0, sizeof st->ip_change_armed_entry);
 }
 
 /* D12/D13 (decision 2026-06-11): a bad-length datagram earns the spec's
