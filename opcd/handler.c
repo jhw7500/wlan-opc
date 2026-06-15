@@ -383,7 +383,7 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
          * session's eventual Logout from committing it (#43 cross-session guard).
          * An already-ARMED commit — an explicit Logout earlier in the same UDP
          * drain, before the loop-tail apply pass — must survive untouched, else
-         * the requested IP switch is silently lost (Codex review, PR #44). */
+         * the requested IP switch is silently lost (#43). */
         if (!st->ip_change_commit_armed) {
             st->ip_change_pending = false;
             st->ip_change_list_no = 0;

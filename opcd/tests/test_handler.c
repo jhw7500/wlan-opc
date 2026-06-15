@@ -456,9 +456,11 @@ int main(void)
     opcd_apply_pending_ip_change(&st);
     ASSERT(stub_apply_ip_calls() == 0, "#43: a later session's Logout does not commit A's change");
 
-    /* 13e. #43 (Codex P2, PR #44): an explicit Logout that armed a commit must
-     *      survive a Login read in the same UDP drain before the loop-tail apply
-     *      pass — the armed migration is NOT undone by a racing/re-login. */
+    /* 13e. #43 (Codex P2): an explicit Logout that armed a commit must survive a
+     *      Login read in the same UDP drain before the loop-tail apply pass — the
+     *      armed migration is NOT undone by a racing/re-login. B (the intervening
+     *      login) is then severed and must reconnect on the new IP; that is the
+     *      expected A12 consequence, not an error. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     stub_apply_ip_reset();

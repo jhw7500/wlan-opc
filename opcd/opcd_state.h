@@ -96,8 +96,8 @@ typedef struct opcd_state {
      * after the Logout ack is sent. Idle/abandon logout never arms, so the
      * device keeps its current IP; a fresh Login clears any inherited staging. */
     bool     ip_change_pending;
-    uint16_t ip_change_list_no;
     bool     ip_change_commit_armed;
+    uint16_t ip_change_list_no;
 
     /* FaultDetect congestion probe — T6 interim policy (fault_probe.h). */
     opcd_fault_probe_t fault_probe;
