@@ -378,6 +378,12 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
         st->holder_ip   = ip;
         st->holder_port = port;
         st->boot_status = OPC_DEVICE_LOGGED_IN;
+        /* A fresh session never inherits a prior session's deferred ChangeIp:
+         * a change abandoned via idle auto-logout must not be committed by this
+         * session's eventual Logout (#43 cross-session contamination guard). */
+        st->ip_change_pending      = false;
+        st->ip_change_list_no      = 0;
+        st->ip_change_commit_armed = false;
         session_touch(st);
         opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
     }
@@ -400,6 +406,12 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
     } else if (!session_owns(st, ip)) {
         result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_CONDITION;
     } else {
+        /* The explicit Logout is the SOLE commit signal for a deferred ChangeIp
+         * (#43): arm before teardown so the main-loop apply — which runs after
+         * this ack is sent — performs the switch. Idle auto-logout reaches
+         * opcd_session_logout() without arming and therefore never commits. */
+        if (st->ip_change_pending)
+            st->ip_change_commit_armed = true;
         opcd_session_logout(st);
     }
     opc_logout_ack_t ack = { .result = result, .error_cause = err };
@@ -939,9 +951,17 @@ int opcd_dispatch(opcd_state_t *st,
 
 void opcd_apply_pending_ip_change(opcd_state_t *st)
 {
-    if (!st->ip_change_pending) return;
+    /* Commit only when an explicit Logout armed it (#43). The main loop calls
+     * this every iteration; gating on the arm flag (not merely ip_change_pending)
+     * keeps a staged-but-not-logged-out change deferred, and makes idle/abandon
+     * teardown a no-op so the device never migrates its IP unattended. */
+    if (!st->ip_change_commit_armed) return;
     uint16_t n = st->ip_change_list_no;
-    if (n < 1 || n > OPC_IPCFG_LIST_MAX_SLOTS) { st->ip_change_pending = false; return; }
+    if (n < 1 || n > OPC_IPCFG_LIST_MAX_SLOTS) {
+        st->ip_change_pending      = false;
+        st->ip_change_commit_armed = false;
+        return;
+    }
     const opc_ipcfg_entry_t *e = &st->ip_list.slots[n - 1];
     fprintf(stderr, "opcd: apply pending IP change → slot %u ip=0x%08X essid=%s\n",
             n, e->ip_address, e->essid);
@@ -959,7 +979,8 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     else
         st->indication_enabled = false;   /* IP changed → indication target invalid */
 
-    st->ip_change_pending = false;
+    st->ip_change_pending      = false;
+    st->ip_change_commit_armed = false;
     memset(&st->ip_change_list_no, 0, sizeof st->ip_change_list_no);
 }
 

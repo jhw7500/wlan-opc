@@ -406,6 +406,56 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "change-ip: platform apply_ip_change called on logout");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "change-ip: apply gets committed slot ip");
 
+    /* 13b. #43 regression: the deferred ChangeIp must NOT apply on a non-logout
+     *      wakeup. opcd_apply_pending_ip_change runs every epoll iteration
+     *      (opcd.c) — before the arm-flag fix it fired on ANY mid-session event
+     *      (timer tick, async-NVRAM completion, stray datagram) and migrated the
+     *      live session's IP out from under it. Only an explicit Logout arms it. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    r = do_change_ip(&st, CIP, 1);
+    ASSERT(r == OPC_RESULT_OK, "#43: change-ip accepted");
+    opcd_apply_pending_ip_change(&st);   /* stray mid-session wakeup */
+    ASSERT(stub_apply_ip_calls() == 0, "#43: no apply on a non-logout wakeup (live session)");
+    opcd_apply_pending_ip_change(&st);   /* repeated wakeups stay inert */
+    ASSERT(stub_apply_ip_calls() == 0, "#43: still inert on repeated mid-session wakeups");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43: explicit logout ok");
+    opcd_apply_pending_ip_change(&st);   /* main loop applies after the Logout ack */
+    ASSERT(stub_apply_ip_calls() == 1, "#43: apply fires only after an explicit Logout");
+
+    /* 13c. #43 STRICT: a non-explicit teardown (idle auto-logout / abandon) must
+     *      NOT commit a pending change — the device keeps its current IP so an
+     *      abandoned client can still reach it. Both idle paths funnel through
+     *      opcd_session_logout(), which never arms the commit. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    opcd_session_logout(&st);            /* models idle auto-logout (no arm) */
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 0, "#43: idle/abandon logout does not commit IP change");
+
+    /* 13d. #43: a change staged by client A and abandoned (idle) must not be
+     *      committed by a later session's explicit Logout — a fresh Login clears
+     *      the inherited staging (cross-session contamination guard). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);     /* A stages a change */
+    st.idle_deadline = 1;                /* A goes idle */
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);  /* dispatch idle-logs-out A, then B logs in */
+    ASSERT(!st.ip_change_pending, "#43: fresh Login clears an inherited pending change");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43: client B logout ok");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 0, "#43: a later session's Logout does not commit A's change");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
@@ -417,6 +467,9 @@ int main(void)
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
     (void)do_change_ip(&st, CIP, 1);
+    st.ip_change_commit_armed = true;    /* arm the commit gate directly: a real
+                                          * Logout would pre-clear indication, so
+                                          * exercise the apply unit in isolation (#43) */
     opcd_apply_pending_ip_change(&st);   /* platform apply fails */
     ASSERT(stub_apply_ip_calls() == 1, "change-ip fail: platform apply attempted");
     ASSERT(st.indication_enabled, "change-ip fail: indication kept (IP unchanged)");
