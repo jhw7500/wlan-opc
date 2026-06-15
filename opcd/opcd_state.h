@@ -91,13 +91,17 @@ typedef struct opcd_state {
     bool     ip_list_staging_active;
 
     /* ChangeIpAddress is deferred and committed ONLY by an explicit Logout (#43):
-     * change-ip stages it (ip_change_pending); handle_logout arms the commit
+     * change-ip stages it (ip_change_pending); handle_logout snapshots the
+     * resolved target entry (ip_change_armed_entry) and arms the commit
      * (ip_change_commit_armed) just before teardown; the main loop then applies
-     * after the Logout ack is sent. Idle/abandon logout never arms, so the
-     * device keeps its current IP; a fresh Login clears any inherited staging. */
+     * the snapshot after the Logout ack is sent. Snapshotting makes the armed
+     * commit immune to any later list mutation (a same-drain next session cannot
+     * rewrite what gets applied). Idle/abandon logout never arms, so the device
+     * keeps its current IP; a fresh Login clears any inherited staging. */
     bool     ip_change_pending;
     bool     ip_change_commit_armed;
     uint16_t ip_change_list_no;
+    opc_ipcfg_entry_t ip_change_armed_entry;
 
     /* FaultDetect congestion probe — T6 interim policy (fault_probe.h). */
     opcd_fault_probe_t fault_probe;

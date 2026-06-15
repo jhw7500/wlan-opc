@@ -533,6 +533,40 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "#43 P2d: applies once on logout");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80166, "#43 P2d: commits slot 2 (latest), not slot 1");
 
+    /* 13i. #43 (Codex re-review): the armed commit snapshots the resolved entry
+     *      at Logout, so a later session rewriting that slot via SetIpConfigList
+     *      before the apply pass cannot change what A's armed commit applies. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*.101*/);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);                   /* A targets slot 1 = .101 */
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2e: A logout arms + snapshots slot 1");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);    /* B logs in, arm preserved */
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A801C8 /*.200*/);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A801C8);  /* B rewrites slot 1 */
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2e: A's armed commit still applies");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165,
+           "#43 P2e: applies A's snapshot (.101), not B's rewrite (.200)");
+
+    /* 13j. #43: same session ChangeIp(slot1) then SetIpConfigList(slot1=new) then
+     *      Logout — the commit snapshots slot 1 AT Logout, applying the latest
+     *      configured value the client set before committing. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A801C8);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A801C8);
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2f: logout arms (snapshots latest slot1)");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A801C8,
+           "#43 P2f: applies slot 1 value as of the committing Logout (.200)");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
@@ -544,6 +578,7 @@ int main(void)
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
     (void)do_change_ip(&st, CIP, 1);
+    st.ip_change_armed_entry  = st.ip_list.slots[0];  /* snapshot, as a real arm would */
     st.ip_change_commit_armed = true;    /* arm the commit gate directly: a real
                                           * Logout would pre-clear indication, so
                                           * exercise the apply unit in isolation (#43) */
