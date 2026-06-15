@@ -603,6 +603,21 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "#43 P2h: A's armed commit still applies");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2h: applies A's slot 1");
 
+    /* 13m. #43 (Claude review): a second apply after a successful commit is a
+     *      no-op — the armed flag is cleared, so the platform is not re-invoked. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 idemp: logout arms");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 idemp: first apply commits");
+    opcd_apply_pending_ip_change(&st);
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 idemp: further apply calls are no-ops");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);

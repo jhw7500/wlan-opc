@@ -431,6 +431,13 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
                 st->ip_change_armed_entry  = st->ip_list.slots[n - 1];
                 st->ip_change_armed_no     = n;
                 st->ip_change_commit_armed = true;
+            } else {
+                /* Defensive dead path: handle_change_ip_address validates the
+                 * slot before staging, so n is always in range here. Log if the
+                 * invariant is ever violated so a future regression is visible
+                 * rather than a silently dropped commit (Claude review). */
+                fprintf(stderr,
+                        "opcd: logout: pending IP change has invalid slot %u — not armed\n", n);
             }
         }
         opcd_session_logout(st);
@@ -1007,9 +1014,16 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     else
         st->indication_enabled = false;   /* IP changed → indication target invalid */
 
+    /* Fully reset the deferred-commit state. The arm gate already prevents a
+     * stale snapshot from being reused, but zeroing the snapshot too means a
+     * future relaxation of that gate cannot resurrect this entry (Claude review).
+     * ip_change_list_no is staging state the apply no longer reads — cleared
+     * here as belt-and-suspenders. */
     st->ip_change_pending      = false;
     st->ip_change_commit_armed = false;
-    memset(&st->ip_change_list_no, 0, sizeof st->ip_change_list_no);
+    st->ip_change_list_no      = 0;
+    st->ip_change_armed_no     = 0;
+    memset(&st->ip_change_armed_entry, 0, sizeof st->ip_change_armed_entry);
 }
 
 /* D12/D13 (decision 2026-06-11): a bad-length datagram earns the spec's
