@@ -473,6 +473,30 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "#43 P2: armed commit survives an intervening Login");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2: applies the armed slot's IP");
 
+    /* 13f. #43 (Codex re-review): a new session's ChangeIp must not ride a prior
+     *      session's arm. A logs out arming slot 1; B logs in (arm preserved to
+     *      commit A's change), but B then issues its OWN change-ip (slot 2) —
+     *      which must DISARM the stale commit so the loop-tail apply does NOT
+     *      fire without B's explicit Logout. B's change then commits only on B's
+     *      own Logout, with B's slot — never A's. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2b: A logout arms slot 1");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);     /* B logs in, same drain */
+    (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START, 0xC0A80166);
+    (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END, 0xC0A80166);
+    (void)do_change_ip(&st, CIP, 2);                    /* B's own change disarms A's commit */
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 0, "#43 P2b: B's ChangeIp does not commit without B's Logout");
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2b: B logout arms slot 2");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2b: B's change applies on B's own Logout");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80166, "#43 P2b: applies B's slot, not A's");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);

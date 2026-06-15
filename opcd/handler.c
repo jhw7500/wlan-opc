@@ -717,6 +717,13 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
         } else {
             st->ip_change_pending = true;
             st->ip_change_list_no = req.list_number;
+            /* Staging a new change disarms any commit a prior session's Logout
+             * armed in the same UDP drain: this change commits only on ITS OWN
+             * Logout, never by riding a stale arm (#43, Codex re-review). The
+             * arm gate plus this reset make the apply pass always commit exactly
+             * the slot the arming Logout captured — list_no can only change here,
+             * and changing it clears the arm. */
+            st->ip_change_commit_armed = false;
             session_touch(st);
         }
     }
