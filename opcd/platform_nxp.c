@@ -92,7 +92,10 @@
 #define NL_COALESCE_MAX          8
 
 /* netlink message-header field offsets (struct nlmsghdr is 16 bytes:
- * u32 len, u16 type, u16 flags, u32 seq, u32 pid). */
+ * u32 len, u16 type, u16 flags, u32 seq, u32 pid).
+ * NL_NLMSGHDR_LEN/NL_GENLMSGHDR_LEN deliberately mirror the same constants in
+ * nl80211_parse.c — the duplication is intentional (host-header portability,
+ * same rationale as the file header), not an accident. */
 #define NL_NLMSGHDR_LEN         16
 
 static int      g_nl_fd = -1;
@@ -949,11 +952,6 @@ static int nl_ifindex_to_idx(int ifindex)
     return -1;
 }
 
-/* Per-drain coalesce slot: the latest event of a given (kind, idx). */
-typedef struct {
-    opcd_platform_evt_t evt;
-} nl_coalesce_slot_t;
-
 /* Extract the platform idx (0=mlan0, 1=mlan1) from an event's per-kind union. */
 static uint8_t coalesce_idx(const opcd_platform_evt_t *e)
 {
@@ -968,21 +966,21 @@ static uint8_t coalesce_idx(const opcd_platform_evt_t *e)
 /* Replace-or-append the latest event for its (kind, idx) into the coalesce
  * table. idx is read from the evt union per kind. Table is bounded at
  * NL_COALESCE_MAX; never overflows in practice. */
-static void nl_coalesce_put(nl_coalesce_slot_t *tab, size_t *count,
+static void nl_coalesce_put(opcd_platform_evt_t *tab, size_t *count,
                             const opcd_platform_evt_t *evt)
 {
     uint8_t idx = coalesce_idx(evt);
 
     for (size_t i = 0; i < *count; i++) {
-        if (tab[i].evt.kind != evt->kind)
+        if (tab[i].kind != evt->kind)
             continue;
-        if (coalesce_idx(&tab[i].evt) == idx) {  /* same (kind, idx) — keep latest */
-            tab[i].evt = *evt;
+        if (coalesce_idx(&tab[i]) == idx) {  /* same (kind, idx) — keep latest */
+            tab[i] = *evt;
             return;
         }
     }
     if (*count < NL_COALESCE_MAX) {
-        tab[*count].evt = *evt;
+        tab[*count] = *evt;
         (*count)++;
     } else {
         /* Table full — should never happen (6 distinct slots, table is 8), but
@@ -1015,7 +1013,7 @@ static uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
 /* Translate one decoded nl80211 event into 0..2 platform events and stage them
  * into the coalesce table. DISCONNECT emits AP_DISCONNECT (only when AP-
  * initiated) followed by WLAN_STATUS(UP); the others emit a single event. */
-static void nl_stage_evt(nl_coalesce_slot_t *tab, size_t *count,
+static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
                          const opcd_nl_evt_t *nev, int idx)
 {
     opcd_platform_evt_t pe;
@@ -1103,7 +1101,7 @@ static int nxp_drain_events(opcd_platform_evt_cb cb, void *ctx)
 {
     if (g_nl_fd < 0) return 0;
 
-    nl_coalesce_slot_t tab[NL_COALESCE_MAX];
+    opcd_platform_evt_t tab[NL_COALESCE_MAX];
     memset(tab, 0, sizeof tab);
     size_t count = 0;
     static bool enobufs_logged = false;
@@ -1133,7 +1131,10 @@ static int nxp_drain_events(opcd_platform_evt_cb cb, void *ctx)
             break;
         }
         if (n == 0)
-            break;                           /* no datagram */
+            break;                           /* zero-length datagram: no
+                                              * nlmsghdr to parse. EAGAIN above
+                                              * is the real "queue empty" signal,
+                                              * so a 0 return is simply skipped. */
 
         /* A datagram may pack multiple nlmsghdrs — iterate them by NLMSG_ALIGN.
          * Each is bounds-checked: a header that does not fit, or a nlmsg_len
@@ -1162,7 +1163,7 @@ static int nxp_drain_events(opcd_platform_evt_cb cb, void *ctx)
 
     /* Deliver the coalesced set. Respect cb early-stop (>0). */
     for (size_t i = 0; i < count; i++) {
-        int rc = cb(&tab[i].evt, ctx);
+        int rc = cb(&tab[i], ctx);
         if (rc > 0)
             return rc;
     }

@@ -173,7 +173,7 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
         /* Advance by the aligned attr length. NLA_ALIGN can exceed the
          * remaining bytes for the final attr — guard against wraparound. */
         size_t advance = NLA_ALIGN((size_t)nla_len);
-        if (advance == 0 || off + advance <= off)  /* paranoia: no progress */
+        if (off + advance <= off)  /* paranoia: no progress */
             break;
         off += advance;
     }
@@ -224,7 +224,7 @@ static bool ctrl_grp_is_mlme(const uint8_t *base, size_t blen, uint16_t *out_id)
         }
 
         size_t advance = NLA_ALIGN((size_t)nla_len);
-        if (advance == 0 || off + advance <= off)
+        if (off + advance <= off)
             break;
         off += advance;
     }
@@ -297,7 +297,7 @@ int nl80211_parse_ctrl_family(const uint8_t *msg, size_t len,
                     }
 
                     size_t advance = NLA_ALIGN((size_t)e_len);
-                    if (advance == 0 || goff + advance <= goff)
+                    if (goff + advance <= goff)
                         break;
                     goff += advance;
                 }
@@ -308,7 +308,7 @@ int nl80211_parse_ctrl_family(const uint8_t *msg, size_t len,
         }
 
         size_t advance = NLA_ALIGN((size_t)nla_len);
-        if (advance == 0 || off + advance <= off)
+        if (off + advance <= off)
             break;
         off += advance;
     }
