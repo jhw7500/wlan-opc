@@ -30,9 +30,11 @@ OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_
                        $(OPCDOBJ)/platform_stub.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
 OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
+# Pure parser — no platform backend, no protocol library.
+OPCD_OBJS_NL80211   := $(OPCDOBJ)/nl80211_parse.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
-         test_store_async test_fault_probe
+         test_store_async test_fault_probe test_nl80211_parse
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -58,6 +60,11 @@ $(TESTDIR)/test_store_async: $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASY
 
 $(TESTDIR)/test_fault_probe: $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
+
+# Pure parser test — links only nl80211_parse.o (no platform backend, no
+# libopcproto). Reuses the host opcd object built by `make native`.
+$(TESTDIR)/test_nl80211_parse: $(TESTDIR)/test_nl80211_parse.o $(OPCD_OBJS_NL80211)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_nl80211_parse.o $(OPCD_OBJS_NL80211)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
