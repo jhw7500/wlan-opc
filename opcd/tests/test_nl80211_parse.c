@@ -156,6 +156,24 @@ int main(void)
         ASSERT(ev.status_code == 37, "connect: status 37 (attr id 72)");
     }
 
+    /* 1b. CONNECT success path: STATUS_CODE == 0 → association succeeded (the
+     *     producer stages ASSOCIATED for this). Complements test 1's non-zero
+     *     failure value so both CONNECT outcomes are covered. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_CONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 5200);
+        f_attr_u16(&f, NL80211_ATTR_STATUS_CODE, 0);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "connect ok: rc==0");
+        ASSERT(ev.kind == OPCD_NL_CONNECT, "connect ok: kind CONNECT");
+        ASSERT(ev.status_code == 0, "connect ok: status 0 (success path)");
+    }
+
     /* 2. DISCONNECT (cmd 48): IFINDEX + MAC + REASON_CODE. */
     {
         frame_t f; f_reset(&f);
@@ -425,6 +443,22 @@ int main(void)
         ASSERT(ev.kind == OPCD_NL_DISCONNECT, "by_ap: kind DISCONNECT");
         ASSERT(ev.by_ap == true, "by_ap: by_ap true (flag present)");
         ASSERT(ev.reason_code == 3, "by_ap: reason 3 (attrs after flag read)");
+    }
+
+    /* 16b. DISCONNECTED_BY_AP carrying a (non-canonical) 4-byte payload still
+     *      sets by_ap — presence is the signal regardless of length, defensive
+     *      against a kernel that attaches a body to the flag attr. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_DISCONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u32(&f, NL80211_ATTR_DISCONNECTED_BY_AP, 1);  /* non-canonical payload */
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "by_ap payload: rc==0");
+        ASSERT(ev.by_ap == true, "by_ap payload: true even with a payload");
     }
 
     /* 17. DISCONNECT WITHOUT the flag attr → by_ap stays false (a local /

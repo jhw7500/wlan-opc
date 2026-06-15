@@ -88,7 +88,9 @@
 #define NL_RECV_BUF             8192
 /* Per-drain coalesce table: collapse duplicate (kind, idx) to the last seen.
  * 3 nl80211-staged kinds × 2 interfaces = 6 distinct (kind,idx) slots; 8 is a
- * safe over-allocation. */
+ * safe over-allocation. If a future kind/interface addition exceeds it,
+ * nl_coalesce_put emits a one-time "coalesce table full" warning (see below)
+ * rather than dropping silently. */
 #define NL_COALESCE_MAX          8
 
 /* netlink message-header field offsets (struct nlmsghdr is 16 bytes:
