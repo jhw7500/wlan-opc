@@ -101,6 +101,7 @@ typedef struct opcd_state {
     bool     ip_change_pending;
     bool     ip_change_commit_armed;
     uint16_t ip_change_list_no;
+    uint16_t ip_change_armed_no;          /* slot # snapshotted at arm (audit log) */
     opc_ipcfg_entry_t ip_change_armed_entry;
 
     /* FaultDetect congestion probe — T6 interim policy (fault_probe.h). */
