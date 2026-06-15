@@ -45,6 +45,7 @@
 #include <linux/genetlink.h>  /* GENL_ID_CTRL (referenced as a literal below) */
 
 #include "platform.h"
+#include "chan_encode.h"
 #include "json_util.h"
 #include "nl80211_parse.h"
 #include "ntp_parse.h"
@@ -996,20 +997,8 @@ static void nl_coalesce_put(opcd_platform_evt_t *tab, size_t *count,
     }
 }
 
-/* Encode the OPC indication channel field: upper byte = OPC band, lower byte =
- * channel number (protocol/indications.h: indication_ch / ch_number). The band
- * is derived from the parsed frequency. Channel 0 (no association / unknown)
- * maps to a bare 0 with no band. Producer-side mapping keeps nl80211_parse.c
- * OPC-agnostic. */
-static uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
-{
-    if (ch == 0) return 0;            /* unknown channel → 0 (no band) */
-    uint8_t band = 0;
-    if (freq_mhz >= 2412 && freq_mhz <= 2484)      band = OPC_BAND_2_4GHZ;
-    else if (freq_mhz >= 5000 && freq_mhz <= 5895) band = OPC_BAND_5GHZ;
-    else if (freq_mhz >= 5955 && freq_mhz <= 7115) band = OPC_BAND_6GHZ;
-    return (uint16_t)(((uint16_t)band << 8) | ch);
-}
+/* opc_chan_field() / opc_assoc_chan_field() live in chan_encode.{c,h} (pure,
+ * host-testable) — see opcd/tests/test_chan_encode.c. */
 
 /* Translate one decoded nl80211 event into 0..2 platform events and stage them
  * into the coalesce table. DISCONNECT emits AP_DISCONNECT (only when AP-
@@ -1019,18 +1008,31 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
 {
     opcd_platform_evt_t pe;
     switch (nev->kind) {
-    case OPCD_NL_CONNECT:
+    case OPCD_NL_CONNECT: {
         /* NL80211_CMD_CONNECT fires on BOTH success and failure; a non-zero
          * 802.11 status_code is a failed/timed-out association — do NOT stage
          * a CONNECTED status for it. */
         if (nev->status_code != 0) break;
+
+        /* NL80211_CMD_CONNECT commonly omits NL80211_ATTR_WIPHY_FREQ, leaving
+         * the event channel 0. Only then pay for a cached link readback
+         * (link.json) and seed the channel from it — same best-effort pattern
+         * as ROAM's SNR/RSSI seeding below. */
+        opcd_platform_link_t link;
+        memset(&link, 0, sizeof link);
+        if (nev->channel == 0)
+            (void)nxp_get_link(idx, &link);
+
         memset(&pe, 0, sizeof pe);
-        pe.kind                = OPCD_PEVT_WLAN_STATUS;
-        pe.u.wlan_status.idx   = (uint8_t)idx;
+        pe.kind                  = OPCD_PEVT_WLAN_STATUS;
+        pe.u.wlan_status.idx     = (uint8_t)idx;
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_ASSOCIATED;
-        pe.u.wlan_status.channel = opc_chan_field(nev->freq_mhz, nev->channel);
+        pe.u.wlan_status.channel = opc_assoc_chan_field(
+            nev->freq_mhz, nev->channel,
+            link.associated, link.freq_mhz, link.channel);
         nl_coalesce_put(tab, count, &pe);
         break;
+    }
 
     case OPCD_NL_DISCONNECT:
         /* nl80211 emits CMD_DISCONNECT for both local/client-initiated and
