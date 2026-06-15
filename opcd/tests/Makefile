@@ -32,9 +32,11 @@ OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
 OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 # Pure parser — no platform backend, no protocol library.
 OPCD_OBJS_NL80211   := $(OPCDOBJ)/nl80211_parse.o
+# Pure channel-field encoder — no platform backend, no protocol library.
+OPCD_OBJS_CHAN      := $(OPCDOBJ)/chan_encode.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
-         test_store_async test_fault_probe test_nl80211_parse
+         test_store_async test_fault_probe test_nl80211_parse test_chan_encode
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -65,6 +67,11 @@ $(TESTDIR)/test_fault_probe: $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
 # libopcproto). Reuses the host opcd object built by `make native`.
 $(TESTDIR)/test_nl80211_parse: $(TESTDIR)/test_nl80211_parse.o $(OPCD_OBJS_NL80211)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_nl80211_parse.o $(OPCD_OBJS_NL80211)
+
+# Pure encoder test — links only chan_encode.o (no platform backend, no
+# libopcproto). Reuses the host opcd object built by `make native`.
+$(TESTDIR)/test_chan_encode: $(TESTDIR)/test_chan_encode.o $(OPCD_OBJS_CHAN)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_chan_encode.o $(OPCD_OBJS_CHAN)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
