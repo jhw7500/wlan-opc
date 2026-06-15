@@ -517,6 +517,23 @@ int main(void)
                "build_getif: cap too small → 0");
     }
 
+    /* 20. NEW_INTERFACE WITHOUT WIPHY_FREQ → freq/channel 0. Documents the
+     *     "no freq → caller skips the fallback" contract: nxp_get_iface_freq
+     *     returns -1 on freq_mhz==0, so the CONNECT path keeps channel 0. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "new_iface no-freq: rc==0");
+        ASSERT(ev.kind == OPCD_NL_INTERFACE, "new_iface no-freq: kind INTERFACE");
+        ASSERT(ev.freq_mhz == 0, "new_iface no-freq: freq 0 (WIPHY_FREQ absent)");
+        ASSERT(ev.channel == 0, "new_iface no-freq: channel 0");
+    }
+
     if (failures == 0) {
         fprintf(stdout, "all nl80211_parse tests passed\n");
         return 0;
