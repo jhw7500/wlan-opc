@@ -473,12 +473,11 @@ int main(void)
     ASSERT(stub_apply_ip_calls() == 1, "#43 P2: armed commit survives an intervening Login");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2: applies the armed slot's IP");
 
-    /* 13f. #43 (Codex re-review): a new session's ChangeIp must not ride a prior
-     *      session's arm. A logs out arming slot 1; B logs in (arm preserved to
-     *      commit A's change), but B then issues its OWN change-ip (slot 2) —
-     *      which must DISARM the stale commit so the loop-tail apply does NOT
-     *      fire without B's explicit Logout. B's change then commits only on B's
-     *      own Logout, with B's slot — never A's. */
+    /* 13f. #43 (Codex re-review): an armed commit is IMMUTABLE until applied — a
+     *      later session's ChangeIp must NOT cancel it (only Logout controls
+     *      commits, and the arm is write-once). A logs out arming slot 1; B logs
+     *      in and issues its OWN ChangeIp(slot 2); apply still commits A's armed
+     *      slot 1, and B's un-Logged-out change is ignored. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     stub_apply_ip_reset();
@@ -489,13 +488,10 @@ int main(void)
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);     /* B logs in, same drain */
     (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START, 0xC0A80166);
     (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END, 0xC0A80166);
-    (void)do_change_ip(&st, CIP, 2);                    /* B's own change disarms A's commit */
+    (void)do_change_ip(&st, CIP, 2);                    /* B's ChangeIp must NOT cancel A's commit */
     opcd_apply_pending_ip_change(&st);
-    ASSERT(stub_apply_ip_calls() == 0, "#43 P2b: B's ChangeIp does not commit without B's Logout");
-    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2b: B logout arms slot 2");
-    opcd_apply_pending_ip_change(&st);
-    ASSERT(stub_apply_ip_calls() == 1, "#43 P2b: B's change applies on B's own Logout");
-    ASSERT(stub_apply_ip_last_ip() == 0xC0A80166, "#43 P2b: applies B's slot, not A's");
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2b: A's armed commit applies despite B's ChangeIp");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2b: commits A's snapshot slot 1, not B's slot 2");
 
     /* 13g. #43 (Codex re-review): a same-holder re-login / Login retransmission
      *      (same IP, session still active) must NOT drop the session's own

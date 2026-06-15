@@ -731,15 +731,15 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
         } else if (!st->ip_list.present[req.list_number - 1]) {
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_EMPTY;
         } else {
+            /* Stage the change; it commits only when THIS session explicitly
+             * Logs out, which snapshots + arms it. We deliberately do NOT touch
+             * ip_change_commit_armed here: an already-armed commit from a prior
+             * session's explicit Logout is immutable until applied — staging a
+             * new change must not cancel it (only Logout controls commits). The
+             * apply pass reads the armed snapshot, never this live list_no, so a
+             * new stage cannot hijack an armed commit either (#43, Codex review). */
             st->ip_change_pending = true;
             st->ip_change_list_no = req.list_number;
-            /* Staging a new change disarms any commit a prior session's Logout
-             * armed in the same UDP drain: this change commits only on ITS OWN
-             * Logout, never by riding a stale arm (#43, Codex re-review). The
-             * arm gate plus this reset make the apply pass always commit exactly
-             * the slot the arming Logout captured — list_no can only change here,
-             * and changing it clears the arm. */
-            st->ip_change_commit_armed = false;
             session_touch(st);
         }
     }
