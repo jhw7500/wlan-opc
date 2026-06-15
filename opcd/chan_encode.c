@@ -23,22 +23,21 @@ uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
 }
 
 uint16_t opc_assoc_chan_field(uint32_t evt_freq, uint16_t evt_ch,
-                              bool link_assoc, uint32_t link_freq,
-                              uint16_t link_ch)
+                              bool fb_valid, uint32_t fb_freq,
+                              uint16_t fb_ch)
 {
     /* Prefer the event's own channel; CONNECT often omits WIPHY_FREQ, so fall
-     * back to the cached link readback — but only when it reports an active
-     * association (an unassociated/stale readback must not leak a channel). */
+     * back to a secondary source — but only when it is valid (a kernel query
+     * that returned a freq, or an associated link readback). */
     uint16_t ch = opc_chan_field(evt_freq, evt_ch);
-    if (ch == 0 && link_assoc) {
-        /* Accept the link readback only when it yields a band-qualified
-         * channel. link.json parses freq and channel independently, so an
-         * associated readback can carry a channel with no recognizable
-         * frequency (freq 0 / band-gap) — a band byte of 0 means exactly that.
-         * Emit 0 rather than a half-populated (band-less) field. */
-        uint16_t link_field = opc_chan_field(link_freq, link_ch);
-        if ((link_field >> 8) != 0)
-            ch = link_field;
+    if (ch == 0 && fb_valid) {
+        /* Accept the fallback only when it yields a band-qualified channel. A
+         * source may report a channel with no recognizable frequency (freq 0 /
+         * band-gap) — a band byte of 0 means exactly that. Emit 0 rather than a
+         * half-populated (band-less) field. */
+        uint16_t fb_field = opc_chan_field(fb_freq, fb_ch);
+        if ((fb_field >> 8) != 0)
+            ch = fb_field;
     }
     return ch;
 }

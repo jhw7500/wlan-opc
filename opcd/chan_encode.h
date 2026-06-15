@@ -19,13 +19,13 @@ uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch);
 
 /* Resolve the OPC channel field for an ASSOCIATED (CONNECT-success) event.
  * Prefer the event's own freq/channel; if it carries none (NL80211_CMD_CONNECT
- * commonly omits NL80211_ATTR_WIPHY_FREQ → freq/ch 0), fall back to the cached
- * link readback (link.json) — but only when that readback reports an active
- * association. Returns the encoded (band<<8 | ch) field, or 0 when neither
- * source yields a channel. Mirrors the best-effort SNR/RSSI seeding the ROAM
- * path already does via the link readback. */
+ * commonly omits NL80211_ATTR_WIPHY_FREQ → freq/ch 0), fall back to a secondary
+ * source (a synchronous kernel GET_INTERFACE query, or a cached link readback)
+ * — but only when that source is valid (fb_valid). Returns the encoded
+ * (band<<8 | ch) field, or 0 when neither source yields a band-qualified
+ * channel. */
 uint16_t opc_assoc_chan_field(uint32_t evt_freq, uint16_t evt_ch,
-                              bool link_assoc, uint32_t link_freq,
-                              uint16_t link_ch);
+                              bool fb_valid, uint32_t fb_freq,
+                              uint16_t fb_ch);
 
 #endif /* WLAN_OPC_OPCD_CHAN_ENCODE_H */
