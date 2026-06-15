@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "../protocol/codec.h"
+#include "../protocol/indications.h"   /* OPC_WLAN_STATUS_CONNECTED/DISCONNECTED */
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
@@ -59,6 +60,23 @@ static void (*g_teardown)(void);
  * Interim policy (2026-06-12 user decision, customer inquiry in issue #35):
  * until the spec grows a wlan_id, indications follow the primary WLAN —
  * the nl80211 integration (V1) should emit idx==0 (mlan0) events only. */
+/* Translate an internal OPCD_WLAN_STATUS_* (platform.h) to the OPC wire enum
+ * (protocol/indications.h), which has only two values. ASSOCIATED and
+ * CHANNEL_CHANGE both mean "still associated" → CONNECTED; UP ("link up,
+ * awaiting association") and DOWN both mean not associated → DISCONNECTED. */
+static uint16_t wlan_status_to_wire(uint16_t internal)
+{
+    switch (internal) {
+    case OPCD_WLAN_STATUS_ASSOCIATED:
+    case OPCD_WLAN_STATUS_CHANNEL_CHANGE:
+        return OPC_WLAN_STATUS_CONNECTED;
+    case OPCD_WLAN_STATUS_UP:
+    case OPCD_WLAN_STATUS_DOWN:
+    default:
+        return OPC_WLAN_STATUS_DISCONNECTED;
+    }
+}
+
 static int on_platform_event(const opcd_platform_evt_t *evt, void *ctx)
 {
     opcd_state_t *st = ctx;
@@ -70,8 +88,9 @@ static int on_platform_event(const opcd_platform_evt_t *evt, void *ctx)
         /* mlan0-only interim policy (#35 item 6): drop mlan1 events until the
          * OPC spec grows a wlan_id field — see the function header note. */
         if (evt->u.wlan_status.idx != 0) return 0;
-        opcd_ind_wlan_status(st, evt->u.wlan_status.status,
-                                evt->u.wlan_status.channel);
+        opcd_ind_wlan_status(st,
+                             wlan_status_to_wire(evt->u.wlan_status.status),
+                             evt->u.wlan_status.channel);
         break;
     case OPCD_PEVT_ROAMING:
         /* mlan0-only interim policy (#35 item 6) — drop mlan1 roaming. */

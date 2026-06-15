@@ -30,7 +30,7 @@
 #define NL80211_ATTR_IFINDEX      3
 #define NL80211_ATTR_MAC          6
 #define NL80211_ATTR_WIPHY_FREQ  38
-#define NL80211_ATTR_STATUS_CODE 48
+#define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
 
 /* genl CTRL (GENL_ID_CTRL=16) family-resolution constants. ABI-stable —
@@ -42,6 +42,10 @@
 
 /* NLA_ALIGN: round up to a 4-byte boundary. */
 #define NLA_ALIGN(n) (((n) + 3) & ~3u)
+
+/* nla_type's high bits are flags — NLA_F_NESTED(0x8000) /
+ * NLA_F_NET_BYTEORDER(0x4000). The real attribute type is the low 14 bits. */
+#define NLA_TYPE_MASK 0x3fffu
 
 /* Aligned host-order reads. The source pointer may be unaligned, so memcpy. */
 static uint16_t rd_u16(const uint8_t *p)
@@ -120,7 +124,7 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
     size_t off = (size_t)(NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN);
     while (off + NL_NLATTR_HDR_LEN <= len) {
         uint16_t nla_len  = rd_u16(msg + off);
-        uint16_t nla_type = rd_u16(msg + off + 2);
+        uint16_t nla_type = rd_u16(msg + off + 2) & NLA_TYPE_MASK;
 
         /* Defensive bounds: a header-undersized or buffer-overflowing
          * nla_len means the attr stream is malformed — stop here. */
@@ -186,7 +190,7 @@ static bool ctrl_grp_is_mlme(const uint8_t *base, size_t blen, uint16_t *out_id)
     size_t off = 0;
     while (off + NL_NLATTR_HDR_LEN <= blen) {
         uint16_t nla_len  = rd_u16(base + off);
-        uint16_t nla_type = rd_u16(base + off + 2);
+        uint16_t nla_type = rd_u16(base + off + 2) & NLA_TYPE_MASK;
 
         if (nla_len < NL_NLATTR_HDR_LEN)
             break;
@@ -205,8 +209,10 @@ static bool ctrl_grp_is_mlme(const uint8_t *base, size_t blen, uint16_t *out_id)
             have_name = true;
             break;
         case CTRL_ATTR_MCAST_GRP_ID:
-            if (pl_len >= 2) {
-                grp_id = rd_u16(pl);
+            /* Kernel emits this via nla_put_u32; read u32 then truncate. */
+            if (pl_len >= 4) {
+                uint32_t v32 = rd_u32(pl);
+                grp_id = (uint16_t)v32;
                 have_id = true;
             }
             break;
@@ -248,7 +254,7 @@ int nl80211_parse_ctrl_family(const uint8_t *msg, size_t len,
     size_t off = (size_t)(NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN);
     while (off + NL_NLATTR_HDR_LEN <= len) {
         uint16_t nla_len  = rd_u16(msg + off);
-        uint16_t nla_type = rd_u16(msg + off + 2);
+        uint16_t nla_type = rd_u16(msg + off + 2) & NLA_TYPE_MASK;
 
         if (nla_len < NL_NLATTR_HDR_LEN)
             break;

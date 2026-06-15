@@ -35,8 +35,11 @@ static int failures = 0;
 #define NL80211_ATTR_IFINDEX      3
 #define NL80211_ATTR_MAC          6
 #define NL80211_ATTR_WIPHY_FREQ  38
-#define NL80211_ATTR_STATUS_CODE 48
+#define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
+
+/* nla_type high-bit flag — the kernel ORs this into the type for nested attrs. */
+#define NLA_F_NESTED 0x8000
 
 /* genl CTRL family-resolution constants used by the NEWFAMILY-reply frames. */
 #define GENL_ID_CTRL              16
@@ -114,7 +117,8 @@ static void f_grp(frame_t *parent, uint16_t index, const char *name, uint16_t id
     /* GRP_NAME: NUL-terminated string payload. */
     uint16_t nlen = (uint16_t)(strlen(name) + 1);
     f_attr(&body, CTRL_ATTR_MCAST_GRP_NAME, name, nlen);
-    f_attr_u16(&body, CTRL_ATTR_MCAST_GRP_ID, id);
+    /* GRP_ID: kernel emits nla_put_u32 — a 4-byte payload. */
+    f_attr_u32(&body, CTRL_ATTR_MCAST_GRP_ID, id);
     /* Splice as one nested attr of the parent (type = array index). */
     f_attr(parent, index, body.buf, (uint16_t)body.len);
 }
@@ -130,13 +134,15 @@ int main(void)
 {
     static const uint8_t MAC1[6] = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };
 
-    /* 1. CONNECT (cmd 46): IFINDEX + WIPHY_FREQ(5200) + STATUS_CODE(0). */
+    /* 1. CONNECT (cmd 46): IFINDEX + WIPHY_FREQ(5200) + STATUS_CODE(37).
+     *    STATUS_CODE attr id is 72 (UAPI), not 48 — a non-zero value proves
+     *    the attr is read at the correct id (zero would pass trivially). */
     {
         frame_t f; f_reset(&f);
         f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_CONNECT);
         f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
         f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 5200);
-        f_attr_u16(&f, NL80211_ATTR_STATUS_CODE, 0);
+        f_attr_u16(&f, NL80211_ATTR_STATUS_CODE, 37);
         f_finish(&f);
 
         opcd_nl_evt_t ev;
@@ -146,7 +152,7 @@ int main(void)
         ASSERT(ev.ifindex == 7, "connect: ifindex 7");
         ASSERT(ev.freq_mhz == 5200, "connect: freq 5200");
         ASSERT(ev.channel == 40, "connect: channel 40");
-        ASSERT(ev.status_code == 0, "connect: status 0");
+        ASSERT(ev.status_code == 37, "connect: status 37 (attr id 72)");
     }
 
     /* 2. DISCONNECT (cmd 48): IFINDEX + MAC + REASON_CODE. */
@@ -335,6 +341,70 @@ int main(void)
         /* Zero length → -1, no OOB. */
         rc = nl80211_parse_ctrl_family(f.buf, 0, &fam, &grp);
         ASSERT(rc == -1, "ctrl_family_truncated: zero-len rc==-1");
+    }
+
+    /* 12. CONNECT whose IFINDEX attr has the NLA_F_NESTED flag bit set in its
+     *     nla_type. The parser must mask the high bits (NLA_TYPE_MASK) and
+     *     still recognize the attr as IFINDEX → ifindex extracted. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_CONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX | NLA_F_NESTED, 7);
+        f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 5200);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "nested_flag: rc==0");
+        ASSERT(ev.kind == OPCD_NL_CONNECT, "nested_flag: kind CONNECT");
+        ASSERT(ev.ifindex == 7, "nested_flag: ifindex 7 (flag bits masked)");
+    }
+
+    /* 13. 6 GHz band: WIPHY_FREQ 5955 → channel 1. Cannot call the static
+     *     freq_to_channel directly, so drive it via a CONNECT frame. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_CONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 5955);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "freq_6ghz: rc==0");
+        ASSERT(ev.freq_mhz == 5955, "freq_6ghz: freq 5955");
+        ASSERT(ev.channel == 1, "freq_6ghz: channel 1");
+    }
+
+    /* 14. 2.4 GHz channel 14: WIPHY_FREQ 2484 → channel 14 (the special-case
+     *     non-uniform spacing). */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_CONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 2484);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "freq_ch14: rc==0");
+        ASSERT(ev.freq_mhz == 2484, "freq_ch14: freq 2484");
+        ASSERT(ev.channel == 14, "freq_ch14: channel 14");
+    }
+
+    /* 15. DISCONNECT with NO NL80211_ATTR_MAC → mac_present stays false. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_DISCONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u16(&f, NL80211_ATTR_REASON_CODE, 3);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "no_mac: rc==0");
+        ASSERT(ev.kind == OPCD_NL_DISCONNECT, "no_mac: kind DISCONNECT");
+        ASSERT(ev.mac_present == false, "no_mac: mac_present false");
     }
 
     if (failures == 0) {
