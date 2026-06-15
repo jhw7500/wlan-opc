@@ -1082,6 +1082,8 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.u.roaming.idx     = (uint8_t)idx;
         pe.u.roaming.snr     = link.snr;
         pe.u.roaming.rssi    = link.rssi;
+        /* ROAM reliably carries WIPHY_FREQ, so the channel needs no link
+         * fallback (unlike CONNECT/ASSOCIATED) — encode it directly. */
         pe.u.roaming.channel = opc_chan_field(nev->freq_mhz, nev->channel);
         memcpy(pe.u.roaming.mac, nev->mac, 6);
         nl_coalesce_put(tab, count, &pe);

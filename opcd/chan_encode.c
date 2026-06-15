@@ -6,7 +6,10 @@
  * freq_to_channel(): the event path derives the channel there and encodes the
  * band here. freq_to_channel() returns 0 outside these ranges, so on the event
  * path channel>0 always implies a band match — a band byte of 0 only ever
- * arises from the link-readback fallback (see opc_assoc_chan_field). */
+ * arises from the link-readback fallback (see opc_assoc_chan_field).
+ * Note the deliberate 2.4 GHz delta: freq_to_channel splits 2412-2472 + 2484,
+ * while this uses the closed 2412-2484; only the link path can reach 2473-2483
+ * (still 2.4 GHz space). */
 uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
 {
     /* ch 0 = unknown; ch >255 cannot fit the 8-bit wire field and would
