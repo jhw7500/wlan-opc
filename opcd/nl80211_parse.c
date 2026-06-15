@@ -32,6 +32,7 @@
 #define NL80211_ATTR_WIPHY_FREQ  38
 #define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
+#define NL80211_ATTR_DISCONNECTED_BY_AP 71  /* NLA_FLAG: zero-length, presence=true */
 
 /* genl CTRL (GENL_ID_CTRL=16) family-resolution constants. ABI-stable —
  * hardcoded for the same header-portability reason as the nl80211 ids. */
@@ -161,6 +162,10 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
                 out->mac_present = true;
             }
             break;
+        case NL80211_ATTR_DISCONNECTED_BY_AP:
+            /* NLA_FLAG: a zero-length attr whose mere presence means true. */
+            out->by_ap = true;
+            break;
         default:
             break;
         }
@@ -182,7 +187,6 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
  * element's payload (already validated by the caller). */
 static bool ctrl_grp_is_mlme(const uint8_t *base, size_t blen, uint16_t *out_id)
 {
-    bool     have_name = false;
     bool     have_id   = false;
     bool     is_mlme   = false;
     uint16_t grp_id    = 0;
@@ -206,7 +210,6 @@ static bool ctrl_grp_is_mlme(const uint8_t *base, size_t blen, uint16_t *out_id)
             if (pl_len >= 5 && memcmp(pl, "mlme", 5) == 0) {
                 is_mlme = true;
             }
-            have_name = true;
             break;
         case CTRL_ATTR_MCAST_GRP_ID:
             /* Kernel emits this via nla_put_u32; read u32 then truncate. */
@@ -226,7 +229,7 @@ static bool ctrl_grp_is_mlme(const uint8_t *base, size_t blen, uint16_t *out_id)
         off += advance;
     }
 
-    if (is_mlme && have_name && have_id) {
+    if (is_mlme && have_id) {
         *out_id = grp_id;
         return true;
     }

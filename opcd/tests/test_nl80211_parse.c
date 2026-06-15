@@ -37,6 +37,7 @@ static int failures = 0;
 #define NL80211_ATTR_WIPHY_FREQ  38
 #define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
+#define NL80211_ATTR_DISCONNECTED_BY_AP 71  /* NLA_FLAG: zero-length payload */
 
 /* nla_type high-bit flag — the kernel ORs this into the type for nested attrs. */
 #define NLA_F_NESTED 0x8000
@@ -405,6 +406,41 @@ int main(void)
         ASSERT(rc == 0, "no_mac: rc==0");
         ASSERT(ev.kind == OPCD_NL_DISCONNECT, "no_mac: kind DISCONNECT");
         ASSERT(ev.mac_present == false, "no_mac: mac_present false");
+    }
+
+    /* 16. DISCONNECT WITH the NL80211_ATTR_DISCONNECTED_BY_AP flag attr
+     *     (id 71, zero-length payload) → by_ap == true. The flag's presence
+     *     alone is the signal — no payload to read. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_DISCONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr(&f, NL80211_ATTR_DISCONNECTED_BY_AP, "", 0);  /* NLA_FLAG: 0-len */
+        f_attr_u16(&f, NL80211_ATTR_REASON_CODE, 3);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "by_ap: rc==0");
+        ASSERT(ev.kind == OPCD_NL_DISCONNECT, "by_ap: kind DISCONNECT");
+        ASSERT(ev.by_ap == true, "by_ap: by_ap true (flag present)");
+        ASSERT(ev.reason_code == 3, "by_ap: reason 3 (attrs after flag read)");
+    }
+
+    /* 17. DISCONNECT WITHOUT the flag attr → by_ap stays false (a local /
+     *     client-initiated disconnect). */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_DISCONNECT);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u16(&f, NL80211_ATTR_REASON_CODE, 3);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "no_by_ap: rc==0");
+        ASSERT(ev.kind == OPCD_NL_DISCONNECT, "no_by_ap: kind DISCONNECT");
+        ASSERT(ev.by_ap == false, "no_by_ap: by_ap false (flag absent)");
     }
 
     if (failures == 0) {

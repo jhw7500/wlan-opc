@@ -38,6 +38,7 @@ typedef struct opcd_nl_evt {
     bool     mac_present;
     uint16_t reason_code;   /* NL80211_ATTR_REASON_CODE (DISCONNECT)       */
     uint16_t status_code;   /* NL80211_ATTR_STATUS_CODE (CONNECT)          */
+    bool     by_ap;         /* NL80211_ATTR_DISCONNECTED_BY_AP (DISCONNECT) */
 } opcd_nl_evt_t;
 
 /*

@@ -261,7 +261,14 @@ static int nl_event_socket_open(void)
     /* Bound the family-resolution recv so a silent kernel cannot wedge init().
      * 1 s is generous: CTRL replies are immediate on a live stack. */
     struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0) {
+        /* Without the timeout the family-resolution recv could block forever
+         * and wedge nxp_init at startup — fail closed like the bind above. */
+        fprintf(stderr, "opcd: nl80211: set SO_RCVTIMEO failed: %s "
+                        "— events disabled\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
 
     uint16_t fam = 0, grp = 0;
     if (nl_resolve_family(fd, &fam, &grp) != 0) {
@@ -947,31 +954,29 @@ typedef struct {
     opcd_platform_evt_t evt;
 } nl_coalesce_slot_t;
 
+/* Extract the platform idx (0=mlan0, 1=mlan1) from an event's per-kind union. */
+static uint8_t coalesce_idx(const opcd_platform_evt_t *e)
+{
+    switch (e->kind) {
+    case OPCD_PEVT_WLAN_STATUS:   return e->u.wlan_status.idx;
+    case OPCD_PEVT_ROAMING:       return e->u.roaming.idx;
+    case OPCD_PEVT_AP_DISCONNECT: return e->u.ap_disconnect.idx;
+    default:                      return 0;
+    }
+}
+
 /* Replace-or-append the latest event for its (kind, idx) into the coalesce
  * table. idx is read from the evt union per kind. Table is bounded at
  * NL_COALESCE_MAX; never overflows in practice. */
 static void nl_coalesce_put(nl_coalesce_slot_t *tab, size_t *count,
                             const opcd_platform_evt_t *evt)
 {
-    uint8_t idx;
-    switch (evt->kind) {
-    case OPCD_PEVT_WLAN_STATUS:   idx = evt->u.wlan_status.idx;   break;
-    case OPCD_PEVT_ROAMING:       idx = evt->u.roaming.idx;       break;
-    case OPCD_PEVT_AP_DISCONNECT: idx = evt->u.ap_disconnect.idx; break;
-    default:                      idx = 0;                        break;
-    }
+    uint8_t idx = coalesce_idx(evt);
 
     for (size_t i = 0; i < *count; i++) {
         if (tab[i].evt.kind != evt->kind)
             continue;
-        uint8_t s_idx;
-        switch (tab[i].evt.kind) {
-        case OPCD_PEVT_WLAN_STATUS:   s_idx = tab[i].evt.u.wlan_status.idx;   break;
-        case OPCD_PEVT_ROAMING:       s_idx = tab[i].evt.u.roaming.idx;       break;
-        case OPCD_PEVT_AP_DISCONNECT: s_idx = tab[i].evt.u.ap_disconnect.idx; break;
-        default:                      s_idx = 0;                              break;
-        }
-        if (s_idx == idx) {        /* same (kind, idx) — keep only the latest */
+        if (coalesce_idx(&tab[i].evt) == idx) {  /* same (kind, idx) — keep latest */
             tab[i].evt = *evt;
             return;
         }
@@ -979,12 +984,37 @@ static void nl_coalesce_put(nl_coalesce_slot_t *tab, size_t *count,
     if (*count < NL_COALESCE_MAX) {
         tab[*count].evt = *evt;
         (*count)++;
+    } else {
+        /* Table full — should never happen (6 distinct slots, table is 8), but
+         * a future kind/iface addition could overflow. Log once so a silent
+         * drop surfaces instead of vanishing. */
+        static bool overflow_logged = false;
+        if (!overflow_logged) {
+            fprintf(stderr, "opcd: nl80211: coalesce table full "
+                            "(event dropped)\n");
+            overflow_logged = true;
+        }
     }
 }
 
+/* Encode the OPC indication channel field: upper byte = OPC band, lower byte =
+ * channel number (protocol/indications.h: indication_ch / ch_number). The band
+ * is derived from the parsed frequency. Channel 0 (no association / unknown)
+ * maps to a bare 0 with no band. Producer-side mapping keeps nl80211_parse.c
+ * OPC-agnostic. */
+static uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch)
+{
+    if (ch == 0) return 0;            /* unknown channel → 0 (no band) */
+    uint8_t band = 0;
+    if (freq_mhz >= 2412 && freq_mhz <= 2484)      band = OPC_BAND_2_4GHZ;
+    else if (freq_mhz >= 5000 && freq_mhz <= 5895) band = OPC_BAND_5GHZ;
+    else if (freq_mhz >= 5955 && freq_mhz <= 7115) band = OPC_BAND_6GHZ;
+    return (uint16_t)((uint16_t)band << 8) | ch;
+}
+
 /* Translate one decoded nl80211 event into 0..2 platform events and stage them
- * into the coalesce table. DISCONNECT emits AP_DISCONNECT followed by
- * WLAN_STATUS(UP); the others emit a single event. */
+ * into the coalesce table. DISCONNECT emits AP_DISCONNECT (only when AP-
+ * initiated) followed by WLAN_STATUS(UP); the others emit a single event. */
 static void nl_stage_evt(nl_coalesce_slot_t *tab, size_t *count,
                          const opcd_nl_evt_t *nev, int idx)
 {
@@ -999,23 +1029,30 @@ static void nl_stage_evt(nl_coalesce_slot_t *tab, size_t *count,
         pe.kind                = OPCD_PEVT_WLAN_STATUS;
         pe.u.wlan_status.idx   = (uint8_t)idx;
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_ASSOCIATED;
-        pe.u.wlan_status.channel = nev->channel;
+        pe.u.wlan_status.channel = opc_chan_field(nev->freq_mhz, nev->channel);
         nl_coalesce_put(tab, count, &pe);
         break;
 
     case OPCD_NL_DISCONNECT:
-        /* AP_DISCONNECT carries the 802.11 reason code + AP MAC. The OPC
+        /* nl80211 emits CMD_DISCONNECT for both local/client-initiated and
+         * AP-initiated drops. Only the AP-initiated case is a genuine AP
+         * deauth/disassoc indication — gate AP_DISCONNECT on the parsed
+         * NL80211_ATTR_DISCONNECTED_BY_AP flag (nev->by_ap). A local disconnect
+         * stages only the WLAN_STATUS(UP) transition below, no spurious deauth.
+         *
+         * AP_DISCONNECT carries the 802.11 reason code + AP MAC. The OPC
          * "Message ID" (Disassociation 0x000A / Deauthentication 0x000C) is
-         * not distinguishable from the parsed nl80211 attrs (the parser does
-         * not decode NL80211_ATTR_DISCONNECTED_BY_AP / the raw 802.11 frame),
-         * so we report Deauthentication — the dominant AP-initiated case. */
-        memset(&pe, 0, sizeof pe);
-        pe.kind                       = OPCD_PEVT_AP_DISCONNECT;
-        pe.u.ap_disconnect.idx        = (uint8_t)idx;
-        pe.u.ap_disconnect.reason_msg_id = OPC_AP_MSG_DEAUTHENTICATION;
-        pe.u.ap_disconnect.result_code   = nev->reason_code;
-        memcpy(pe.u.ap_disconnect.mac, nev->mac, 6);
-        nl_coalesce_put(tab, count, &pe);
+         * not distinguishable from the parsed attrs (the raw 802.11 frame is
+         * not decoded), so we report Deauthentication — the dominant case. */
+        if (nev->by_ap) {
+            memset(&pe, 0, sizeof pe);
+            pe.kind                       = OPCD_PEVT_AP_DISCONNECT;
+            pe.u.ap_disconnect.idx        = (uint8_t)idx;
+            pe.u.ap_disconnect.reason_msg_id = OPC_AP_MSG_DEAUTHENTICATION;
+            pe.u.ap_disconnect.result_code   = nev->reason_code;
+            memcpy(pe.u.ap_disconnect.mac, nev->mac, 6);
+            nl_coalesce_put(tab, count, &pe);
+        }
 
         /* Then the link returns to UP (associated→up), channel cleared.
          * OPCD_WLAN_STATUS_UP = "link up, awaiting association" (platform.h:83),
@@ -1041,7 +1078,7 @@ static void nl_stage_evt(nl_coalesce_slot_t *tab, size_t *count,
         pe.u.roaming.idx     = (uint8_t)idx;
         pe.u.roaming.snr     = link.snr;
         pe.u.roaming.rssi    = link.rssi;
-        pe.u.roaming.channel = nev->channel;
+        pe.u.roaming.channel = opc_chan_field(nev->freq_mhz, nev->channel);
         memcpy(pe.u.roaming.mac, nev->mac, 6);
         nl_coalesce_put(tab, count, &pe);
         break;
@@ -1052,7 +1089,7 @@ static void nl_stage_evt(nl_coalesce_slot_t *tab, size_t *count,
         pe.kind                  = OPCD_PEVT_WLAN_STATUS;
         pe.u.wlan_status.idx     = (uint8_t)idx;
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_CHANNEL_CHANGE;
-        pe.u.wlan_status.channel = nev->channel;
+        pe.u.wlan_status.channel = opc_chan_field(nev->freq_mhz, nev->channel);
         nl_coalesce_put(tab, count, &pe);
         break;
 
