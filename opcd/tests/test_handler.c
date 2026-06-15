@@ -583,6 +583,26 @@ int main(void)
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165,
            "#43 P2g: applies A's original snapshot (.101), not B's rewrite (.200)");
 
+    /* 13L. #43 (Codex re-review): while a prior session's Logout has an armed
+     *      commit pending apply, a new ChangeIp is REJECTED (NG) rather than
+     *      accepted-then-silently-dropped by the apply's clear — so a returned
+     *      OK always means the change will commit on that session's Logout. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START, 0xC0A80166);
+    (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END, 0xC0A80166);
+    (void)do_change_ip(&st, CIP, 1);
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2h: A logout arms commit");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);    /* B logs in, armed pending */
+    r = do_change_ip(&st, CIP, 2);
+    ASSERT(r == OPC_RESULT_NG, "#43 P2h: ChangeIp rejected while a commit is armed");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2h: A's armed commit still applies");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2h: applies A's slot 1");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);

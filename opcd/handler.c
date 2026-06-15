@@ -725,20 +725,24 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
     if (opc_change_ip_address_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        if (st->ip_list_staging_active) {
+        if (st->ip_change_commit_armed) {
+            /* A prior session's Logout armed a commit that the main loop will
+             * apply imminently; refuse to stage a new change so a returned OK is
+             * never silently dropped by that apply's clear (#43, Codex review).
+             * Only reachable in a same-drain race — the armed commit is about to
+             * switch the device IP regardless. This also keeps the armed window
+             * exclusive: no live pending state exists for the apply to discard. */
+            result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
+        } else if (st->ip_list_staging_active) {
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
         } else if (req.list_number < 1 || req.list_number > OPC_IPCFG_LIST_MAX_SLOTS) {
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
         } else if (!st->ip_list.present[req.list_number - 1]) {
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_EMPTY;
         } else {
-            /* Stage the change; it commits only when THIS session explicitly
-             * Logs out, which snapshots + arms it. We deliberately do NOT touch
-             * ip_change_commit_armed here: an already-armed commit from a prior
-             * session's explicit Logout is immutable until applied — staging a
-             * new change must not cancel it (only Logout controls commits). The
-             * apply pass reads the armed snapshot, never this live list_no, so a
-             * new stage cannot hijack an armed commit either (#43, Codex review). */
+            /* Reachable only when no commit is armed (rejected above), so this
+             * fresh stage never collides with an armed snapshot. It commits when
+             * THIS session explicitly Logs out, which snapshots + arms it. */
             st->ip_change_pending = true;
             st->ip_change_list_no = req.list_number;
             session_touch(st);
