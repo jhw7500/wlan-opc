@@ -456,6 +456,21 @@ int main(void)
     opcd_apply_pending_ip_change(&st);
     ASSERT(stub_apply_ip_calls() == 0, "#43: a later session's Logout does not commit A's change");
 
+    /* 13e. #43 (Codex P2, PR #44): an explicit Logout that armed a commit must
+     *      survive a Login read in the same UDP drain before the loop-tail apply
+     *      pass — the armed migration is NOT undone by a racing/re-login. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2: explicit logout arms commit");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);   /* Login arrives before the apply pass */
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2: armed commit survives an intervening Login");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "#43 P2: applies the armed slot's IP");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);

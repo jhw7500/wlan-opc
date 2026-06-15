@@ -378,12 +378,16 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
         st->holder_ip   = ip;
         st->holder_port = port;
         st->boot_status = OPC_DEVICE_LOGGED_IN;
-        /* A fresh session never inherits a prior session's deferred ChangeIp:
-         * a change abandoned via idle auto-logout must not be committed by this
-         * session's eventual Logout (#43 cross-session contamination guard). */
-        st->ip_change_pending      = false;
-        st->ip_change_list_no      = 0;
-        st->ip_change_commit_armed = false;
+        /* A fresh session never inherits a prior session's ABANDONED ChangeIp
+         * (idle-logged-out, never armed): clearing the unarmed staging stops this
+         * session's eventual Logout from committing it (#43 cross-session guard).
+         * An already-ARMED commit — an explicit Logout earlier in the same UDP
+         * drain, before the loop-tail apply pass — must survive untouched, else
+         * the requested IP switch is silently lost (Codex review, PR #44). */
+        if (!st->ip_change_commit_armed) {
+            st->ip_change_pending = false;
+            st->ip_change_list_no = 0;
+        }
         session_touch(st);
         opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
     }
@@ -957,6 +961,9 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
      * teardown a no-op so the device never migrates its IP unattended. */
     if (!st->ip_change_commit_armed) return;
     uint16_t n = st->ip_change_list_no;
+    /* Theoretically unreachable: armed implies pending, and pending is only set
+     * after handle_change_ip validates the slot. Kept as a defensive guard so a
+     * stray list_no = 0 can never index the slot array. */
     if (n < 1 || n > OPC_IPCFG_LIST_MAX_SLOTS) {
         st->ip_change_pending      = false;
         st->ip_change_commit_armed = false;
