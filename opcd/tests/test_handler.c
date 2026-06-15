@@ -567,6 +567,26 @@ int main(void)
     ASSERT(stub_apply_ip_last_ip() == 0xC0A801C8,
            "#43 P2f: applies slot 1 value as of the committing Logout (.200)");
 
+    /* 13k. #43 (Codex re-review): once armed, the snapshot is immutable until
+     *      applied. A later session that rewrites the slot AND logs out (its own
+     *      full cycle, no ChangeIp) must NOT re-arm/re-snapshot the original
+     *      Logout's commit — A's armed entry survives B's cycle. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    stub_apply_ip_reset();
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*.101*/);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    (void)do_change_ip(&st, CIP, 1);                   /* A targets slot 1 = .101 */
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2g: A logout arms snapshot .101");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);    /* B logs in, arm preserved */
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A801C8 /*.200*/);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A801C8);  /* B rewrites slot 1 */
+    ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#43 P2g: B logout must NOT re-arm");
+    opcd_apply_pending_ip_change(&st);
+    ASSERT(stub_apply_ip_calls() == 1, "#43 P2g: applies once");
+    ASSERT(stub_apply_ip_last_ip() == 0xC0A80165,
+           "#43 P2g: applies A's original snapshot (.101), not B's rewrite (.200)");
+
     /* 14. A failed platform apply must NOT clear indication — the IP did not
      *     actually move, so the existing indication session stays valid. */
     init_state(&st, OPC_PASSWORD_DEFAULT);

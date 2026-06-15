@@ -420,9 +420,12 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
          * (#43): snapshot the resolved target entry and arm before teardown so
          * the main-loop apply — which runs after this ack is sent — performs the
          * switch against an immutable copy (a later session cannot rewrite the
-         * slot out from under it). Idle auto-logout reaches opcd_session_logout()
+         * slot out from under it). The `!armed` guard makes that snapshot
+         * write-once: once a Logout has armed a commit, a later session's own
+         * Logout (in the same UDP drain, before apply) must not re-snapshot it
+         * with the rewritten slot. Idle auto-logout reaches opcd_session_logout()
          * without arming and therefore never commits. */
-        if (st->ip_change_pending) {
+        if (st->ip_change_pending && !st->ip_change_commit_armed) {
             uint16_t n = st->ip_change_list_no;
             if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS) {
                 st->ip_change_armed_entry  = st->ip_list.slots[n - 1];
