@@ -39,6 +39,7 @@
 > - **후속 수정(2026-06-11)**: A13/D2 merge 수정(PR #33) · A14·A17·D9·D10 수정(에러코드 정정 PR) · **D11 기각**(재검증 — booting 시 0x0001 반환, 시나리오 도달 불가) · D12/D13 처리방침 확정(로그인 세션 IP 발신에만 0x0003 NG, 그 외 drop — 사용자 결정)
 > - **후속 수정(2026-06-12~06-15)**: D1/D3/D4/D5/D8 입력값 검증 구현(PR #36) · A19 재송 폐기(PR #37) · D12/D13 프레임 경계 구현(PR #38) · **D7/V1 이벤트성 indication producer 완성** — FaultDetect 폴링(PR #39) + WlanStatus/Roaming/ApDisconnect nl80211(PR #46, ASSOCIATED 채널 #48/#49) · A12 ChangeIp deferred apply drain 내부 이동(PR #44/#51). **본문 D2·D7·V1 항목에 해소 반영(분석기준 커밋 `0128f03` 이후 변경분)**
 > - **후속 수정(2026-06-16, PR #53)**: **D9 재정정** — PR #34의 0x0011(입력 주파수) 근사 철회 → apply 런타임 실패 전용 `OPC_ERR_RADIO_APPLY=0x0050` 재도입(발주처 확인 대기, #35) + 실패 시 last-good 설정 재적용으로 원자성 확보("실패=무변화", DUAL partial-apply 발산 제거). 재적용은 리뷰(Gemini HIGH·Codex P1) 반영해 **NG ack 송신 후로 이연**(1초 응답예산 보호) + 동일설정 시 미arm(should_revert). 본문 D9 항목 갱신
+> - **후속 수정(2026-06-16)**: **D12/D13 관대 수신모델** — datagram이 버퍼/declared보다 *길어도* declared Length 신뢰해 `8+Length`까지 처리·trailing 무시(유효 프레임 무손실); 거부는 Length>max·9~63B·*부족*(truncated)만. 순수함수 `opcd_intake_frame_len()` 일원화, frame.c 무변경(trim된 정확 프레임에 SEC-003 검사 유지). 본문 D12/D13 갱신
 
 ---
 
@@ -232,16 +233,18 @@
 - **사양 §3.3.4:** 기동중 발행 = 0x0001
 - **재검증:** booting 중에는 로그인이 성립할 수 없으므로 `check_login_required`의 미로그인 분기가 **0x0001**(LOGIN_VIOLATION)을 반환 — 사양값과 와이어 동일. 0x0002는 "타 IP가 로그인 보유" 시에만 반환되며 booting과 동시 성립 불가 — 주장한 시나리오는 도달 불가
 
-**D12 · 수신 1424B 초과 silent 잘림** — `opcd.c:359-360` — ✅ 해소(2026-06-12)
-- **사양:** 페이로드 최대 1424B
-- **구현:** recvfrom 버퍼 한정 + `MSG_TRUNC` 미사용 → 초과분 조용히 절단
-- **해소:** `MSG_TRUNC`로 초과 감지 — 잘린 prefix를 처리하지 않고 거부. 로그인 세션 IP 발신이면 0x0003 NG(헤더 prefix에서 req/seq 에코), 그 외 drop (사용자 결정 방침)
+**D12 · 수신 1424B 초과 silent 잘림** — `opcd.c`(수신루프), `opcd_intake_frame_len()` — ✅ 해소(2026-06-12) → **관대 모델 정정(2026-06-16)**
+- **사양:** 페이로드 최대 1424B(Length 필드 = 전체−8, 최대 1416)
+- **구현(분석시점):** recvfrom 버퍼 한정 + `MSG_TRUNC` 미사용 → 초과분 조용히 절단
+- **1차 해소(2026-06-12):** `MSG_TRUNC`로 초과 감지 — 잘린 prefix를 처리하지 않고 거부(로그인 세션이면 0x0003, 그 외 drop)
+- **관대 모델 정정(2026-06-16, 사용자 결정):** datagram이 버퍼보다 커도 **declared Length를 신뢰**해 `8+Length`까지만 처리하고 trailing 무시. 근거: **버퍼 크기 = 최대 프레임(1424)** 이라 유효 Length(≤1416) 프레임은 MSG_TRUNC가 떠도 항상 버퍼 안에 온전(잘린 건 프레임 *뒤* junk). OPC는 UDP 1-datagram=1-frame이라 trailing은 무조건 무시 안전. **거부는 declared Length 자체가 max 초과일 때만**(0x0003). 유효 프레임 무손실
 
-**D13 · 9~63B 프레임 드롭 (0x0003 미발행)** — `frame.c:73`
+**D13 · 9~63B 프레임 드롭 (0x0003 미발행)** — `frame.c:73`, `opcd_intake_frame_len()`
 - **사양 §3.3:** "Length 잘못 = 0x0003 NG"
-- **구현:** `frame_parse`가 -1로 드롭 (SEC-003 drop 설계와 동일 맥락)
+- **구현(분석시점):** `frame_parse`가 -1로 드롭 (SEC-003 drop 설계와 동일 맥락)
 - **방침(2026-06-11 사용자 결정):** D12와 공통 — **로그인 세션 IP 발신 프레임에만 0x0003 NG 응답, 그 외 drop 유지** (사양 적합성과 반사 방지 절충)
-- **해소(2026-06-12):** 방침대로 구현 — `opcd_reject_bad_length()` (9~63B는 8B 헤더에서 req/seq 에코, 8B 미만 runt는 에코 불가로 drop). 길이 필드 불일치(SEC-003 거짓 Length)는 ③-B 의도적 drop 유지
+- **1차 해소(2026-06-12):** `opcd_reject_bad_length()` (9~63B는 8B 헤더에서 req/seq 에코, 8B 미만 runt는 drop)
+- **관대 모델 정정(2026-06-16):** 수신 길이 판정을 순수함수 `opcd_intake_frame_len()`로 일원화 — declared Length 기준으로 (a)`8+Length`까지 처리·trailing 무시, (b)extent가 9~63B/over-max/부족(truncated)이면 0 반환→`opcd_reject_bad_length()`. **frame.c 정확일치(SEC-003)는 무변경** — opcd.c가 declared Length로 trim한 *정확 프레임*을 넘기므로 검사가 그대로 성립. 단위테스트(test 22b — 빈/trailing/정확/길어진 datagram/MSG_TRUNC win/over-max/9~63 경계(want=9·63)/truncated/runt/NULL). **남은 strict:** Length 필드 불일치가 아니라 datagram이 declared보다 *짧은* 경우만 거부(진짜 잘림); 길이 *초과*는 더 이상 거부 아님
 
 **D14 · SetRadio WLAN#2 와이어 순서** — ~~deviation~~ → **기각 (2026-06-11)**
 - 원본 docx(§3.3.8 요구 포맷 도면 image33.emf) 직접 확인: **WLAN#2도 FREQ→CH** — WLAN#1·GetDevInfo와 일관
