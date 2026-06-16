@@ -855,11 +855,14 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
                 cfg->wlan1.freq_mhz != 0 ? "mlan0 freq already applied"
                                          : "mlan0 skipped (freq=0)",
                 cfg->wlan2.freq_mhz);
-        /* DUAL partial-apply risk: if mlan0 succeeded above, an mlan1
-         * failure here leaves the two wpa_supplicant confs out of sync.
-         * Caller gets NG (0x0011, frequency NG — D9); recovery is the
-         * operator re-issuing Set-Radio. End-to-end idempotency is the
-         * reconnect PR's job. */
+        /* DUAL partial-apply: if mlan0 succeeded above, an mlan1 failure here
+         * leaves the two wpa_supplicant confs momentarily out of sync. The
+         * caller (handler.c) returns NG (0x0050, apply-failure — D9); the main
+         * loop then re-applies the last-good config AFTER the ack (deferred
+         * best-effort revert), which rewrites mlan0 back to its committed freq —
+         * so the confs reconverge to the pre-change state ("apply fails ⇒ no net
+         * change") without the failure ack waiting on a second apply. End-to-end
+         * idempotency across reconnect remains the reconnect PR's job. */
         int rc = run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms);
         if (rc != 0) return rc;
     }

@@ -90,9 +90,10 @@ static const char *err_str(uint16_t e)
     case 0x0013:                     return "0x0013 (radio-mode/ind-other-ip)";
     case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
     case OPC_ERR_LIST_SEQUENCE:      return "0x0018 (list-sequence)";
-    /* Sent by firmware predating the D9 fix (PR #34) — kept for decode of
-     * mixed-version fleets. */
-    case 0x0050:                     return "0x0050 (radio-apply, deprecated)";
+    /* SetRadioConfig apply failure — a runtime fault, distinct from the 0x0011
+     * bad-frequency *input* error (D9, 2026-06-16). Spec defines no apply code;
+     * 0x0050 pending 발주처 confirmation. */
+    case OPC_ERR_RADIO_APPLY:        return "0x0050 (radio-apply: platform refused/failed)";
     default:     return "other";
     }
 }

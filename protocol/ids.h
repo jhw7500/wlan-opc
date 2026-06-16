@@ -103,10 +103,11 @@
  * Each handler must use only its own command's names, and a single switch must
  * never mix two same-valued names — that is a duplicate-case compile error.
  * vhlctl's value→label map therefore uses literal cases with combined labels. */
-#define OPC_ERR_RADIO_FREQ                    0x0011  /* SetRadioConfig: frequency NG — also reports a
-                                                       * platform apply refusal: the spec defines no
-                                                       * apply-failure code and the apply step is the
-                                                       * frequency change (D9) */
+#define OPC_ERR_RADIO_FREQ                    0x0011  /* SetRadioConfig: unsupported frequency *value*
+                                                       * (D8 input validation). A platform apply failure
+                                                       * no longer maps here — it is a runtime fault, not
+                                                       * a bad input, so it carries its own code
+                                                       * OPC_ERR_RADIO_APPLY (D9). */
 #define OPC_ERR_IND_RECIPIENT_IP              0x0012  /* SetIndicationConfig: recipient IP invalid
                                                        * (non-unicast) — spec "IP 주소 이상" (D10) */
 #define OPC_ERR_IND_OTHER_IP                  0x0013  /* SetIndicationConfig: issued from a non-login IP
@@ -116,6 +117,19 @@
                                                        * FIXME: wire value unconfirmed — 0x0018 is the
                                                        * vendor-answer proposal; update when the formal
                                                        * confirmation arrives. */
+#define OPC_ERR_RADIO_APPLY                   0x0050  /* SetRadioConfig: the platform refused / failed to
+                                                       * apply an otherwise-valid request (runtime fault,
+                                                       * NOT an input error — the frequency/CH/mode/bw
+                                                       * already passed validation). §3.3.8 defines no
+                                                       * apply-failure cause; kept distinct from 0x0011 so
+                                                       * a VHL operator is never told to "fix the
+                                                       * frequency" for a runtime fault. On this NG the
+                                                       * handler best-effort re-applies the last-good
+                                                       * config, so a partial apply leaves no net change
+                                                       * (D9, re-decided 2026-06-16).
+                                                       * FIXME(#35): wire value pending 발주처 confirmation
+                                                       * — 0x0050 is the proposal (pre-PR#34 firmware used
+                                                       * it); update when formally confirmed. */
 #define OPC_ERR_PW_NUL                        0x0012  /* Login §3.3.1 / SetPassword(old) §3.3.5:
                                                        * password field not NUL-terminated */
 #define OPC_ERR_NEW_PW_NUL                    0x0014  /* SetPassword: new password not NUL-terminated */
