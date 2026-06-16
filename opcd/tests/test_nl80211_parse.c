@@ -26,6 +26,8 @@ static int failures = 0;
 } while (0)
 
 /* genl commands (from linux/nl80211.h) used by these frames. */
+#define NL80211_CMD_GET_INTERFACE     5
+#define NL80211_CMD_NEW_INTERFACE     7
 #define NL80211_CMD_CONNECT          46
 #define NL80211_CMD_ROAM             47
 #define NL80211_CMD_DISCONNECT       48
@@ -475,6 +477,61 @@ int main(void)
         ASSERT(rc == 0, "no_by_ap: rc==0");
         ASSERT(ev.kind == OPCD_NL_DISCONNECT, "no_by_ap: kind DISCONNECT");
         ASSERT(ev.by_ap == false, "no_by_ap: by_ap false (flag absent)");
+    }
+
+    /* 18. NEW_INTERFACE (cmd 7) = GET_INTERFACE reply: IFINDEX + WIPHY_FREQ
+     *     (5240) → kind INTERFACE, channel 48. Backs the kernel-direct channel
+     *     query that fixes the CONNECT-without-WIPHY_FREQ case (#47). */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 5240);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "new_iface: rc==0");
+        ASSERT(ev.kind == OPCD_NL_INTERFACE, "new_iface: kind INTERFACE");
+        ASSERT(ev.ifindex == 7, "new_iface: ifindex 7");
+        ASSERT(ev.freq_mhz == 5240, "new_iface: freq 5240");
+        ASSERT(ev.channel == 48, "new_iface: channel 48");
+    }
+
+    /* 19. Builder: GET_INTERFACE request for an ifindex. Structural check —
+     *     nlmsg_type=family, NLM_F_REQUEST, genl cmd=GET_INTERFACE, IFINDEX. */
+    {
+        uint8_t buf[64];
+        size_t n = nl80211_build_get_interface(buf, sizeof buf, TEST_FAMILY_ID, 7);
+        ASSERT(n == 28, "build_getif: total len 28 (16+4+8)");
+        uint16_t typ;   memcpy(&typ,   buf + 4, 2);
+        ASSERT(typ == TEST_FAMILY_ID, "build_getif: nlmsg_type=family");
+        uint16_t flags; memcpy(&flags, buf + 6, 2);
+        ASSERT(flags == 0x0001, "build_getif: NLM_F_REQUEST");
+        ASSERT(buf[16] == NL80211_CMD_GET_INTERFACE, "build_getif: genl cmd=GET_INTERFACE");
+        uint16_t atype; memcpy(&atype, buf + 22, 2);
+        ASSERT(atype == NL80211_ATTR_IFINDEX, "build_getif: attr IFINDEX");
+        uint32_t aif;   memcpy(&aif,   buf + 24, 4);
+        ASSERT(aif == 7, "build_getif: ifindex payload 7");
+        ASSERT(nl80211_build_get_interface(buf, 8, TEST_FAMILY_ID, 7) == 0,
+               "build_getif: cap too small → 0");
+    }
+
+    /* 20. NEW_INTERFACE WITHOUT WIPHY_FREQ → freq/channel 0. Documents the
+     *     "no freq → caller skips the fallback" contract: nxp_get_iface_freq
+     *     returns -1 on freq_mhz==0, so the CONNECT path keeps channel 0. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "new_iface no-freq: rc==0");
+        ASSERT(ev.kind == OPCD_NL_INTERFACE, "new_iface no-freq: kind INTERFACE");
+        ASSERT(ev.freq_mhz == 0, "new_iface no-freq: freq 0 (WIPHY_FREQ absent)");
+        ASSERT(ev.channel == 0, "new_iface no-freq: channel 0");
     }
 
     if (failures == 0) {
