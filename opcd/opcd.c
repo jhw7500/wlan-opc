@@ -406,31 +406,31 @@ int main(int argc, char **argv)
                     }
                     uint32_t cip  = ntohl(src.sin_addr.s_addr);
                     uint16_t cprt = ntohs(src.sin_port);
-                    if ((size_t)rn > sizeof rx) {
-                        /* D12: oversize datagram — only sizeof rx bytes
-                         * landed in rx; the header prefix is intact for the
-                         * NG echo. */
-                        LOG("oversize frame (%zd B) rejected", rn);
-                        opcd_reject_bad_length(&st, rx, sizeof rx, cip, cprt);
-                        continue;
-                    }
-                    if (rn != OPC_FIXED_HEADER_SIZE &&
-                        rn < (ssize_t)OPC_HEADER_SIZE) {
-                        /* D13: 9..63 B can never be a valid frame (frame.c
-                         * rejects it) and <8 B has no header to echo (the
-                         * reject helper drops it). Exactly 8 B is NOT a bad
-                         * length: it is the spec's empty request wire size
-                         * (Logout/GetBasicInfo/GetDeviceInfo/Reset — A2:
-                         * fixed header only, Length=0), accepted by
-                         * frame_parse and handled by the dispatcher.
-                         * Previously a silent drop for every source. */
-                        opcd_reject_bad_length(&st, rx, (size_t)rn, cip, cprt);
+                    /* Lenient receive-length model (D12/D13, 2026-06-16): trust
+                     * the header's declared Length and dispatch exactly
+                     * 8+Length bytes, ignoring trailing wire bytes. A valid frame
+                     * always fits rx (sizeof rx == OPC_FRAME_MAX), so an
+                     * MSG_TRUNC overflow only lops off bytes *past* the frame.
+                     * `buffered` is what actually landed in rx. */
+                    size_t buffered = ((size_t)rn > sizeof rx) ? sizeof rx
+                                                               : (size_t)rn;
+                    size_t want = opcd_intake_frame_len(rx, buffered);
+                    if (want == 0) {
+                        /* Bad length: runt / 9..63 B / declared Length over the
+                         * protocol max / datagram shorter than its declared
+                         * frame (truncated). 0x0003 NG to the logged-in session
+                         * (header prefix echoes req/seq), else drop. A datagram
+                         * merely *longer* than its declared frame is NOT bad
+                         * length — it was trimmed to `want` above. */
+                        if ((size_t)rn > sizeof rx)
+                            LOG("oversize datagram (%zd B): declared length bad — rejected", rn);
+                        opcd_reject_bad_length(&st, rx, buffered, cip, cprt);
                         continue;
                     }
                     struct timespec rx_ts;
                     clock_gettime(CLOCK_MONOTONIC, &rx_ts);
                     ssize_t tx_len = 0;
-                    int rc = opcd_dispatch(&st, rx, (size_t)rn, cip, cprt,
+                    int rc = opcd_dispatch(&st, rx, want, cip, cprt,
                                            tx, sizeof tx, &tx_len);
                     if (rc == 0) {
                         /* tx_len == 0 is a legitimate no-response: a deferred

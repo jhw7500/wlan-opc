@@ -1093,6 +1093,31 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
  * stance. The first OPC_FIXED_HEADER_SIZE bytes of `frame` must hold the
  * (possibly truncated) datagram's start; req_id and seq are echoed from
  * them so the client can correlate the NG. */
+size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered)
+{
+    /* Lenient receive-length policy (D12/D13, user decision 2026-06-16): trust
+     * the header's declared Length and treat exactly OPC_FIXED_HEADER_SIZE +
+     * Length bytes as the frame, ignoring any trailing wire bytes. Because the
+     * recv buffer is sized to the max frame (OPC_FRAME_MAX), every valid frame
+     * (Length ≤ max) is fully present even when the datagram was longer and got
+     * MSG_TRUNC'd — the lost bytes are past the frame. Returns the frame byte
+     * count to dispatch, or 0 when the datagram is a bad length for the caller
+     * to route to opcd_reject_bad_length:
+     *   - no 8-byte header to read a Length from (runt),
+     *   - a Length whose extent is neither the empty 8-B frame nor a full
+     *     common-header frame within the max (9..63 B / over-max), or
+     *   - a datagram shorter than the frame its Length declares (truncated). */
+    opc_header_t hdr;
+    if (!frame || opc_fixed_header_unpack(frame, buffered, &hdr) != 0)
+        return 0;
+    size_t want = OPC_FIXED_HEADER_SIZE + (size_t)hdr.length;
+    bool valid_extent = (want == OPC_FIXED_HEADER_SIZE) ||
+                        (want >= OPC_HEADER_SIZE && want <= OPC_FRAME_MAX);
+    if (!valid_extent || want > buffered)
+        return 0;
+    return want;
+}
+
 void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport)
 {

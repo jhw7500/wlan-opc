@@ -1279,6 +1279,52 @@ int main(void)
         ASSERT(wait_fd_readable(cli, 300) != 0,
                "D13: sub-header runt stays silent even for the holder");
 
+        /* 22b. D12/D13 lenient receive-length model (opcd_intake_frame_len,
+         *      2026-06-16): trust the declared Length → dispatch 8+Length and
+         *      ignore trailing wire bytes; runt / 9..63 / over-max / truncated
+         *      return 0 (→ reject path). Pure function, no socket. */
+        {
+            uint8_t f[OPC_FRAME_MAX];
+            opc_header_t h = { .protocol_version  = OPC_PROTOCOL_VERSION,
+                               .command_type      = OPC_CMD_REQUEST,
+                               .req_indication_id = OPC_REQ_LOGOUT,
+                               .sequence_number   = 1, .length = 0 };
+            memset(f, 0, sizeof f);
+
+            h.length = 0; (void)opc_fixed_header_pack(f, &h);
+            ASSERT(opcd_intake_frame_len(f, OPC_FIXED_HEADER_SIZE) == OPC_FIXED_HEADER_SIZE,
+                   "intake: empty frame (Length=0) → 8 B");
+            ASSERT(opcd_intake_frame_len(f, 30) == OPC_FIXED_HEADER_SIZE,
+                   "intake: empty frame + trailing → 8 B (trailing ignored)");
+
+            h.length = OPC_HEADER_SIZE - OPC_FIXED_HEADER_SIZE;  /* 56 → want 64 */
+            (void)opc_fixed_header_pack(f, &h);
+            ASSERT(opcd_intake_frame_len(f, OPC_HEADER_SIZE) == OPC_HEADER_SIZE,
+                   "intake: full-header frame exact → 64 B");
+            ASSERT(opcd_intake_frame_len(f, 200) == OPC_HEADER_SIZE,
+                   "intake: valid Length + longer datagram → 8+Length (trailing ignored)");
+
+            h.length = 68; (void)opc_fixed_header_pack(f, &h);   /* want 76 */
+            ASSERT(opcd_intake_frame_len(f, OPC_FRAME_MAX) == 76,
+                   "intake: MSG_TRUNC overflow, valid small Length → 8+Length (D12 win)");
+
+            h.length = (uint16_t)(OPC_FRAME_MAX - OPC_FIXED_HEADER_SIZE + 1);  /* 1417 */
+            (void)opc_fixed_header_pack(f, &h);
+            ASSERT(opcd_intake_frame_len(f, OPC_FRAME_MAX) == 0,
+                   "intake: declared Length > max → 0 (bad length)");
+
+            h.length = 22; (void)opc_fixed_header_pack(f, &h);   /* want 30 (9..63) */
+            ASSERT(opcd_intake_frame_len(f, 30) == 0,
+                   "intake: 9..63 B extent → 0 (malformed)");
+
+            h.length = 200; (void)opc_fixed_header_pack(f, &h);  /* want 208 */
+            ASSERT(opcd_intake_frame_len(f, 100) == 0,
+                   "intake: datagram shorter than declared frame → 0 (truncated)");
+
+            ASSERT(opcd_intake_frame_len(f, 4) == 0,
+                   "intake: sub-header runt → 0");
+        }
+
         /* 23. T6 interim: the congestion probe fires FaultDetect on the
          *     reporting period and re-notifies while the congestion
          *     persists. Synthetic /proc/stat source; disk/net sources are

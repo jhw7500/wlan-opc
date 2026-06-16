@@ -42,6 +42,13 @@ void opcd_radio_revert_drain(opcd_state_t *st);
  * idle check so all three paths share one set of side effects. */
 void opcd_session_logout(opcd_state_t *st);
 
+/* D12/D13 lenient receive-length policy (2026-06-16): given a datagram with
+ * `buffered` bytes available, returns the frame byte count to dispatch — the
+ * header's declared 8+Length, with any trailing wire bytes ignored — or 0 when
+ * the datagram is a bad length (runt / 9..63 B / over-max / truncated) and must
+ * go to opcd_reject_bad_length instead. See handler.c for the full contract. */
+size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered);
+
 /* D12/D13: bad-length datagram → 0x0003 NG toward the logged-in session's
  * IP only; every other source is dropped silently (SEC-003). `valid_len`
  * is how many bytes of `frame` actually landed in the buffer. */
