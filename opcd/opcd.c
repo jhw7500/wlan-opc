@@ -427,6 +427,12 @@ int main(int argc, char **argv)
                         opcd_reject_bad_length(&st, rx, buffered, cip, cprt);
                         continue;
                     }
+                    /* Observability (PR #54 review): the lenient trim happy-path
+                     * is otherwise silent — surface an oversize datagram that
+                     * carried a valid frame so on-target triage sees it was
+                     * accepted (trimmed) rather than dropped. */
+                    if ((size_t)rn > sizeof rx)
+                        LOG("oversize datagram (%zd B): trimmed to declared %zu B frame, trailing ignored", rn, want);
                     struct timespec rx_ts;
                     clock_gettime(CLOCK_MONOTONIC, &rx_ts);
                     ssize_t tx_len = 0;

@@ -1323,6 +1323,8 @@ int main(void)
 
             ASSERT(opcd_intake_frame_len(f, 4) == 0,
                    "intake: sub-header runt → 0");
+            ASSERT(opcd_intake_frame_len(NULL, OPC_HEADER_SIZE) == 0,
+                   "intake: NULL frame → 0");
         }
 
         /* 23. T6 interim: the congestion probe fires FaultDetect on the
