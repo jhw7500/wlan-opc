@@ -30,6 +30,12 @@ int opcd_dispatch(opcd_state_t *st,
 /* After Logout response has been transmitted, apply any pending ChangeIp. */
 void opcd_apply_pending_ip_change(opcd_state_t *st);
 
+/* D9: after a SetRadioConfig NG ack has been transmitted, re-apply the last-good
+ * radio config the handler armed on an apply failure (deferred best-effort
+ * revert). No-op unless st->radio_revert_pending. Kept off the response path so
+ * the failure ack is never delayed by a second (possibly timing-out) apply. */
+void opcd_radio_revert_drain(opcd_state_t *st);
+
 /* Single owner of session teardown: emits the final LOGGED_OUT indication,
  * clears the login session, and stops the indication stream. Called from the
  * explicit Logout handler, the dispatch idle check, and the main-loop timer

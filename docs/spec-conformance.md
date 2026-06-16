@@ -38,7 +38,7 @@
 > - 번역본(opc_vhl_protocol_Rev1.00_KO.md) 전사 오류 12건 정정 — 원본 docx 텍스트+도면 33매 전수 대조(기각 0)
 > - **후속 수정(2026-06-11)**: A13/D2 merge 수정(PR #33) · A14·A17·D9·D10 수정(에러코드 정정 PR) · **D11 기각**(재검증 — booting 시 0x0001 반환, 시나리오 도달 불가) · D12/D13 처리방침 확정(로그인 세션 IP 발신에만 0x0003 NG, 그 외 drop — 사용자 결정)
 > - **후속 수정(2026-06-12~06-15)**: D1/D3/D4/D5/D8 입력값 검증 구현(PR #36) · A19 재송 폐기(PR #37) · D12/D13 프레임 경계 구현(PR #38) · **D7/V1 이벤트성 indication producer 완성** — FaultDetect 폴링(PR #39) + WlanStatus/Roaming/ApDisconnect nl80211(PR #46, ASSOCIATED 채널 #48/#49) · A12 ChangeIp deferred apply drain 내부 이동(PR #44/#51). **본문 D2·D7·V1 항목에 해소 반영(분석기준 커밋 `0128f03` 이후 변경분)**
-> - **후속 수정(2026-06-16)**: **D9 재정정** — PR #34의 0x0011(입력 주파수) 근사 철회 → apply 런타임 실패 전용 `OPC_ERR_RADIO_APPLY=0x0050` 재도입(발주처 확인 대기, #35) + 실패 시 last-good 설정 best-effort 재적용으로 원자성 확보("실패=무변화", DUAL partial-apply 발산 제거). 본문 D9 항목 갱신
+> - **후속 수정(2026-06-16, PR #53)**: **D9 재정정** — PR #34의 0x0011(입력 주파수) 근사 철회 → apply 런타임 실패 전용 `OPC_ERR_RADIO_APPLY=0x0050` 재도입(발주처 확인 대기, #35) + 실패 시 last-good 설정 재적용으로 원자성 확보("실패=무변화", DUAL partial-apply 발산 제거). 재적용은 리뷰(Gemini HIGH·Codex P1) 반영해 **NG ack 송신 후로 이연**(1초 응답예산 보호) + 동일설정 시 미arm(should_revert). 본문 D9 항목 갱신
 
 ---
 
@@ -214,14 +214,14 @@
 - **구현:** mode/bw만 검증, freq/channel 값 무검증
 - **해결:** freq 범위(2.4G 2400~2500 / 5G 4900~5925, 0=미지정 허용) 0x0011 + CH 밴드 검증(6G·미지 밴드 거부, A21) 0x0012 구현. **잔여:** 밴드별 정확한 CH 리스트(V2)·밴드 0x00(bare CH) 인코딩 강제 여부(V12)는 디바이스 확인 대기
 
-**D9 · 규제-NG에 스펙 미정의 0x0050** — `ids.h`(OPC_ERR_RADIO_APPLY), `handler.c:841-862`(apply 실패 분기) — ✅ 재정정(2026-06-16)
+**D9 · 규제-NG에 스펙 미정의 0x0050** — `ids.h`(OPC_ERR_RADIO_APPLY), `handler.c`(apply 실패 분기·`opcd_radio_revert_drain`), `opcd.c`(메인루프 drain) — ✅ 재정정(2026-06-16, PR #53)
 - **사양 §3.3.8:** 입력검증 코드(0x0010 Station / 0x0011 주파수 / 0x0012 CH / 0x0013 모드 / 0x0014 대역폭)만 정의 — **apply 런타임 실패 전용 코드는 없음**
 - **구현(분석시점):** apply 실패 시 `OPC_ERR_RADIO_APPLY=0x0050` 송신 (사양에 없는 값)
 - **1차 정정(PR #34, 2026-06-11):** 0x0050 제거 → 0x0011(주파수 이상) 근사 — **철회됨**. 0x0011은 D8(입력 주파수 오류, `handler.c:827`)과 와이어값이 겹쳐, 입력은 멀쩡한데 런타임만 실패한 경우에도 운영자에게 "주파수를 바꿔 재시도"라는 **정반대 조치**를 지시하는 문제
 - **재정정(2026-06-16, 사용자 결정) — 2가지:**
   1. **전용 코드 재도입:** apply 실패는 입력오류가 아닌 런타임 결함이므로 `OPC_ERR_RADIO_APPLY=0x0050`을 0x0011과 분리해 복원. 사양 부재값이므로 A17(0x0018) 패턴대로 **FIXME + 발주처 확인 대기(#35)** — 0x0050은 제안값(정정 전 펌웨어가 쓰던 값이라 하위호환). vhlctl 디코드도 active로 복원
-  2. **apply 원자성(롤백):** apply 실패 시 핸들러가 `apply_radio_config(&st->radio)`로 **last-good(변경 전) 설정을 best-effort 재적용** → DUAL partial-apply(mlan0 적용·mlan1 실패)로 wpa_supplicant conf가 발산하던 문제 제거, "실패=무변화"를 side effect까지 보장. `st->radio`는 성공 분기에서만 갱신되므로 실패 시점엔 변경 전 설정이 그대로 남아 복원 기준이 됨
-- **검증:** 에러코드·롤백 재적용은 stub 테스트(14f·24a/b/c — 실패 시 apply 2회·마지막 호출이 옛 freq임을 단언)로 native 검증. nxp 재적용 동작은 `make PLATFORM=nxp` 컴파일 + 실타깃(V13 규제 NG 실동작과 함께)에서 확인
+  2. **apply 원자성(롤백) — ack 후 이연:** apply 실패 시 핸들러는 NG를 즉시 반환하고 `st->radio_revert_pending`+`radio_revert_cfg`(=변경 전 `st->radio`)만 arm. opcd 메인루프가 **NG ack 송신 후** `opcd_radio_revert_drain()`으로 last-good 설정을 best-effort 재적용 → DUAL partial-apply(mlan0 적용·mlan1 실패) wpa_supplicant conf 발산 제거, "실패=무변화"를 side effect까지 보장. **이연 이유(PR #53 리뷰: Gemini HIGH·Codex P1):** 동기 2차 apply는 DUAL timeout 시 ~1.8s로 1초 응답예산을 초과해 VHL이 NG를 못 받을 수 있음 → 재적용을 응답 경로 밖으로 분리. 추가로 req==committed면 변경분이 없어 arm 생략(should_revert 가드, Gemini). 첫 Set(zero-config)·revert 실패는 로그로 표면화
+- **검증:** 에러코드·이연 롤백은 stub 테스트(14f·24a~g — dispatch는 apply 1회+arm, drain이 2번째 재적용·옛 freq/station 복원·동일설정 시 미arm를 단언)로 native 검증. nxp 재적용 동작은 `make PLATFORM=nxp` 컴파일 + 실타깃(V13 규제 NG 실동작과 함께)에서 확인
 
 **D10 · 비유니캐스트 거부 0x0010** — `handler.c:669-673` — ✅ 해결(2026-06-11)
 - **사양:** IP 주소 이상 = 0x0012

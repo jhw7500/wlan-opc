@@ -169,7 +169,9 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 void stub_apply_radio_set_fail(int fail)      { s_apply_radio_fail = fail; }
 void stub_apply_radio_set_fail_once(int fail) { s_apply_radio_fail_once = fail; }
 int  stub_apply_radio_calls(void)             { return s_apply_radio_calls; }
-void stub_apply_radio_reset_calls(void)       { s_apply_radio_calls = 0; }
+void stub_apply_radio_reset_calls(void)       { s_apply_radio_calls = 0;
+                                                s_apply_radio_last_w1_freq = 0;
+                                                s_apply_radio_last_station = 0; }
 int  stub_apply_radio_last_w1_freq(void)      { return s_apply_radio_last_w1_freq; }
 int  stub_apply_radio_last_station(void)      { return s_apply_radio_last_station; }
 

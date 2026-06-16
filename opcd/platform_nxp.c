@@ -857,10 +857,11 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
                 cfg->wlan2.freq_mhz);
         /* DUAL partial-apply: if mlan0 succeeded above, an mlan1 failure here
          * leaves the two wpa_supplicant confs momentarily out of sync. The
-         * caller (handler.c) gets NG (0x0050, apply-failure — D9) and then
-         * best-effort re-applies the last-good config, which rewrites mlan0
-         * back to its committed freq — so the confs reconverge to the
-         * pre-change state ("apply fails ⇒ no net change"). End-to-end
+         * caller (handler.c) returns NG (0x0050, apply-failure — D9); the main
+         * loop then re-applies the last-good config AFTER the ack (deferred
+         * best-effort revert), which rewrites mlan0 back to its committed freq —
+         * so the confs reconverge to the pre-change state ("apply fails ⇒ no net
+         * change") without the failure ack waiting on a second apply. End-to-end
          * idempotency across reconnect remains the reconnect PR's job. */
         int rc = run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms);
         if (rc != 0) return rc;
