@@ -86,6 +86,15 @@ typedef struct opcd_state {
     opc_set_radio_config_req_t radio;
     opcd_ip_list_t ip_list;
 
+    /* SetRadioConfig apply-failure revert, DEFERRED past the NG ack (D9): a
+     * synchronous second apply could double the response wall-clock on a DUAL
+     * timeout and blow the 1s budget (PR #53 review). The handler arms this on
+     * apply failure — storing the last-good config to restore — and the main
+     * loop re-applies it via opcd_radio_revert_drain() AFTER the NG ack is sent,
+     * so the failure response is never delayed by the recovery apply. */
+    bool     radio_revert_pending;
+    opc_set_radio_config_req_t radio_revert_cfg;
+
     /* SetIpConfigList staging — accumulates entries until END boundary flag. */
     opcd_ip_list_t ip_list_staging;
     bool     ip_list_staging_active;
