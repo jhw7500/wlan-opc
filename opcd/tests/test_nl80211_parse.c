@@ -271,8 +271,22 @@ int main(void)
         ASSERT(strlen(ev.ssid) == 32, "interface ssid32: len 32 NUL-terminated");
     }
 
-    /* TODO(V4 stealth AP): add a pl_len==0 (empty SSID) case asserting
-     * ev.ssid_present == false, once empty-SSID/stealth handling lands. */
+    /* 4d. Zero-length SSID payload → ssid_present stays false (the parser's
+     *     pl_len>0 guard prevents a false positive). Verifies current behaviour;
+     *     full stealth-AP empty-SSID handling is V4. (Gemini review) */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr(&f, NL80211_ATTR_SSID, "", 0);  /* zero-length payload on the wire */
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "interface ssid0: rc==0");
+        ASSERT(!ev.ssid_present, "interface ssid0: ssid_present false (zero-length)");
+        ASSERT(ev.ssid[0] == '\0', "interface ssid0: ssid empty");
+    }
 
     /* 5. Wrong family (nlmsg_type != family_id) → IGNORE / -1. */
     {
