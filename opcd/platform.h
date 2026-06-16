@@ -206,10 +206,10 @@ typedef struct opcd_platform_ops {
      * validation and right before opcd writes NVM. Return 0 means the kernel
      * has accepted the change; any non-zero is mapped by opcd to the dedicated
      * apply-failure NG (Error Cause 0x0050 — the spec defines no apply-failure
-     * code; see ids.h OPC_ERR_RADIO_APPLY / D9). On a non-zero return opcd, AFTER
-     * sending that NG ack, invokes this hook a second time with the last-good cfg
-     * (a deferred best-effort revert run in the main loop) so a partial apply
-     * leaves no net change without delaying the failure response.
+     * code; see ids.h OPC_ERR_RADIO_APPLY / D9). After sending that NG ack, opcd
+     * invokes this hook a second time with the last-good cfg (a deferred
+     * best-effort revert run in the main loop) so a partial apply leaves no net
+     * change without delaying the failure response.
      * The return value carries no field attribution: EVERY apply failure —
      * including a non-frequency one (e.g. a future bandwidth path) — reaches
      * the wire as 0x0050.

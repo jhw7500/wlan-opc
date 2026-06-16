@@ -909,6 +909,9 @@ void opcd_radio_revert_drain(opcd_state_t *st)
     if (!st->radio_revert_pending) return;
     st->radio_revert_pending = false;
     const opcd_platform_ops_t *plat = opcd_platform();
+    /* Unreachable when a revert is armed (an armed revert means an apply just
+     * failed, which requires a platform), but bail defensively rather than
+     * deref NULL. */
     if (!plat) return;
     /* Re-apply the last-good config the SetRadioConfig handler captured on its
      * apply failure. Best-effort and off the response path (main loop, post-ack)
