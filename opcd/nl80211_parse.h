@@ -27,6 +27,7 @@ typedef enum opcd_nl_kind {
     OPCD_NL_DISCONNECT,
     OPCD_NL_ROAM,
     OPCD_NL_CH_SWITCH,
+    OPCD_NL_INTERFACE,   /* NL80211_CMD_NEW_INTERFACE (GET_INTERFACE reply) */
 } opcd_nl_kind_t;
 
 typedef struct opcd_nl_evt {
@@ -68,6 +69,16 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
  */
 int nl80211_parse_ctrl_family(const uint8_t *msg, size_t len,
                               uint16_t *family_id, uint16_t *mlme_grp_id);
+
+/*
+ * Build an NL80211_CMD_GET_INTERFACE request for `ifindex` into buf (host byte
+ * order). Returns total length, or 0 if cap is too small. The reply is an
+ * NL80211_CMD_NEW_INTERFACE message carrying NL80211_ATTR_WIPHY_FREQ, parsed by
+ * nl80211_parse_evt (kind OPCD_NL_INTERFACE). Used for a direct kernel channel
+ * query when a CONNECT event omits WIPHY_FREQ (link.json lags association).
+ */
+size_t nl80211_build_get_interface(uint8_t *buf, size_t cap, uint16_t family_id,
+                                   uint32_t ifindex);
 
 #ifdef __cplusplus
 }

@@ -1000,6 +1000,72 @@ static void nl_coalesce_put(opcd_platform_evt_t *tab, size_t *count,
 /* opc_chan_field() / opc_assoc_chan_field() live in chan_encode.{c,h} (pure,
  * host-testable) — see opcd/tests/test_chan_encode.c. */
 
+/* Query the kernel for an interface's current operating frequency via a
+ * synchronous NL80211_CMD_GET_INTERFACE round-trip on a PRIVATE socket (the
+ * event socket g_nl_fd is non-blocking and shared with the drain loop, so a
+ * unicast reply there would race the multicast event stream). Returns 0 and
+ * fills the freq_mhz and channel out-params on success, -1 otherwise (caller
+ * keeps 0).
+ *
+ * Authoritative channel source at association time: the kernel knows the
+ * operating freq the instant CONNECT fires, whereas link.json lags (the logger
+ * polls ~1 s and clears the file on disconnect — the on-target race that left
+ * the link.json fallback reading channel 0). Bounded by a 250 ms SO_RCVTIMEO so
+ * a silent kernel cannot stall the single-threaded drain loop. */
+static int nxp_get_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel)
+{
+    if (g_nl80211_family_id == 0 || ifindex <= 0) return -1;
+
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
+    if (fd < 0) return -1;
+
+    int rc = -1;
+    struct sockaddr_nl addr = { .nl_family = AF_NETLINK };
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0) goto out;
+
+    /* 250 ms: a local-kernel netlink reply is immediate (no network I/O); this
+     * just bounds the drain-loop stall if the kernel ever goes silent. */
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 250000 };
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0) goto out;
+
+    uint8_t req[64];
+    size_t reqlen = nl80211_build_get_interface(req, sizeof req,
+                                                g_nl80211_family_id,
+                                                (uint32_t)ifindex);
+    if (reqlen == 0) goto out;
+
+    struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };  /* nl_pid=0 → kernel */
+    ssize_t sn = sendto(fd, req, reqlen, 0,
+                        (struct sockaddr *)&kernel, sizeof kernel);
+    if (sn < 0 || (size_t)sn != reqlen) goto out;
+
+    /* GET_INTERFACE reply is single-part (no NLM_F_MULTI / trailing NLMSG_DONE),
+     * so one recv carries it. Retry on EINTR like the rest of the drain path
+     * (nxp_drain_events / run_argv_bounded). */
+    uint8_t reply[NL_RECV_BUF];
+    ssize_t rn;
+    do {
+        rn = recv(fd, reply, sizeof reply, 0);
+    } while (rn < 0 && errno == EINTR);
+    if (rn < (ssize_t)(NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN)) goto out;
+
+    uint16_t reply_type;
+    memcpy(&reply_type, reply + 4, sizeof reply_type);  /* nlmsg_type @ off 4 */
+    if (reply_type == NL_MSG_ERROR) goto out;
+
+    opcd_nl_evt_t nev;
+    if (nl80211_parse_evt(reply, (size_t)rn, (int)g_nl80211_family_id, &nev) == 0 &&
+        nev.kind == OPCD_NL_INTERFACE && nev.freq_mhz != 0) {
+        *freq_mhz = nev.freq_mhz;
+        *channel  = nev.channel;
+        rc = 0;
+    }
+
+out:
+    close(fd);
+    return rc;
+}
+
 /* Translate one decoded nl80211 event into 0..2 platform events and stage them
  * into the coalesce table. DISCONNECT emits AP_DISCONNECT (only when AP-
  * initiated) followed by WLAN_STATUS(UP); the others emit a single event. */
@@ -1015,13 +1081,15 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         if (nev->status_code != 0) break;
 
         /* NL80211_CMD_CONNECT commonly omits NL80211_ATTR_WIPHY_FREQ, leaving
-         * the event channel 0. Only then pay for a cached link readback
-         * (link.json) and seed the channel from it — same best-effort pattern
-         * as ROAM's SNR/RSSI seeding below. */
-        opcd_platform_link_t link;
-        memset(&link, 0, sizeof link);
+         * the event channel 0. Only then query the kernel directly
+         * (GET_INTERFACE) for the operating freq — authoritative at association
+         * time, unlike link.json which lags the logger poll and is cleared on
+         * disconnect (the on-target race that made the link.json fallback read
+         * channel 0). */
+        uint32_t kfreq = 0;
+        uint16_t kch   = 0;
         if (nev->channel == 0)
-            (void)nxp_get_link(idx, &link);
+            (void)nxp_get_iface_freq(nev->ifindex, &kfreq, &kch);
 
         memset(&pe, 0, sizeof pe);
         pe.kind                  = OPCD_PEVT_WLAN_STATUS;
@@ -1029,7 +1097,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_ASSOCIATED;
         pe.u.wlan_status.channel = opc_assoc_chan_field(
             nev->freq_mhz, nev->channel,
-            link.associated, link.freq_mhz, link.channel);
+            kfreq != 0, kfreq, kch);
         nl_coalesce_put(tab, count, &pe);
         break;
     }
