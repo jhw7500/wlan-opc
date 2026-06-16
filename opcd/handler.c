@@ -1087,12 +1087,6 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     memset(&st->ip_change_armed_entry, 0, sizeof st->ip_change_armed_entry);
 }
 
-/* D12/D13 (decision 2026-06-11): a bad-length datagram earns the spec's
- * 0x0003 NG only when it originates from the logged-in session's IP — any
- * other source is dropped silently, preserving the SEC-003 no-reflection
- * stance. The first OPC_FIXED_HEADER_SIZE bytes of `frame` must hold the
- * (possibly truncated) datagram's start; req_id and seq are echoed from
- * them so the client can correlate the NG. */
 size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered)
 {
     /* Lenient receive-length policy (D12/D13, user decision 2026-06-16): trust
@@ -1100,9 +1094,11 @@ size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered)
      * Length bytes as the frame, ignoring any trailing wire bytes. Because the
      * recv buffer is sized to the max frame (OPC_FRAME_MAX), every valid frame
      * (Length ≤ max) is fully present even when the datagram was longer and got
-     * MSG_TRUNC'd — the lost bytes are past the frame. Returns the frame byte
-     * count to dispatch, or 0 when the datagram is a bad length for the caller
-     * to route to opcd_reject_bad_length:
+     * MSG_TRUNC'd — the lost bytes are past the frame. `buffered` must already be
+     * capped at the recv buffer size (the caller passes min(rn, sizeof buf), not
+     * the raw recvfrom return) — that cap is what makes the invariant hold.
+     * Returns the frame byte count to dispatch, or 0 when the datagram is a bad
+     * length for the caller to route to opcd_reject_bad_length:
      *   - no 8-byte header to read a Length from (runt),
      *   - a Length whose extent is neither the empty 8-B frame nor a full
      *     common-header frame within the max (9..63 B / over-max), or
@@ -1118,6 +1114,12 @@ size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered)
     return want;
 }
 
+/* D12/D13 (decision 2026-06-11): a bad-length datagram earns the spec's
+ * 0x0003 NG only when it originates from the logged-in session's IP — any
+ * other source is dropped silently, preserving the SEC-003 no-reflection
+ * stance. The first OPC_FIXED_HEADER_SIZE bytes of `frame` must hold the
+ * (possibly truncated) datagram's start; req_id and seq are echoed from
+ * them so the client can correlate the NG. */
 void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport)
 {
