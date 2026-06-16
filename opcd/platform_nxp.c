@@ -1027,7 +1027,9 @@ static void nl_coalesce_put(opcd_platform_evt_t *tab, size_t *count,
  * and SSID the instant CONNECT fires, whereas link.json lags (the logger polls
  * ~1 s and may omit fields — the on-target race that left the channel fallback
  * reading 0 and the essid fallback reading ""). Bounded by a 250 ms SO_RCVTIMEO
- * so a silent kernel cannot stall the single-threaded drain loop. */
+ * so a silent kernel cannot stall the caller — invoked both from the drain loop
+ * (channel, via nxp_get_iface_freq) and the synchronous device-info path
+ * (essid, via nxp_get_iface_ssid). */
 static int nxp_query_iface(int ifindex, opcd_nl_evt_t *out)
 {
     if (g_nl80211_family_id == 0 || ifindex <= 0) return -1;

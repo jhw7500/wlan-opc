@@ -273,7 +273,7 @@ int main(void)
 
     /* 4d. Zero-length SSID payload → ssid_present stays false (the parser's
      *     pl_len>0 guard prevents a false positive). Verifies current behaviour;
-     *     full stealth-AP empty-SSID handling is V4. (Gemini review) */
+     *     full stealth-AP empty-SSID handling is V4. */
     {
         frame_t f; f_reset(&f);
         f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
