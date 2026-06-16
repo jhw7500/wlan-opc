@@ -40,6 +40,7 @@ static int failures = 0;
 #define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
 #define NL80211_ATTR_DISCONNECTED_BY_AP 71  /* NLA_FLAG: zero-length payload */
+#define NL80211_ATTR_SSID        52
 
 /* nla_type high-bit flag — the kernel ORs this into the type for nested attrs. */
 #define NLA_F_NESTED 0x8000
@@ -228,6 +229,46 @@ int main(void)
         ASSERT(ev.kind == OPCD_NL_CH_SWITCH, "ch_switch: kind CH_SWITCH");
         ASSERT(ev.freq_mhz == 5180, "ch_switch: freq 5180");
         ASSERT(ev.channel == 36, "ch_switch: channel 36");
+    }
+
+    /* 4b. GET_INTERFACE reply (NEW_INTERFACE cmd 7): IFINDEX + WIPHY_FREQ(5240)
+     *     + SSID. The synchronous essid/channel query parses this reply. SSID on
+     *     the wire is length-delimited (NO trailing NUL); the parser must
+     *     NUL-terminate it itself. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr_u32(&f, NL80211_ATTR_WIPHY_FREQ, 5240);
+        static const char SSID[] = "FXE3000_JHW";
+        f_attr(&f, NL80211_ATTR_SSID, SSID, (uint16_t)(sizeof SSID - 1));  /* no NUL on wire */
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "interface: rc==0");
+        ASSERT(ev.kind == OPCD_NL_INTERFACE, "interface: kind INTERFACE");
+        ASSERT(ev.freq_mhz == 5240, "interface: freq 5240");
+        ASSERT(ev.channel == 48, "interface: channel 48");
+        ASSERT(ev.ssid_present, "interface: ssid_present");
+        ASSERT(strcmp(ev.ssid, "FXE3000_JHW") == 0, "interface: ssid FXE3000_JHW");
+    }
+
+    /* 4c. SSID at the 32-byte max (no NUL on wire) → NUL-terminated at [32],
+     *     no overflow past ssid[33]. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_NEW_INTERFACE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        char ssid32[32]; memset(ssid32, 'A', sizeof ssid32);  /* exactly 32, no NUL */
+        f_attr(&f, NL80211_ATTR_SSID, ssid32, (uint16_t)sizeof ssid32);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "interface ssid32: rc==0");
+        ASSERT(ev.ssid_present, "interface ssid32: ssid_present");
+        ASSERT(strlen(ev.ssid) == 32, "interface ssid32: len 32 NUL-terminated");
     }
 
     /* 5. Wrong family (nlmsg_type != family_id) → IGNORE / -1. */
