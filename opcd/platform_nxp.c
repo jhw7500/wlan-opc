@@ -443,7 +443,10 @@ static int nxp_get_essid(int idx, char *buf, size_t cap)
     unsigned int ifidx = if_nametoindex((idx == 0) ? "mlan0" : "mlan1");
     if (ifidx != 0 && nxp_get_iface_ssid((int)ifidx, buf, cap) == 0)
         return 0;
-    return 0;                       /* best-effort: empty essid if neither source has it */
+    /* Best-effort: always returns 0 after the fallback (buf may be an empty
+     * string). Callers read buf directly — a non-zero return must NOT be relied
+     * on to detect "no SSID available". */
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1099,7 +1102,8 @@ static int nxp_get_iface_ssid(int ifindex, char *buf, size_t cap)
     if (buf == NULL || cap == 0) return -1;
     opcd_nl_evt_t nev;
     if (nxp_query_iface(ifindex, &nev) == 0 && nev.ssid_present) {
-        size_t n = strnlen(nev.ssid, sizeof nev.ssid - 1);
+        /* ssid_present guarantees the parser NUL-terminated nev.ssid (<=32B). */
+        size_t n = strlen(nev.ssid);
         if (n >= cap) n = cap - 1;
         memcpy(buf, nev.ssid, n);
         buf[n] = '\0';

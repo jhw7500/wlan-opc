@@ -271,6 +271,9 @@ int main(void)
         ASSERT(strlen(ev.ssid) == 32, "interface ssid32: len 32 NUL-terminated");
     }
 
+    /* TODO(V4 stealth AP): add a pl_len==0 (empty SSID) case asserting
+     * ev.ssid_present == false, once empty-SSID/stealth handling lands. */
+
     /* 5. Wrong family (nlmsg_type != family_id) → IGNORE / -1. */
     {
         frame_t f; f_reset(&f);
