@@ -21,6 +21,8 @@
 #define NL_NLATTR_HDR_LEN  4   /* u16 nla_len, u16 nla_type                      */
 
 /* genl commands. */
+#define NL80211_CMD_GET_INTERFACE     5
+#define NL80211_CMD_NEW_INTERFACE     7
 #define NL80211_CMD_CONNECT          46
 #define NL80211_CMD_ROAM             47
 #define NL80211_CMD_DISCONNECT       48
@@ -40,6 +42,9 @@
 #define CTRL_ATTR_MCAST_GROUPS    7
 #define CTRL_ATTR_MCAST_GRP_NAME  1
 #define CTRL_ATTR_MCAST_GRP_ID    2
+
+/* nlmsg_flags. */
+#define NLM_F_REQUEST 0x0001
 
 /* NLA_ALIGN: round up to a 4-byte boundary. */
 #define NLA_ALIGN(n) (((n) + 3) & ~3u)
@@ -85,6 +90,7 @@ static opcd_nl_kind_t cmd_to_kind(uint8_t cmd)
     case NL80211_CMD_ROAM:             return OPCD_NL_ROAM;
     case NL80211_CMD_DISCONNECT:       return OPCD_NL_DISCONNECT;
     case NL80211_CMD_CH_SWITCH_NOTIFY: return OPCD_NL_CH_SWITCH;
+    case NL80211_CMD_NEW_INTERFACE:    return OPCD_NL_INTERFACE;
     default:                           return OPCD_NL_IGNORE;
     }
 }
@@ -319,4 +325,36 @@ int nl80211_parse_ctrl_family(const uint8_t *msg, size_t len,
         return 0;
     }
     return -1;
+}
+
+size_t nl80211_build_get_interface(uint8_t *buf, size_t cap, uint16_t family_id,
+                                   uint32_t ifindex)
+{
+    /* nlmsghdr(16) + genlmsghdr(4) + nlattr(IFINDEX, u32). */
+    uint16_t nla_len = (uint16_t)(NL_NLATTR_HDR_LEN + 4);
+    size_t   total   = NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN + NLA_ALIGN(nla_len);
+    if (cap < total) return 0;
+
+    memset(buf, 0, total);
+    uint32_t u32;
+    uint16_t u16;
+
+    /* nlmsghdr */
+    u32 = (uint32_t)total;       memcpy(buf + 0, &u32, 4);  /* nlmsg_len   */
+    u16 = family_id;             memcpy(buf + 4, &u16, 2);  /* nlmsg_type  */
+    u16 = NLM_F_REQUEST;         memcpy(buf + 6, &u16, 2);  /* nlmsg_flags */
+    /* nlmsg_seq (8) + nlmsg_pid (12) left zero — kernel does not require them. */
+
+    /* genlmsghdr */
+    buf[16] = NL80211_CMD_GET_INTERFACE;  /* cmd     */
+    buf[17] = 0;                          /* version */
+    /* reserved (18..19) zero */
+
+    /* nlattr: NL80211_ATTR_IFINDEX (u32 payload) */
+    size_t aoff = NL_NLMSGHDR_LEN + NL_GENLMSGHDR_LEN;
+    u16 = nla_len;               memcpy(buf + aoff,     &u16, 2);
+    u16 = NL80211_ATTR_IFINDEX;  memcpy(buf + aoff + 2, &u16, 2);
+    u32 = ifindex;               memcpy(buf + aoff + NL_NLATTR_HDR_LEN, &u32, 4);
+
+    return total;
 }
