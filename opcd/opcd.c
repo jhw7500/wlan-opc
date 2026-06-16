@@ -459,18 +459,23 @@ int main(int argc, char **argv)
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
                     }
 
-                    /* #45: apply an armed ChangeIp right after this datagram's
-                     * response was sent (A12: after the Logout ack sendto
-                     * above), before draining the next frame. Closes the
-                     * same-drain interleaving window structurally — arm→ack→
-                     * apply complete within one datagram, so a later frame in
-                     * the same drain never observes the armed state — and
-                     * removes the flood-induced apply delay (no EAGAIN wait).
-                     * Gated on commit_armed; a no-op when nothing is armed. */
-                    opcd_apply_pending_ip_change(&st);
+                    /* If the datagram just handled was a Logout that committed
+                     * a ChangeIp, stop draining: applying the change (below)
+                     * reconfigures eth0, so any datagrams already queued for the
+                     * old address must NOT be processed as post-change traffic
+                     * on the new IP (a queued Login could otherwise re-take the
+                     * session with a reply the client never sees). They resurface
+                     * on the next epoll cycle. Breaking here also closes the
+                     * same-drain interleaving window and removes the flood-induced
+                     * apply delay — the change no longer waits for the socket to
+                     * reach EAGAIN. The Logout ack was already sent above, so A12
+                     * (apply only after the ack is on the wire) still holds. */
+                    if (st.ip_change_commit_armed)
+                        break;
                 }
             }
         }
+        opcd_apply_pending_ip_change(&st);
     }
 
     /* Completes any queued NVRAM writes before the worker joins; an ack
