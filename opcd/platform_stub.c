@@ -131,9 +131,23 @@ static int stub_get_link(int idx, opcd_platform_link_t *out)
 /* ------------------------------------------------------------------ */
 
 static int s_apply_radio_fail = 0;
+static int s_apply_radio_fail_once = 0;
+static int s_apply_radio_calls = 0;
+static int s_apply_radio_last_w1_freq = 0;
+static int s_apply_radio_last_station = 0;
 static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
-    (void)cfg;
+    /* Observability for the apply-failure revert (D9): handler.c re-applies the
+     * last-good config on failure, so a failed Set-Radio drives TWO apply calls
+     * and the LAST one carries the previous (reverted-to) config — including its
+     * station_type, so a DUAL revert is verifiable from the handler test. */
+    s_apply_radio_calls++;
+    s_apply_radio_last_w1_freq  = cfg ? (int)cfg->wlan1.freq_mhz : 0;
+    s_apply_radio_last_station  = cfg ? (int)cfg->station_type   : 0;
+    /* Fail-once countdown: fail this call, then auto-clear so the NEXT call
+     * (the best-effort revert) succeeds — proves a successful revert still
+     * leaves the response NG 0x0050 (L2). */
+    if (s_apply_radio_fail_once) { s_apply_radio_fail_once = 0; return -1; }
     /* Direct programmatic override (existing API — test 14f). */
     if (s_apply_radio_fail)
         return -1;
@@ -151,8 +165,13 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
     return 0;
 }
 
-/* Test-only accessor (declared extern in test_handler.c). */
-void stub_apply_radio_set_fail(int fail) { s_apply_radio_fail = fail; }
+/* Test-only accessors (declared extern in test_handler.c). */
+void stub_apply_radio_set_fail(int fail)      { s_apply_radio_fail = fail; }
+void stub_apply_radio_set_fail_once(int fail) { s_apply_radio_fail_once = fail; }
+int  stub_apply_radio_calls(void)             { return s_apply_radio_calls; }
+void stub_apply_radio_reset_calls(void)       { s_apply_radio_calls = 0; }
+int  stub_apply_radio_last_w1_freq(void)      { return s_apply_radio_last_w1_freq; }
+int  stub_apply_radio_last_station(void)      { return s_apply_radio_last_station; }
 
 /* Test observability: count apply_ip_change calls and record the last slot's IP
  * so the change-ip → platform wiring (deferred until logout) is verifiable from

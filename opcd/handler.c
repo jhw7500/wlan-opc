@@ -839,11 +839,31 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 abort();
             }
             if (plat->apply_radio_config(&req) != 0) {
-                /* regulation-class NG — platform refused the kernel change.
-                 * Reported as 0x0011 (frequency NG): the spec defines no
-                 * apply-failure code and the apply step is the frequency
-                 * change (D9, decided 2026-06-11). */
-                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_FREQ;
+                /* Platform refused/failed the kernel change. Best-effort revert
+                 * to the last-good config so a partial apply (e.g. DUAL: mlan0
+                 * applied, mlan1 failed) cannot leave the device's wpa_supplicant
+                 * confs diverged from committed state — "apply fails ⇒ no net
+                 * change" (user decision 2026-06-16). st->radio is still the
+                 * committed config here (only the success branch below writes
+                 * it), i.e. it IS the pre-change setting to restore. The revert
+                 * is best-effort: its own failure cannot improve the response,
+                 * which is NG regardless. Caveat: before the first *successful*
+                 * Set, st->radio is the zero/default config (freq 0), which the
+                 * platform treats as "no association — skip", so the revert is a
+                 * no-op; acceptable, since a fresh device has no prior committed
+                 * radio conf to diverge from.
+                 * Error cause: dedicated apply-failure 0x0050, NOT 0x0011 — the
+                 * frequency value was valid (it passed the D8 check above); this
+                 * is a runtime fault, so the operator must not be told to change
+                 * it (D9 re-decided 2026-06-16; 0x0050 pending 발주처 confirm). */
+                if (plat->apply_radio_config(&st->radio) != 0) {
+                    /* Revert itself failed — the device may be left in a partial
+                     * apply state; surface it for triage. Response stays NG. */
+                    fprintf(stderr, "opcd: set_radio: best-effort revert to "
+                                    "last-good config ALSO failed — device may "
+                                    "be in a partial apply state\n");
+                }
+                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
             } else {
                 st->radio = req;
                 bool deferred = false;

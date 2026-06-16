@@ -43,6 +43,11 @@ extern uint32_t stub_apply_ip_last_ip(void);
 extern void     stub_apply_ip_reset(void);
 extern void     stub_apply_ip_set_fail(int fail);
 extern void     stub_apply_radio_set_fail(int fail);
+extern void     stub_apply_radio_set_fail_once(int fail);
+extern int      stub_apply_radio_calls(void);
+extern void     stub_apply_radio_reset_calls(void);
+extern int      stub_apply_radio_last_w1_freq(void);
+extern int      stub_apply_radio_last_station(void);
 
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
@@ -252,6 +257,40 @@ static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
     req.wlan1.bandwidth = OPC_BANDWIDTH_20;
     req.wlan1.freq_mhz  = freq;
     req.wlan1.channel   = ch;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_radio_config_ack_t ack;
+    if (opc_set_radio_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_radio_err = ack.error_cause;
+    return ack.result;
+}
+
+/* DUAL variant: pack a SetRadioConfig with station_type=DUAL and valid WLAN#1
+ * + WLAN#2 configs (both 11AX/20MHz), so the apply-failure revert's full-DUAL
+ * config hand-off is verifiable (D9 M2, test 24e). */
+static uint16_t do_set_radio_dual(opcd_state_t *st, uint32_t cip,
+                                  uint16_t f1, uint16_t ch1,
+                                  uint16_t f2, uint16_t ch2)
+{
+    opc_set_radio_config_req_t req;
+    memset(&req, 0, sizeof req);
+    req.station_type    = OPC_STATION_DUAL;
+    req.wlan1.mode      = OPC_WLAN_MODE_11AX;
+    req.wlan1.bandwidth = OPC_BANDWIDTH_20;
+    req.wlan1.freq_mhz  = f1;
+    req.wlan1.channel   = ch1;
+    req.wlan2.mode      = OPC_WLAN_MODE_11AX;
+    req.wlan2.bandwidth = OPC_BANDWIDTH_20;
+    req.wlan2.freq_mhz  = f2;
+    req.wlan2.channel   = ch2;
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
@@ -705,11 +744,17 @@ int main(void)
     ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
            "D10: broadcast recipient → 0x0012");
 
-    /* 14f. D9: platform apply refusal → frequency NG 0x0011 (0x0050 removed). */
+    /* 14f. D9: platform apply refusal → dedicated apply-failure 0x0050
+     *      (re-decided 2026-06-16; was 0x0011, but a runtime fault must not be
+     *      reported as a bad-frequency input). The handler also best-effort
+     *      re-applies the last-good config, so a failed apply drives 2 calls. */
     stub_apply_radio_set_fail(1);
+    stub_apply_radio_reset_calls();
     r = do_set_radio(&st, CIP, 0, 0);
-    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
-           "D9: apply refusal → NG 0x0011");
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+           "D9: apply refusal → NG 0x0050");
+    ASSERT(stub_apply_radio_calls() == 2,
+           "D9: apply failure triggers best-effort last-good revert (2 calls)");
     stub_apply_radio_set_fail(0);
     r = do_set_radio(&st, CIP, 0, 0);
     ASSERT(r == OPC_RESULT_OK, "D9: apply ok once fail toggle cleared");
@@ -1297,8 +1342,10 @@ int main(void)
      * The nxp fork/execl/timeout code path and journal output are excluded from
      * this change set (#13 covers those). */
 
-    /* 24a. apply failure (-EPROTO) → Result=NG + error_cause=0x0011 (OPC_ERR_RADIO_FREQ).
-     *      handler.c maps every non-zero apply_radio_config return to 0x0011 (D9). */
+    /* 24a. apply failure (-EPROTO) → Result=NG + error_cause=0x0050
+     *      (OPC_ERR_RADIO_APPLY). handler.c maps every non-zero
+     *      apply_radio_config return to the dedicated apply-failure code (D9,
+     *      re-decided 2026-06-16). */
     {
         opcd_state_t st24;
         init_state(&st24, OPC_PASSWORD_DEFAULT);
@@ -1309,11 +1356,11 @@ int main(void)
         unsetenv("OPCD_STUB_APPLY_RADIO_RC");
         ASSERT(r24 == OPC_RESULT_NG,
                "issue#12-24a: apply -EPROTO → Result NG");
-        ASSERT(g_last_radio_err == OPC_ERR_RADIO_FREQ,
-               "issue#12-24a: apply -EPROTO → error_cause 0x0011");
+        ASSERT(g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24a: apply -EPROTO → error_cause 0x0050");
     }
 
-    /* 24b. apply failure (-ETIMEDOUT) → same NG + 0x0011 mapping. */
+    /* 24b. apply failure (-ETIMEDOUT) → same NG + 0x0050 mapping. */
     {
         opcd_state_t st24b;
         init_state(&st24b, OPC_PASSWORD_DEFAULT);
@@ -1323,8 +1370,8 @@ int main(void)
         unsetenv("OPCD_STUB_APPLY_RADIO_RC");
         ASSERT(r24b == OPC_RESULT_NG,
                "issue#12-24b: apply -ETIMEDOUT → Result NG");
-        ASSERT(g_last_radio_err == OPC_ERR_RADIO_FREQ,
-               "issue#12-24b: apply -ETIMEDOUT → error_cause 0x0011");
+        ASSERT(g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24b: apply -ETIMEDOUT → error_cause 0x0050");
     }
 
     /* 24c. state preservation: after apply failure the in-memory radio config
@@ -1340,7 +1387,9 @@ int main(void)
         uint16_t saved_freq = st24c.radio.wlan1.freq_mhz;
         uint16_t saved_ch   = st24c.radio.wlan1.channel;
 
-        /* Inject failure and submit a different config. */
+        /* Inject failure and submit a different config. Reset the apply counter
+         * after priming so it measures only the failing Set-Radio. */
+        stub_apply_radio_reset_calls();
         setenv("OPCD_STUB_APPLY_RADIO_RC", "-71", 1);
         (void)do_set_radio(&st24c, CIP, 5180, 36);
         unsetenv("OPCD_STUB_APPLY_RADIO_RC");
@@ -1349,6 +1398,14 @@ int main(void)
                "issue#12-24c: apply failure preserves previous freq_mhz");
         ASSERT(st24c.radio.wlan1.channel == saved_ch,
                "issue#12-24c: apply failure preserves previous channel");
+        /* Revert behaviour (D9, 2026-06-16): the failed apply (5180) is followed
+         * by a best-effort re-apply of the last-good config — so apply was
+         * called twice and the LAST call carried the previous freq (2412), not
+         * the rejected 5180. This is what restores the wpa_supplicant confs. */
+        ASSERT(stub_apply_radio_calls() == 2,
+               "issue#12-24c: apply failure triggers last-good revert (2 calls)");
+        ASSERT(stub_apply_radio_last_w1_freq() == (int)saved_freq,
+               "issue#12-24c: revert re-applies the previous config (2412), not 5180");
     }
 
     /* 24d. success-path regression (env var cleared): apply succeeds, Result=OK. */
@@ -1363,6 +1420,53 @@ int main(void)
                "issue#12-24d: no injection → apply succeeds → Result OK");
         ASSERT(st24d.radio.wlan1.freq_mhz == 5180,
                "issue#12-24d: success updates in-memory radio state");
+    }
+
+    /* 24e. M2: DUAL apply-failure revert hands the FULL DUAL last-good config
+     *      back to the platform — the headline "DUAL partial-apply reconverges"
+     *      claim, proven at the handler/stub boundary (the per-interface nxp
+     *      reconverge itself is cross-only / on-target). */
+    {
+        opcd_state_t st24e;
+        init_state(&st24e, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24e, CIP, OPC_PASSWORD_DEFAULT);
+        /* Prime a DUAL good config (both interfaces). */
+        uint16_t pr = do_set_radio_dual(&st24e, CIP, 2412, 1, 5180, 36);
+        ASSERT(pr == OPC_RESULT_OK, "issue#12-24e: DUAL prime succeeds");
+        uint16_t saved_f1 = st24e.radio.wlan1.freq_mhz;
+
+        /* Inject failure, submit a different DUAL config. */
+        stub_apply_radio_reset_calls();
+        setenv("OPCD_STUB_APPLY_RADIO_RC", "-71", 1);
+        uint16_t r = do_set_radio_dual(&st24e, CIP, 2437, 6, 5200, 40);
+        unsetenv("OPCD_STUB_APPLY_RADIO_RC");
+
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24e: DUAL apply failure → NG 0x0050");
+        ASSERT(stub_apply_radio_calls() == 2,
+               "issue#12-24e: DUAL failure triggers last-good revert (2 calls)");
+        ASSERT(stub_apply_radio_last_station() == OPC_STATION_DUAL,
+               "issue#12-24e: revert hands back the full DUAL config (station_type)");
+        ASSERT(stub_apply_radio_last_w1_freq() == (int)saved_f1,
+               "issue#12-24e: revert re-applies the previous DUAL wlan1 freq (2412)");
+    }
+
+    /* 24f. L2: a *successful* revert (fail-once) still yields NG 0x0050 — guards
+     *      against a future reorder letting the revert's OK overwrite the NG. */
+    {
+        opcd_state_t st24f;
+        init_state(&st24f, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24f, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_radio(&st24f, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+
+        stub_apply_radio_reset_calls();
+        stub_apply_radio_set_fail_once(1);   /* real apply fails, revert succeeds */
+        uint16_t r = do_set_radio(&st24f, CIP, 5180, 36);
+
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24f: successful revert still leaves response NG 0x0050");
+        ASSERT(stub_apply_radio_calls() == 2,
+               "issue#12-24f: fail-once still drives real apply + revert (2 calls)");
     }
 
     unlink(g_pw_path);
