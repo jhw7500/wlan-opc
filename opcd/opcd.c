@@ -458,10 +458,19 @@ int main(int argc, char **argv)
                     } else {
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
                     }
+
+                    /* #45: apply an armed ChangeIp right after this datagram's
+                     * response was sent (A12: after the Logout ack sendto
+                     * above), before draining the next frame. Closes the
+                     * same-drain interleaving window structurally — arm→ack→
+                     * apply complete within one datagram, so a later frame in
+                     * the same drain never observes the armed state — and
+                     * removes the flood-induced apply delay (no EAGAIN wait).
+                     * Gated on commit_armed; a no-op when nothing is armed. */
+                    opcd_apply_pending_ip_change(&st);
                 }
             }
         }
-        opcd_apply_pending_ip_change(&st);
     }
 
     /* Completes any queued NVRAM writes before the worker joins; an ack
