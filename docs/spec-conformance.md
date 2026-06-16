@@ -244,7 +244,7 @@
 - **구현(분석시점):** `frame_parse`가 -1로 드롭 (SEC-003 drop 설계와 동일 맥락)
 - **방침(2026-06-11 사용자 결정):** D12와 공통 — **로그인 세션 IP 발신 프레임에만 0x0003 NG 응답, 그 외 drop 유지** (사양 적합성과 반사 방지 절충)
 - **1차 해소(2026-06-12):** `opcd_reject_bad_length()` (9~63B는 8B 헤더에서 req/seq 에코, 8B 미만 runt는 drop)
-- **관대 모델 정정(2026-06-16):** 수신 길이 판정을 순수함수 `opcd_intake_frame_len()`로 일원화 — declared Length 기준으로 (a)`8+Length`까지 처리·trailing 무시, (b)extent가 9~63B/over-max/부족(truncated)이면 0 반환→`opcd_reject_bad_length()`. **frame.c 정확일치(SEC-003)는 무변경** — opcd.c가 declared Length로 trim한 *정확 프레임*을 넘기므로 검사가 그대로 성립. 단위테스트 10케이스(test 22b — 빈/trailing/정확/길어진 datagram/MSG_TRUNC win/over-max/9~63/truncated/runt/NULL). **남은 strict:** Length 필드 불일치가 아니라 datagram이 declared보다 *짧은* 경우만 거부(진짜 잘림); 길이 *초과*는 더 이상 거부 아님
+- **관대 모델 정정(2026-06-16):** 수신 길이 판정을 순수함수 `opcd_intake_frame_len()`로 일원화 — declared Length 기준으로 (a)`8+Length`까지 처리·trailing 무시, (b)extent가 9~63B/over-max/부족(truncated)이면 0 반환→`opcd_reject_bad_length()`. **frame.c 정확일치(SEC-003)는 무변경** — opcd.c가 declared Length로 trim한 *정확 프레임*을 넘기므로 검사가 그대로 성립. 단위테스트(test 22b — 빈/trailing/정확/길어진 datagram/MSG_TRUNC win/over-max/9~63 경계(want=9·63)/truncated/runt/NULL). **남은 strict:** Length 필드 불일치가 아니라 datagram이 declared보다 *짧은* 경우만 거부(진짜 잘림); 길이 *초과*는 더 이상 거부 아님
 
 **D14 · SetRadio WLAN#2 와이어 순서** — ~~deviation~~ → **기각 (2026-06-11)**
 - 원본 docx(§3.3.8 요구 포맷 도면 image33.emf) 직접 확인: **WLAN#2도 FREQ→CH** — WLAN#1·GetDevInfo와 일관

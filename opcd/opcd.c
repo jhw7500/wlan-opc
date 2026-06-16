@@ -419,9 +419,10 @@ int main(int argc, char **argv)
                         /* Bad length: runt / 9..63 B / declared Length over the
                          * protocol max / datagram shorter than its declared
                          * frame (truncated). 0x0003 NG to the logged-in session
-                         * (header prefix echoes req/seq), else drop. A datagram
-                         * merely *longer* than its declared frame is NOT bad
-                         * length — it was trimmed to `want` above. */
+                         * (header prefix echoes req/seq), else drop. An overlong
+                         * datagram with a valid declared Length never reaches
+                         * this branch — opcd_intake_frame_len returns the trimmed
+                         * length instead, so it is handled below. */
                         if ((size_t)rn > sizeof rx)
                             LOG("oversize datagram (%zd B): declared length bad — rejected", rn);
                         opcd_reject_bad_length(&st, rx, buffered, cip, cprt);
@@ -450,7 +451,11 @@ int main(int argc, char **argv)
                             /* T7 (proto-todo): actual service time vs the
                              * spec budget (1 s for non-persisting commands). */
                             opc_header_t hdr;
-                            if (opc_fixed_header_unpack(rx, (size_t)rn, &hdr) == 0) {
+                            /* `want` (the trimmed frame length), not raw rn:
+                             * rn can exceed sizeof rx under MSG_TRUNC, and
+                             * passing a buf_len past the buffer violates the
+                             * unpack contract even though it only reads 8 B. */
+                            if (opc_fixed_header_unpack(rx, want, &hdr) == 0) {
                                 struct timespec now;
                                 clock_gettime(CLOCK_MONOTONIC, &now);
                                 long long us =

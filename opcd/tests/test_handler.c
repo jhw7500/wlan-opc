@@ -1316,6 +1316,12 @@ int main(void)
             h.length = 22; (void)opc_fixed_header_pack(f, &h);   /* want 30 (9..63) */
             ASSERT(opcd_intake_frame_len(f, 30) == 0,
                    "intake: 9..63 B extent → 0 (malformed)");
+            h.length = 1;  (void)opc_fixed_header_pack(f, &h);   /* want 9 — first of 9..63 */
+            ASSERT(opcd_intake_frame_len(f, 9) == 0,
+                   "intake: want=9 (first of 9..63) → 0 (boundary)");
+            h.length = 55; (void)opc_fixed_header_pack(f, &h);   /* want 63 — last of 9..63 */
+            ASSERT(opcd_intake_frame_len(f, 63) == 0,
+                   "intake: want=63 (last of 9..63) → 0 (boundary)");
 
             h.length = 200; (void)opc_fixed_header_pack(f, &h);  /* want 208 */
             ASSERT(opcd_intake_frame_len(f, 100) == 0,
