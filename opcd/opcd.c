@@ -406,31 +406,38 @@ int main(int argc, char **argv)
                     }
                     uint32_t cip  = ntohl(src.sin_addr.s_addr);
                     uint16_t cprt = ntohs(src.sin_port);
-                    if ((size_t)rn > sizeof rx) {
-                        /* D12: oversize datagram — only sizeof rx bytes
-                         * landed in rx; the header prefix is intact for the
-                         * NG echo. */
-                        LOG("oversize frame (%zd B) rejected", rn);
-                        opcd_reject_bad_length(&st, rx, sizeof rx, cip, cprt);
+                    /* Lenient receive-length model (D12/D13, 2026-06-16): trust
+                     * the header's declared Length and dispatch exactly
+                     * 8+Length bytes, ignoring trailing wire bytes. A valid frame
+                     * always fits rx (sizeof rx == OPC_FRAME_MAX), so an
+                     * MSG_TRUNC overflow only lops off bytes *past* the frame.
+                     * `buffered` is what actually landed in rx. */
+                    size_t buffered = ((size_t)rn > sizeof rx) ? sizeof rx
+                                                               : (size_t)rn;
+                    size_t want = opcd_intake_frame_len(rx, buffered);
+                    if (want == 0) {
+                        /* Bad length: runt / 9..63 B / declared Length over the
+                         * protocol max / datagram shorter than its declared
+                         * frame (truncated). 0x0003 NG to the logged-in session
+                         * (header prefix echoes req/seq), else drop. An overlong
+                         * datagram with a valid declared Length never reaches
+                         * this branch — opcd_intake_frame_len returns the trimmed
+                         * length instead, so it is handled below. */
+                        if ((size_t)rn > sizeof rx)
+                            LOG("oversize datagram (%zd B): declared length bad — rejected", rn);
+                        opcd_reject_bad_length(&st, rx, buffered, cip, cprt);
                         continue;
                     }
-                    if (rn != OPC_FIXED_HEADER_SIZE &&
-                        rn < (ssize_t)OPC_HEADER_SIZE) {
-                        /* D13: 9..63 B can never be a valid frame (frame.c
-                         * rejects it) and <8 B has no header to echo (the
-                         * reject helper drops it). Exactly 8 B is NOT a bad
-                         * length: it is the spec's empty request wire size
-                         * (Logout/GetBasicInfo/GetDeviceInfo/Reset — A2:
-                         * fixed header only, Length=0), accepted by
-                         * frame_parse and handled by the dispatcher.
-                         * Previously a silent drop for every source. */
-                        opcd_reject_bad_length(&st, rx, (size_t)rn, cip, cprt);
-                        continue;
-                    }
+                    /* Observability: the lenient trim happy-path is otherwise
+                     * silent — surface an oversize datagram that carried a valid
+                     * frame so on-target triage sees it was accepted (trimmed)
+                     * rather than dropped. */
+                    if ((size_t)rn > sizeof rx)
+                        LOG("oversize datagram (%zd B): trimmed to declared %zu B frame, trailing ignored", rn, want);
                     struct timespec rx_ts;
                     clock_gettime(CLOCK_MONOTONIC, &rx_ts);
                     ssize_t tx_len = 0;
-                    int rc = opcd_dispatch(&st, rx, (size_t)rn, cip, cprt,
+                    int rc = opcd_dispatch(&st, rx, want, cip, cprt,
                                            tx, sizeof tx, &tx_len);
                     if (rc == 0) {
                         /* tx_len == 0 is a legitimate no-response: a deferred
@@ -444,7 +451,11 @@ int main(int argc, char **argv)
                             /* T7 (proto-todo): actual service time vs the
                              * spec budget (1 s for non-persisting commands). */
                             opc_header_t hdr;
-                            if (opc_fixed_header_unpack(rx, (size_t)rn, &hdr) == 0) {
+                            /* `want` (the trimmed frame length), not raw rn:
+                             * rn can exceed sizeof rx under MSG_TRUNC, and
+                             * passing a buf_len past the buffer violates the
+                             * unpack contract even though it only reads 8 B. */
+                            if (opc_fixed_header_unpack(rx, want, &hdr) == 0) {
                                 struct timespec now;
                                 clock_gettime(CLOCK_MONOTONIC, &now);
                                 long long us =
