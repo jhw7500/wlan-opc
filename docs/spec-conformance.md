@@ -37,6 +37,7 @@
 > - **proto-todo**: T2/T13/T14 RESOLVED, **T15 신설**(Reset 응답 도면 Length=0 자기모순 — 벤더 확인 최우선)
 > - 번역본(opc_vhl_protocol_Rev1.00_KO.md) 전사 오류 12건 정정 — 원본 docx 텍스트+도면 33매 전수 대조(기각 0)
 > - **후속 수정(2026-06-11)**: A13/D2 merge 수정(PR #33) · A14·A17·D9·D10 수정(에러코드 정정 PR) · **D11 기각**(재검증 — booting 시 0x0001 반환, 시나리오 도달 불가) · D12/D13 처리방침 확정(로그인 세션 IP 발신에만 0x0003 NG, 그 외 drop — 사용자 결정)
+> - **후속 수정(2026-06-12~06-15)**: D1/D3/D4/D5/D8 입력값 검증 구현(PR #36) · A19 재송 폐기(PR #37) · D12/D13 프레임 경계 구현(PR #38) · **D7/V1 이벤트성 indication producer 완성** — FaultDetect 폴링(PR #39) + WlanStatus/Roaming/ApDisconnect nl80211(PR #46, ASSOCIATED 채널 #48/#49) · A12 ChangeIp deferred apply drain 내부 이동(PR #44/#51). **본문 D2·D7·V1 항목에 해소 반영(분석기준 커밋 `0128f03` 이후 변경분)**
 
 ---
 
@@ -143,10 +144,10 @@
 
 | # | 항목 | 확인 대상 |
 |---|---|---|
-| V1 | **이벤트성 indication 4종 트리거** | nl80211/드라이버 이벤트 → WlanStatusChange/Roaming/ApDisconnect/FaultDetect 발행 연결 (현재 no-op) |
+| V1 | **이벤트성 indication 4종 트리거** | ✅ producer 구현(FaultDetect 폴링 2026-06-12 · WlanStatus/Roaming/ApDisconnect nl80211 PR #46) — 실타깃 WlanStatus 검증(2026-06-15), Roaming/ApDisconnect는 트리거 환경 잔여(#47) |
 | V2 | **set-radio mode/bw/channel 실드라이버 반영** | 현재 wifi.sh freq만 적용, 나머지 실HW 반영 범위 |
 | V3 | **ChangeIp ESSID/GW/NTP 전환** | wpa_supplicant 재설정 필요 — 현재 eth0 IP/netmask만 적용 |
-| V4 | **스텔스 AP ESSID NULL 처리** | platform `get_essid` 실 NXP 동작 (스텔스 시 빈 문자열 보장?) |
+| V4 | **스텔스 AP ESSID NULL 처리 / logger info.ssid 갭** | ✅ `nxp_get_essid`가 link.json `info.ssid` 부재 시 nl80211 GET_INTERFACE(`NL80211_ATTR_SSID`) 커널 직접조회 fallback (2026-06-16, #48/#49 채널조회 동형) — 실타깃 검증 `essid='FXE3000_JHW'`(logger가 SSID 미기록인데도 정상 출력). 순수 스텔스(빈 SSID) 처리는 별도 |
 | V5 | **11r/ai/k/v capability 비트** | `device_info.json` 정적값 vs 실 silicon 광고 — 📌 고객사 문의 후 확정(2026-06-12 결정, #35 등록) |
 | V6 | **Dual radio WLAN#2/priority_ch 채움** | 실 dual-radio 동작 |
 | V7 | **Protocol Version 협상** | 멀티버전 장치 상호운용 (현재 version 미검증) |
@@ -175,9 +176,10 @@
 - **구현:** list_number 범위·PACKET_SIZE만 검사. **해당 에러코드 상수 자체가 부재.** 잘못된 IP/마스크/ESSID가 OK로 NVRAM 저장
 - **해결:** 에러코드 상수 전체 정의 + IP(0x0011)/Netmask(0x0012)/GW(0x0013)/NTP(0x0014)/ESSID NULL종단(0x0016)/list-size(0x0017) 검증 구현. **잔여:** ESSID 문자 이상(0x0015)은 "문자열로 지정할 수 없는 값"의 정의 부재로 보류(A5 계열). **GW/NTP=0은 '미설정'으로 허용**(사양 문구는 0.0.0.0 불가이나 운용상 선택 필드 — 📌 발주처 확인 예정)
 
-**D2 · 128슬롯 전체 교체 (데이터 소실)** — `handler.c:516,527`
+**D2 · 128슬롯 전체 교체 (데이터 소실)** — `handler.c:516,527`(분석시점) — ✅ 해결(2026-06-11, PR #33 `b92e6f5`)
 - **사양:** "지정 번호 리스트 갱신"(merge). **[보강 2026-06-11]** 원본 도면(image26) 우측 주석도 "지정된 번호의 리스트를 **갱신한다**(更新する)"로 merge 의미를 직접 지지 — A13 답변(전체 교체는 맞지 않다)과 함께 **merge 수정 확정**
-- **구현:** END에서 `ip_list = staging` 전체 대입 → 이번 사이클에 없는 슬롯 `present=0` 소실
+- **구현(분석시점):** END에서 `ip_list = staging` 전체 대입 → 이번 사이클에 없는 슬롯 `present=0` 소실
+- **해결:** START에서 `staging = ip_list`(커밋된 리스트 사본)로 시드 → END 커밋은 지정 슬롯만 갱신, 나머지 보존(`handler.c:674,691`). 회귀 테스트 추가(test 14b, 7 asserts). A13 merge 확정과 일치
 
 **D3 · ESSID NULL종단 미검출 (0x0016)** — `commands.c:26-30` — ✅ 해결(2026-06-12)
 - **사양 §3.3.6:625:** "NULL종단 없으면 NG"
@@ -199,10 +201,12 @@
 - **구현:** 코드 = page-24(START=0x0000, `commands.h:270` "vendor confirmed") — **원본 다수 증거와 일치, 변경 불필요**
 - **조치:** stale했던 proto-todo T2를 RESOLVED(page-24 확정)로 갱신, 번역본에 누락 문장 보완. seed.yaml(page-22 기록)은 이력 문서라 미수정 — 드리프트 해소
 
-**D7 · 이벤트성 indication 4종 발행 경로 없음** — `indication.c`, `platform_nxp.c` — ✅ 부분 해소(2026-06-12, FaultDetect)
+**D7 · 이벤트성 indication 4종 발행 경로 없음** — `indication.c`, `platform_nxp.c` — ✅ 해소(FaultDetect 2026-06-12 · 잔여 3종 producer 2026-06-15 PR #46)
 - **사양 §3.4:** WlanStatusChange/Roaming/ApDisconnect/FaultDetect
-- **구현:** `drain_events` no-op → 실제 트리거 없음. InitComplete/ResetNotice/KeepAlive만 발행
-- **부분 해소:** **FaultDetect(0x0010)는 폴링 폭주 프로브로 발행 경로 구현**(`fault_probe.c`, `opcd_ind_tick`) — **T6 임시 정책(전부 발주처 확인 대기 #35)**: 임계 80%(opc.conf `congestion_*` 키로 가변) · 판별은 indication 보고 주기 · 지속 시 매 주기 재통지 · Current Val 단위 CPU/Disk=%, Network=Mbps · **Memory(0x0002)는 swapless 타깃이라 사양 정의(페이징) 성립 불가 → 미발행, Disk I/O(0x0003)로 일원화**. 잔여 3종(WlanStatusChange/Roaming/ApDisconnect)은 nl80211 연동 필요(V1)
+- **구현(분석시점):** `drain_events` no-op → 실제 트리거 없음. InitComplete/ResetNotice/KeepAlive만 발행
+- **해소 ①(2026-06-12):** **FaultDetect(0x0010)는 폴링 폭주 프로브로 발행 경로 구현**(`fault_probe.c`, `opcd_ind_tick`) — **T6 임시 정책(전부 발주처 확인 대기 #35)**: 임계 80%(opc.conf `congestion_*` 키로 가변) · 판별은 indication 보고 주기 · 지속 시 매 주기 재통지 · Current Val 단위 CPU/Disk=%, Network=Mbps · **Memory(0x0002)는 swapless 타깃이라 사양 정의(페이징) 성립 불가 → 미발행, Disk I/O(0x0003)로 일원화**
+- **해소 ②(2026-06-15, PR #46):** 잔여 3종(WlanStatusChange/Roaming/ApDisconnect) producer를 `nxp_drain_events`에 raw nl80211(CONNECT/DISCONNECT/ROAM 이벤트) 연동으로 구현 — `drain_events` no-op 해제. ASSOCIATED 채널 누락은 커널 `GET_INTERFACE` 동기 조회로 보강(PR #48/#49)
+- **실타깃 검증(2026-06-15 · 와이어 캡처 2026-06-16, 타깃 214.5 cts-wlan):** WlanStatusChange(CONNECT/DISCONNECT)를 `wpa_cli -i mlan0 disconnect/reconnect`로 end-to-end 포착 — 캡처값 **DISCONNECTED `wlan_status=0x0002, ch=0x0000` / CONNECTED `wlan_status=0x0001, ch=0x0230`(5G band|ch48), 양자 Length=60**(헤더 규칙 일치). CONNECTED의 정확한 채널값은 **ASSOCIATED 채널 보강(#48/#49) race 해소도 실증**. 상세: `tmp/device_test_192.168.214.5_20260616_v1_wlanstatus_e2e.md`. **Roaming·ApDisconnect는 미검증** — ApDisconnect는 AP-주도 deauth(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행되어 로컬 트리거 불가, Roaming은 핸드오버 환경 필요(→ #47 항목1 잔여)
 
 **D8 · SetRadio 주파수/CH 값 검증 없음** — `handler.c:609-655` — ✅ 부분 해결(2026-06-12)
 - **사양 §3.3.8:** 0x0011(주파수)/0x0012(CH)
@@ -265,12 +269,12 @@
    - 권장: 에러코드 상수 정의 + 값 검증 추가 (또는 "검증 생략"을 사양/문서에 명시)
 2. **D6 — List Boundary Flag 드리프트** — ✅ **해소(2026-06-11)**
    - 원본 재확인에서 번역 누락 문장 발견(원본 2/3 언급이 START=0x0000 지지) → proto-todo **T2 RESOLVED**(page-24 확정), 코드 변경 불필요
-3. **D2 — IP 리스트 부분갱신 불가**
+3. **D2 — IP 리스트 부분갱신 불가** — ✅ **해소(2026-06-11, PR #33)**
    - 영향: 한 번에 안 보낸 슬롯 소실 (merge가 아닌 전체교체)
-   - 권장: 사양 "갱신/교체" 양가(A13) 벤더 확정 후 merge/replace 결정
-4. **D7 — 이벤트성 indication 미발행**
+   - 조치: A13 merge 확정 → START에서 커밋 리스트로 staging 시드, END는 지정 슬롯만 갱신 (회귀 test 14b)
+4. **D7 — 이벤트성 indication 미발행** — ✅ **해소(FaultDetect 2026-06-12 · 3종 nl80211 producer 2026-06-15 PR #46)**
    - 영향: 상태변화 통지가 실제로 안 나감
-   - 권장: 드라이버 이벤트 → indication 발행 연결 (V1)
+   - 조치: `nxp_drain_events`에 nl80211 producer 연동 — 실타깃 WlanStatus 검증, Roaming/ApDisconnect 트리거 환경 잔여(#47)
 5. **D8·D9·D10·D11 — 에러코드 불일치**
    - 영향: 사양 미정의 0x0050, 0x0010 오용, booting 코드 오류
    - 권장: 명령별 에러코드를 사양값으로 정정

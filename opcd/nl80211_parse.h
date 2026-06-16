@@ -40,6 +40,8 @@ typedef struct opcd_nl_evt {
     uint16_t reason_code;   /* NL80211_ATTR_REASON_CODE (DISCONNECT)       */
     uint16_t status_code;   /* NL80211_ATTR_STATUS_CODE (CONNECT)          */
     bool     by_ap;         /* NL80211_ATTR_DISCONNECTED_BY_AP (DISCONNECT) */
+    char     ssid[33];      /* NL80211_ATTR_SSID, NUL-terminated; "" if absent (max 32B) */
+    bool     ssid_present;
 } opcd_nl_evt_t;
 
 /*

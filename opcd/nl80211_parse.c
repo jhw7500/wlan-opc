@@ -35,6 +35,7 @@
 #define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
 #define NL80211_ATTR_DISCONNECTED_BY_AP 71  /* NLA_FLAG: zero-length, presence=true */
+#define NL80211_ATTR_SSID        52
 
 /* genl CTRL (GENL_ID_CTRL=16) family-resolution constants. ABI-stable —
  * hardcoded for the same header-portability reason as the nl80211 ids. */
@@ -171,6 +172,16 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
         case NL80211_ATTR_DISCONNECTED_BY_AP:
             /* NLA_FLAG: a zero-length attr whose mere presence means true. */
             out->by_ap = true;
+            break;
+        case NL80211_ATTR_SSID:
+            /* SSID on the wire is length-delimited (no NUL). Copy up to the
+             * NL80211 max (32B) and NUL-terminate; oversized or empty → ignore
+             * (leaves ssid_present false, ssid ""). */
+            if (pl_len > 0 && pl_len <= 32) {
+                memcpy(out->ssid, pl, pl_len);
+                out->ssid[pl_len] = '\0';
+                out->ssid_present = true;
+            }
             break;
         default:
             break;
