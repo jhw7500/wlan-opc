@@ -248,7 +248,7 @@
 > 사양과 다르지만 proto-todo / SECURITY.md / 코드 주석에 **결정 또는 알려진 한계로 기록**됨.
 
 - **START_END(0x0003) 원자커밋 제거** — page-22의 단일프레임 커밋 미지원. 근거: `commands.h:267` 주석(page-24 채택, START→END 분리 송신 요구)
-- **ResetNotice 자율리셋 트리거 부재** — 사양은 "자율 리셋 전 통지", 코드는 operator Reset 경로만. 근거: proto-todo **T9**(watchdog 미연동)
+- **ResetNotice 자율리셋 트리거 부재** — 사양 §3.4.6은 "자율 리셋 전 통지"만 규정하고 **무엇이 자율리셋을 트리거하는지 미정의**. 코드는 operator Reset 경로만. **📌 발주처 확인 대기 등록(2026-06-16, #35 항목 5)** — producer 배관(emitter/`OPCD_PEVT_RESET_NOTICE`/consumer)은 완비, 트리거 정책(자원 폭주 지속 / watchdog 타임아웃 / 임계·주기)과 신규 reset cause 값(현 `OPC_RESET_CAUSE_USER=0x01`만) 확정 시 producer만 추가. 근거: proto-todo T9
 - **패스워드 평문 저장** — 사양 침묵, 평문(mode 0600). **확정(2026-06-12 사용자 결정): 평문 유지 종결** — 와이어 자체가 평문 UDP라 at-rest 해시는 실익 제한 (proto-todo T4 RESOLVED). 근거: SECURITY.md
 - **기본 비밀번호 `MyPassword` 노출** — 사양 위반 조항은 없음 → 엄밀히는 "보안 위험"이지 deviation 아님. 근거: SECURITY.md(운영 최초 변경 필수)
 - **세션 UDP 소스 IP-only 식별** — 스푸핑 가능. 근거: SECURITY.md SEC-001(신뢰망 전제)
