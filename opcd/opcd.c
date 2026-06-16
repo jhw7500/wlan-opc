@@ -458,6 +458,20 @@ int main(int argc, char **argv)
                     } else {
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
                     }
+
+                    /* If the datagram just handled was a Logout that committed
+                     * a ChangeIp, stop draining: applying the change (below)
+                     * reconfigures eth0, so any datagrams already queued for the
+                     * old address must NOT be processed as post-change traffic
+                     * on the new IP (a queued Login could otherwise re-take the
+                     * session with a reply the client never sees). They resurface
+                     * on the next epoll cycle. Breaking here also closes the
+                     * same-drain interleaving window and removes the flood-induced
+                     * apply delay — the change no longer waits for the socket to
+                     * reach EAGAIN. The Logout ack was already sent above, so A12
+                     * (apply only after the ack is on the wire) still holds. */
+                    if (st.ip_change_commit_armed)
+                        break;
                 }
             }
         }
