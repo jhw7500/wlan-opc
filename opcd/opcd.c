@@ -459,6 +459,13 @@ int main(int argc, char **argv)
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
                     }
 
+                    /* D9: a SetRadioConfig that failed to apply armed a deferred
+                     * best-effort revert to the last-good config. Run it now —
+                     * AFTER the NG ack was sent above — so the failure response
+                     * is never delayed by the (possibly timing-out) recovery
+                     * apply. No-op unless armed. */
+                    opcd_radio_revert_drain(&st);
+
                     /* If the datagram just handled was a Logout that committed
                      * a ChangeIp, stop draining: applying the change (below)
                      * reconfigures eth0, so any datagrams already queued for the

@@ -43,6 +43,11 @@ extern uint32_t stub_apply_ip_last_ip(void);
 extern void     stub_apply_ip_reset(void);
 extern void     stub_apply_ip_set_fail(int fail);
 extern void     stub_apply_radio_set_fail(int fail);
+extern void     stub_apply_radio_set_fail_once(int fail);
+extern int      stub_apply_radio_calls(void);
+extern void     stub_apply_radio_reset_calls(void);
+extern int      stub_apply_radio_last_w1_freq(void);
+extern int      stub_apply_radio_last_station(void);
 
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
@@ -252,6 +257,40 @@ static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
     req.wlan1.bandwidth = OPC_BANDWIDTH_20;
     req.wlan1.freq_mhz  = freq;
     req.wlan1.channel   = ch;
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_radio_config_ack_t ack;
+    if (opc_set_radio_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_radio_err = ack.error_cause;
+    return ack.result;
+}
+
+/* DUAL variant: pack a SetRadioConfig with station_type=DUAL and valid WLAN#1
+ * + WLAN#2 configs (both 11AX/20MHz), so the apply-failure revert's full-DUAL
+ * config hand-off is verifiable (D9 M2, test 24e). */
+static uint16_t do_set_radio_dual(opcd_state_t *st, uint32_t cip,
+                                  uint16_t f1, uint16_t ch1,
+                                  uint16_t f2, uint16_t ch2)
+{
+    opc_set_radio_config_req_t req;
+    memset(&req, 0, sizeof req);
+    req.station_type    = OPC_STATION_DUAL;
+    req.wlan1.mode      = OPC_WLAN_MODE_11AX;
+    req.wlan1.bandwidth = OPC_BANDWIDTH_20;
+    req.wlan1.freq_mhz  = f1;
+    req.wlan1.channel   = ch1;
+    req.wlan2.mode      = OPC_WLAN_MODE_11AX;
+    req.wlan2.bandwidth = OPC_BANDWIDTH_20;
+    req.wlan2.freq_mhz  = f2;
+    req.wlan2.channel   = ch2;
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
@@ -705,11 +744,25 @@ int main(void)
     ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
            "D10: broadcast recipient → 0x0012");
 
-    /* 14f. D9: platform apply refusal → frequency NG 0x0011 (0x0050 removed). */
+    /* 14f. D9: platform apply refusal → dedicated apply-failure 0x0050
+     *      (re-decided 2026-06-16; was 0x0011, but a runtime fault must not be
+     *      reported as a bad-frequency input). The revert is DEFERRED: dispatch
+     *      does ONE apply and arms the revert; the main loop (here: an explicit
+     *      drain) runs it after the ack. */
     stub_apply_radio_set_fail(1);
+    stub_apply_radio_reset_calls();
     r = do_set_radio(&st, CIP, 0, 0);
-    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
-           "D9: apply refusal → NG 0x0011");
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+           "D9: apply refusal → NG 0x0050");
+    ASSERT(stub_apply_radio_calls() == 1,
+           "D9: dispatch does a single apply (revert is deferred, not synchronous)");
+    ASSERT(st.radio_revert_pending,
+           "D9: apply failure arms the deferred last-good revert");
+    /* Drain as the main loop would; full-fail makes the revert fail too →
+     * exercises the deferred double-failure log path (the one intentional case). */
+    opcd_radio_revert_drain(&st);
+    ASSERT(stub_apply_radio_calls() == 2 && !st.radio_revert_pending,
+           "D9: main-loop drain runs the revert and clears the pending flag");
     stub_apply_radio_set_fail(0);
     r = do_set_radio(&st, CIP, 0, 0);
     ASSERT(r == OPC_RESULT_OK, "D9: apply ok once fail toggle cleared");
@@ -1297,8 +1350,10 @@ int main(void)
      * The nxp fork/execl/timeout code path and journal output are excluded from
      * this change set (#13 covers those). */
 
-    /* 24a. apply failure (-EPROTO) → Result=NG + error_cause=0x0011 (OPC_ERR_RADIO_FREQ).
-     *      handler.c maps every non-zero apply_radio_config return to 0x0011 (D9). */
+    /* 24a. apply failure (-EPROTO) → Result=NG + error_cause=0x0050
+     *      (OPC_ERR_RADIO_APPLY). handler.c maps every non-zero
+     *      apply_radio_config return to the dedicated apply-failure code (D9,
+     *      re-decided 2026-06-16). */
     {
         opcd_state_t st24;
         init_state(&st24, OPC_PASSWORD_DEFAULT);
@@ -1309,11 +1364,11 @@ int main(void)
         unsetenv("OPCD_STUB_APPLY_RADIO_RC");
         ASSERT(r24 == OPC_RESULT_NG,
                "issue#12-24a: apply -EPROTO → Result NG");
-        ASSERT(g_last_radio_err == OPC_ERR_RADIO_FREQ,
-               "issue#12-24a: apply -EPROTO → error_cause 0x0011");
+        ASSERT(g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24a: apply -EPROTO → error_cause 0x0050");
     }
 
-    /* 24b. apply failure (-ETIMEDOUT) → same NG + 0x0011 mapping. */
+    /* 24b. apply failure (-ETIMEDOUT) → same NG + 0x0050 mapping. */
     {
         opcd_state_t st24b;
         init_state(&st24b, OPC_PASSWORD_DEFAULT);
@@ -1323,13 +1378,14 @@ int main(void)
         unsetenv("OPCD_STUB_APPLY_RADIO_RC");
         ASSERT(r24b == OPC_RESULT_NG,
                "issue#12-24b: apply -ETIMEDOUT → Result NG");
-        ASSERT(g_last_radio_err == OPC_ERR_RADIO_FREQ,
-               "issue#12-24b: apply -ETIMEDOUT → error_cause 0x0011");
+        ASSERT(g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24b: apply -ETIMEDOUT → error_cause 0x0050");
     }
 
-    /* 24c. state preservation: after apply failure the in-memory radio config
-     *      must retain the previous (pre-failure) settings, not the rejected
-     *      request values (handler.c only writes st->radio on success). */
+    /* 24c. state preservation + DEFERRED revert: after an apply failure the
+     *      in-memory radio config retains the previous settings, and the revert
+     *      is ARMED (run later by the main loop), NOT performed synchronously —
+     *      so dispatch does a single apply and the NG ack is not delayed. */
     {
         opcd_state_t st24c;
         init_state(&st24c, OPC_PASSWORD_DEFAULT);
@@ -1340,15 +1396,34 @@ int main(void)
         uint16_t saved_freq = st24c.radio.wlan1.freq_mhz;
         uint16_t saved_ch   = st24c.radio.wlan1.channel;
 
-        /* Inject failure and submit a different config. */
-        setenv("OPCD_STUB_APPLY_RADIO_RC", "-71", 1);
+        /* Inject a single apply failure and submit a different config. Reset the
+         * counter after priming so it measures only the failing Set-Radio. */
+        stub_apply_radio_reset_calls();
+        stub_apply_radio_set_fail_once(1);
         (void)do_set_radio(&st24c, CIP, 5180, 36);
-        unsetenv("OPCD_STUB_APPLY_RADIO_RC");
 
         ASSERT(st24c.radio.wlan1.freq_mhz == saved_freq,
                "issue#12-24c: apply failure preserves previous freq_mhz");
         ASSERT(st24c.radio.wlan1.channel == saved_ch,
                "issue#12-24c: apply failure preserves previous channel");
+        /* Dispatch did exactly ONE apply (the failing one) — the revert is
+         * deferred, so the NG response is never delayed by a second apply. */
+        ASSERT(stub_apply_radio_calls() == 1,
+               "issue#12-24c: dispatch does a single apply (revert deferred)");
+        ASSERT(st24c.radio_revert_pending,
+               "issue#12-24c: apply failure arms the deferred last-good revert");
+        ASSERT(st24c.radio_revert_cfg.wlan1.freq_mhz == saved_freq,
+               "issue#12-24c: armed revert carries the previous config (2412)");
+
+        /* Main loop drains the revert AFTER the ack: re-applies the last-good
+         * config (2412), then clears the pending flag. */
+        opcd_radio_revert_drain(&st24c);
+        ASSERT(stub_apply_radio_calls() == 2,
+               "issue#12-24c: drain runs the deferred revert (2nd apply)");
+        ASSERT(stub_apply_radio_last_w1_freq() == (int)saved_freq,
+               "issue#12-24c: deferred revert re-applies the previous config (2412)");
+        ASSERT(!st24c.radio_revert_pending,
+               "issue#12-24c: drain clears the pending flag");
     }
 
     /* 24d. success-path regression (env var cleared): apply succeeds, Result=OK. */
@@ -1363,6 +1438,86 @@ int main(void)
                "issue#12-24d: no injection → apply succeeds → Result OK");
         ASSERT(st24d.radio.wlan1.freq_mhz == 5180,
                "issue#12-24d: success updates in-memory radio state");
+    }
+
+    /* 24e. M2: DUAL deferred revert hands the FULL DUAL last-good config back to
+     *      the platform — the headline "DUAL partial-apply reconverges" claim,
+     *      proven at the handler/stub boundary (the per-interface nxp reconverge
+     *      itself is cross-only / on-target). */
+    {
+        opcd_state_t st24e;
+        init_state(&st24e, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24e, CIP, OPC_PASSWORD_DEFAULT);
+        /* Prime a DUAL good config (both interfaces). */
+        uint16_t pr = do_set_radio_dual(&st24e, CIP, 2412, 1, 5180, 36);
+        ASSERT(pr == OPC_RESULT_OK, "issue#12-24e: DUAL prime succeeds");
+        uint16_t saved_f1 = st24e.radio.wlan1.freq_mhz;
+
+        /* Inject a single apply failure; the deferred revert then succeeds. */
+        stub_apply_radio_reset_calls();
+        stub_apply_radio_set_fail_once(1);
+        uint16_t r = do_set_radio_dual(&st24e, CIP, 2437, 6, 5200, 40);
+
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24e: DUAL apply failure → NG 0x0050");
+        ASSERT(stub_apply_radio_calls() == 1,
+               "issue#12-24e: dispatch does a single apply (revert deferred)");
+        ASSERT(st24e.radio_revert_pending &&
+               st24e.radio_revert_cfg.station_type == OPC_STATION_DUAL,
+               "issue#12-24e: armed revert carries the full DUAL config (station_type)");
+
+        opcd_radio_revert_drain(&st24e);
+        ASSERT(stub_apply_radio_calls() == 2,
+               "issue#12-24e: drain runs the deferred DUAL revert");
+        ASSERT(stub_apply_radio_last_station() == OPC_STATION_DUAL,
+               "issue#12-24e: deferred revert hands back DUAL station_type");
+        ASSERT(stub_apply_radio_last_w1_freq() == (int)saved_f1,
+               "issue#12-24e: deferred revert re-applies previous DUAL wlan1 freq (2412)");
+        ASSERT(!st24e.radio_revert_pending,
+               "issue#12-24e: drain clears the pending flag");
+    }
+
+    /* 24f. L2: a *successful* deferred revert still yields NG 0x0050 — guards
+     *      against a future reorder letting the revert's OK overwrite the NG. */
+    {
+        opcd_state_t st24f;
+        init_state(&st24f, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24f, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_radio(&st24f, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+
+        stub_apply_radio_reset_calls();
+        stub_apply_radio_set_fail_once(1);   /* real apply fails, deferred revert succeeds */
+        uint16_t r = do_set_radio(&st24f, CIP, 5180, 36);
+
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24f: apply failure → NG 0x0050 (response set before any revert)");
+        ASSERT(st24f.radio_revert_pending && stub_apply_radio_calls() == 1,
+               "issue#12-24f: dispatch armed the revert with a single apply");
+        opcd_radio_revert_drain(&st24f);
+        ASSERT(stub_apply_radio_calls() == 2 && !st24f.radio_revert_pending,
+               "issue#12-24f: deferred revert ran (succeeded) and cleared — response stays NG");
+    }
+
+    /* 24g. should_revert guard (Gemini review): when the failing request equals
+     *      the committed config there is nothing to undo, so no revert is armed —
+     *      avoids a pointless re-apply and a misleading "revert failed" log. */
+    {
+        opcd_state_t st24g;
+        init_state(&st24g, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st24g, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_radio(&st24g, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+
+        stub_apply_radio_reset_calls();
+        stub_apply_radio_set_fail_once(1);
+        /* Resubmit the identical config; apply fails but nothing changed. */
+        uint16_t r = do_set_radio(&st24g, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
+               "issue#12-24g: identical-config apply failure still → NG 0x0050");
+        ASSERT(!st24g.radio_revert_pending,
+               "issue#12-24g: identical config → no revert armed (nothing to undo)");
+        ASSERT(stub_apply_radio_calls() == 1,
+               "issue#12-24g: identical config → no second apply scheduled");
     }
 
     unlink(g_pw_path);

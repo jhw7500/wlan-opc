@@ -799,6 +799,30 @@ static bool valid_radio_channel(uint16_t ch)
     return band == 0 || band == OPC_BAND_2_4GHZ || band == OPC_BAND_5GHZ;
 }
 
+/* True iff two radio requests would apply differently. Used to decide whether an
+ * apply failure leaves anything to revert (D9): if the request equals the
+ * committed config, the failed apply changed nothing, so no revert is armed.
+ * WLAN#2 / priority_ch are compared only for DUAL — SINGLE ignores them and the
+ * wire may carry don't-care bytes there. */
+static bool radio_cfg_differs(const opc_set_radio_config_req_t *a,
+                              const opc_set_radio_config_req_t *b)
+{
+    if (a->station_type    != b->station_type    ||
+        a->wlan1.freq_mhz  != b->wlan1.freq_mhz  ||
+        a->wlan1.channel   != b->wlan1.channel   ||
+        a->wlan1.mode      != b->wlan1.mode      ||
+        a->wlan1.bandwidth != b->wlan1.bandwidth)
+        return true;
+    if (a->station_type == OPC_STATION_DUAL &&
+        (a->priority_ch     != b->priority_ch     ||
+         a->wlan2.freq_mhz  != b->wlan2.freq_mhz  ||
+         a->wlan2.channel   != b->wlan2.channel   ||
+         a->wlan2.mode      != b->wlan2.mode      ||
+         a->wlan2.bandwidth != b->wlan2.bandwidth))
+        return true;
+    return false;
+}
+
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
@@ -839,11 +863,28 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 abort();
             }
             if (plat->apply_radio_config(&req) != 0) {
-                /* regulation-class NG — platform refused the kernel change.
-                 * Reported as 0x0011 (frequency NG): the spec defines no
-                 * apply-failure code and the apply step is the frequency
-                 * change (D9, decided 2026-06-11). */
-                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_FREQ;
+                /* Platform refused/failed the kernel change. Arm a best-effort
+                 * revert to the last-good config so a partial apply (e.g. DUAL:
+                 * mlan0 applied, mlan1 failed) cannot leave the device's
+                 * wpa_supplicant confs diverged — "apply fails ⇒ no net change"
+                 * (user decision 2026-06-16). The revert is DEFERRED: the main
+                 * loop runs it (opcd_radio_revert_drain) AFTER this NG ack is
+                 * sent, so the failure response is never delayed by a second
+                 * (possibly timing-out) apply that would blow the 1s budget on a
+                 * DUAL timeout (PR #53 review). st->radio is still the committed
+                 * pre-change config here (only the success branch below writes
+                 * it), so it IS the setting to restore. Skip arming when the
+                 * request equals the committed config — nothing changed, so there
+                 * is nothing to undo (and no misleading "revert failed" log).
+                 * Error cause: dedicated apply-failure 0x0050, NOT 0x0011 — the
+                 * frequency value was valid (it passed the D8 check above); this
+                 * is a runtime fault, so the operator must not be told to change
+                 * it (D9 re-decided 2026-06-16; 0x0050 pending 발주처 confirm). */
+                if (radio_cfg_differs(&req, &st->radio)) {
+                    st->radio_revert_pending = true;
+                    st->radio_revert_cfg     = st->radio;
+                }
+                result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
             } else {
                 st->radio = req;
                 bool deferred = false;
@@ -861,6 +902,26 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
     opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
     emit_ack(rlen, opc_set_radio_config_ack_pack(resp, rcap, seq, &ack));
     return 0;
+}
+
+void opcd_radio_revert_drain(opcd_state_t *st)
+{
+    if (!st->radio_revert_pending) return;
+    st->radio_revert_pending = false;
+    const opcd_platform_ops_t *plat = opcd_platform();
+    /* Unreachable when a revert is armed (an armed revert means an apply just
+     * failed, which requires a platform), but bail defensively rather than
+     * deref NULL. */
+    if (!plat) return;
+    /* Re-apply the last-good config the SetRadioConfig handler captured on its
+     * apply failure. Best-effort and off the response path (main loop, post-ack)
+     * — the client already has its NG. A still-failing revert means the device
+     * may be left in a partial apply state, so surface it for triage. */
+    if (plat->apply_radio_config(&st->radio_revert_cfg) != 0) {
+        fprintf(stderr, "opcd: set_radio: deferred best-effort revert to "
+                        "last-good config FAILED — device may be in a partial "
+                        "apply state\n");
+    }
 }
 
 static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
