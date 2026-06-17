@@ -54,12 +54,15 @@
 #define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
 #define MLAN0_LINK_JSON  "/var/log/cantops/json/mlan0/link.json"
 #define MLAN1_LINK_JSON  "/var/log/cantops/json/mlan1/link.json"
-#define WIFI_SH          "/usr/local/scripts/wifi.sh"
 /* platform.h requires a bounded short timeout for apply_radio_config.
  * Budget 900 ms (not 1000) leaves ~100 ms slack for inter-call overhead
  * in DUAL mode (per-call timeout = TIMEOUT_MS/2 = 450 ms × 2 = 900 ms). */
 #define WIFI_SH_TIMEOUT_MS 900
 #define WIFI_SH_POLL_MS    10
+#define OPC_WLAN_APPLY_SH        "/usr/local/scripts/opc_wlan_apply.sh"
+/* 모든 단계(set_network/save_config/reassociate)가 wpa_cli OK 수신까지만(ms급)이라
+ * 현 freq 동기 호출과 동일 예산으로 충분. reassociate 는 트리거만(연결 완료 대기 X). */
+#define OPC_WLAN_APPLY_TIMEOUT_MS 900
 
 /* ChangeIpAddress replaces eth0's management IP at runtime via `ip addr`.
  * Verified on-target: systemd-networkd does NOT revert the change (a .network
@@ -795,19 +798,30 @@ static int run_argv_bounded(const char *label, const char *path,
     return 0;
 }
 
-/* Run "wifi.sh <iface> freq <mhz>" synchronously. wifi.sh only rewrites
- * scan_freq= / freq_list= in wpa_supplicant-<iface>.conf — fast (~ms) and
- * comfortably within the OPC 1-second response budget. wpa_supplicant
- * restart is intentionally NOT triggered here so the active link is not
- * dropped on every Set-Radio; the operator triggers reconnect explicitly. */
-static int run_wifi_sh_freq(const char *iface, uint16_t freq_mhz, long timeout_ms)
+/* Run "opc_wlan_apply.sh <iface> [freq <mhz>] [ssid <name>]" synchronously.
+ * Builds argv from the non-empty fields; freq_mhz==0 omits freq, ssid==NULL/""
+ * omits ssid. The script does set_network -> save_config -> reassociate (trigger
+ * only). All steps are wpa_cli round-trips (ms), so the bounded sync call stays
+ * within budget. freq_buf lives on this frame for the duration of the call. */
+static int run_opc_wlan_apply(const char *iface, uint16_t freq_mhz,
+                              const char *ssid, long timeout_ms)
 {
     char freq_buf[8];
-    snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
-    /* const char *[] + cast: execv never writes argv, and string literals must
-     * not be exposed as char* (C11 6.4.5p7). */
-    const char *argv[] = { "wifi.sh", iface, "freq", freq_buf, NULL };
-    return run_argv_bounded("nxp_apply_radio_config", WIFI_SH,
+    const char *argv[8];
+    int n = 0;
+    argv[n++] = "opc_wlan_apply.sh";
+    argv[n++] = iface;
+    if (freq_mhz != 0) {
+        snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
+        argv[n++] = "freq";
+        argv[n++] = freq_buf;
+    }
+    if (ssid && ssid[0] != '\0') {
+        argv[n++] = "ssid";
+        argv[n++] = ssid;
+    }
+    argv[n] = NULL;
+    return run_argv_bounded("opc_wlan_apply", OPC_WLAN_APPLY_SH,
                             (char *const *)argv, timeout_ms);
 }
 
@@ -842,7 +856,7 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
      * wpa_supplicant.conf untouched. Mode / bandwidth mapping is deferred to
      * a follow-up PR; this PR only wires the wpa_supplicant freq list. */
     if (cfg->wlan1.freq_mhz != 0) {
-        int rc = run_wifi_sh_freq("mlan0", cfg->wlan1.freq_mhz, per_call_ms);
+        int rc = run_opc_wlan_apply("mlan0", cfg->wlan1.freq_mhz, NULL, per_call_ms);
         if (rc != 0) return rc;
     }
     if (cfg->station_type == OPC_STATION_DUAL && cfg->wlan2.freq_mhz != 0) {
@@ -863,7 +877,7 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
          * so the confs reconverge to the pre-change state ("apply fails ⇒ no net
          * change") without the failure ack waiting on a second apply. End-to-end
          * idempotency across reconnect remains the reconnect PR's job. */
-        int rc = run_wifi_sh_freq("mlan1", cfg->wlan2.freq_mhz, per_call_ms);
+        int rc = run_opc_wlan_apply("mlan1", cfg->wlan2.freq_mhz, NULL, per_call_ms);
         if (rc != 0) return rc;
     }
     return 0;
@@ -942,6 +956,20 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
                                (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
     fprintf(stderr, "opcd: nxp_apply_ip_change: eth0 → %s/%d%s\n", ipbuf, prefix,
             ret == 0 ? " (ip addr)" : " (FAILED)");
+
+    /* essid (비휘발): IP/netmask(휘발) 와 독립. 슬롯에 essid 가 있으면 wpa_cli 로
+     * 런타임 변경 + save_config 영속. DUAL 은 mlan0(관리)을 대상으로 한다.
+     * best-effort: essid apply 실패는 로그만 — IP 적용 결과(ret)를 반환한다.
+     * (재연결 결과는 WlanStatusChange indication 이 통지하므로 silent 아님.)
+     * slot->essid 는 0x0016 으로 NUL 종단 검증됨이나 방어적으로 bound copy 한다. */
+    if (slot->essid[0] != '\0') {
+        char essid_buf[OPC_ESSID_FIELD_LEN + 1];
+        snprintf(essid_buf, sizeof essid_buf, "%.*s",
+                 (int)sizeof slot->essid, slot->essid);
+        int erc = run_opc_wlan_apply("mlan0", 0, essid_buf, OPC_WLAN_APPLY_TIMEOUT_MS);
+        fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply%s\n",
+                essid_buf, erc == 0 ? " (wpa_cli)" : " FAILED");
+    }
     return ret;
 }
 
