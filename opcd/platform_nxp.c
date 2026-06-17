@@ -54,15 +54,14 @@
 #define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
 #define MLAN0_LINK_JSON  "/var/log/cantops/json/mlan0/link.json"
 #define MLAN1_LINK_JSON  "/var/log/cantops/json/mlan1/link.json"
-/* platform.h requires a bounded short timeout for apply_radio_config.
- * Budget 900 ms (not 1000) leaves ~100 ms slack for inter-call overhead
- * in DUAL mode (per-call timeout = TIMEOUT_MS/2 = 450 ms × 2 = 900 ms). */
-#define WIFI_SH_TIMEOUT_MS 900
-#define WIFI_SH_POLL_MS    10
-#define OPC_WLAN_APPLY_SH        "/usr/local/scripts/opc_wlan_apply.sh"
-/* 모든 단계(set_network/save_config/reassociate)가 wpa_cli OK 수신까지만(ms급)이라
- * 현 freq 동기 호출과 동일 예산으로 충분. reassociate 는 트리거만(연결 완료 대기 X). */
+/* Shared timeout budget for opc_wlan_apply.sh calls (freq and essid paths).
+ * 900 ms (not 1000) leaves ~100 ms slack for inter-call overhead in DUAL mode
+ * (per-call timeout = OPC_WLAN_APPLY_TIMEOUT_MS/2 = 450 ms × 2 = 900 ms total).
+ * All stages (set_network/save_config/reassociate) complete on wpa_cli OK in
+ * ms; reassociate only triggers reconnect — it does not await association. */
 #define OPC_WLAN_APPLY_TIMEOUT_MS 900
+#define OPC_WLAN_APPLY_POLL_MS    10
+#define OPC_WLAN_APPLY_SH        "/usr/local/scripts/opc_wlan_apply.sh"
 
 /* ChangeIpAddress replaces eth0's management IP at runtime via `ip addr`.
  * Verified on-target: systemd-networkd does NOT revert the change (a .network
@@ -786,7 +785,7 @@ static int run_argv_bounded(const char *label, const char *path,
         /* Cap the sleep so the last poll never overruns the deadline.
          * Without this, child can live up to timeout_ms + POLL_MS. */
         long remain_ms = timeout_ms - elapsed_ms;
-        long sleep_ms  = (remain_ms < WIFI_SH_POLL_MS) ? remain_ms : WIFI_SH_POLL_MS;
+        long sleep_ms  = (remain_ms < OPC_WLAN_APPLY_POLL_MS) ? remain_ms : OPC_WLAN_APPLY_POLL_MS;
         struct timespec ts = { .tv_sec = 0, .tv_nsec = sleep_ms * 1000L * 1000L };
         nanosleep(&ts, NULL);
     }
@@ -806,6 +805,8 @@ static int run_argv_bounded(const char *label, const char *path,
 static int run_opc_wlan_apply(const char *iface, uint16_t freq_mhz,
                               const char *ssid, long timeout_ms)
 {
+    if (freq_mhz == 0 && (!ssid || ssid[0] == '\0'))
+        return -EINVAL;
     char freq_buf[8];
     const char *argv[8];
     int n = 0;
@@ -849,8 +850,8 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
     /* Share the 1s regulation budget across both apply calls in DUAL so the
      * worst-case wall-clock stays within platform.h's contract. */
     const long per_call_ms = (cfg->station_type == OPC_STATION_DUAL)
-                             ? WIFI_SH_TIMEOUT_MS / 2
-                             : WIFI_SH_TIMEOUT_MS;
+                             ? OPC_WLAN_APPLY_TIMEOUT_MS / 2
+                             : OPC_WLAN_APPLY_TIMEOUT_MS;
 
     /* freq_mhz == 0 means "no association" per OPC spec — skip apply, leave
      * wpa_supplicant.conf untouched. Mode / bandwidth mapping is deferred to
@@ -957,11 +958,11 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
     fprintf(stderr, "opcd: nxp_apply_ip_change: eth0 → %s/%d%s\n", ipbuf, prefix,
             ret == 0 ? " (ip addr)" : " (FAILED)");
 
-    /* essid (비휘발): IP/netmask(휘발) 와 독립. 슬롯에 essid 가 있으면 wpa_cli 로
-     * 런타임 변경 + save_config 영속. DUAL 은 mlan0(관리)을 대상으로 한다.
-     * best-effort: essid apply 실패는 로그만 — IP 적용 결과(ret)를 반환한다.
-     * (재연결 결과는 WlanStatusChange indication 이 통지하므로 silent 아님.)
-     * slot->essid 는 0x0016 으로 NUL 종단 검증됨이나 방어적으로 bound copy 한다. */
+    /* essid is best-effort: a failure is logged but does NOT override the IP result
+     * (unlike freq apply, which is fatal). Reconnect outcome is reported separately
+     * via the WlanStatusChange indication. essid is non-volatile (save_config).
+     * DUAL targets mlan0 (the management interface). slot->essid is NUL-terminated
+     * by the 0x0016 handler, but we bound-copy defensively anyway. */
     if (slot->essid[0] != '\0') {
         char essid_buf[OPC_ESSID_FIELD_LEN + 1];
         snprintf(essid_buf, sizeof essid_buf, "%.*s",
