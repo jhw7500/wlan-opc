@@ -9,13 +9,13 @@
 ## ① 자율 구현 가능 (외부 대기 없음)
 
 ### 1.1 SetRadio mode/bw/channel 실드라이버 미반영 — V2/V12 · partial-impl · **L**
-- **현황**: `nxp_apply_radio_config`가 **freq만** `run_wifi_sh_freq`로 wpa_supplicant에 반영. mode(11n/ac/ax)·bandwidth(20/40/80/160)·channel은 **stderr 로깅만** 하고 드라이버 미반영. wpa_supplicant 재시작도 안 해 다음 reconnect까지 채널 전환 지연.
+- **현황(2026-06-17 갱신, #56)**: `nxp_apply_radio_config`가 **freq만** `run_opc_wlan_apply`(opc_wlan_apply.sh — wpa_cli `set_network freq_list/scan_freq` → `save_config` → `reassociate`)로 **런타임 적용**(실타겟 검증). mode(11n/ac/ax)·bandwidth(20/40/80/160)·channel은 **stderr 로깅만** 하고 드라이버 미반영(잔존). reassociate 로 즉시 적용되어 conf-rewrite(wifi.sh) 시절의 reconnect 지연은 해소.
 - **파일**: `platform_nxp.c:811-864` (주석 839-840 "Mode / bandwidth mapping is deferred to a follow-up PR"), `:795-809`
 - **막힘**: `wifi.sh`가 mode/bw 서브커맨드 미지원 → 드라이버 매핑 + wifi.sh 확장 + reconnect 트리거 설계 필요
 - **부수**: DUAL에서 mlan0 성공·mlan1 실패 시 멱등 복구 없음 (운영자 재발행 의존, `:845-862`)
 
-### 1.2 ChangeIp ESSID/NTP apply 미구현 — V3 · essid **M** / ntp **S**
-- **현황**: `nxp_apply_ip_change`는 IP/netmask만 `ip addr`로 적용. **essid 적용 로직 전무**(code-absent), ntp는 읽기(`nxp_get_ntp_server`)만 있고 write/재시작 apply 없음.
+### 1.2 ChangeIp NTP apply 미구현 (ESSID 구현됨) — V3 · ~~essid M~~ 완료 / ntp **S**
+- **현황(2026-06-17 갱신, #56)**: `nxp_apply_ip_change`는 IP/netmask를 `ip addr`(휘발)로 적용하고, **essid는 `run_opc_wlan_apply`(opc_wlan_apply.sh ssid → save_config → reassociate, 비휘발)로 적용 구현**(실타겟 검증, best-effort — 실패는 로그만, IP 결과 반환). ntp는 읽기(`nxp_get_ntp_server`)만 있고 write/재시작 apply 없음(잔존).
 - **파일**: `platform_nxp.c:875-940` (주석 886-890 "essid/ntp remain V3 on-target work (wifi_init.sh routing / wpa_supplicant)")
 - **막힘**: essid = wpa_supplicant conf 재구성 시 활성 링크 드롭 정책 미정 / ntp = timesyncd.conf write+재시작 on-target 검증 대기
 - **비고**: essid **읽기** fallback(device-info용, nl80211 GET_INTERFACE)은 2026-06-16 구현됨(V4 별개). 여기는 **쓰기**(change-ip가 SSID를 실제로 바꾸는 것). set-ip-list의 essid 필드는 iplist.cfg에 저장되나 apply 시 무시됨.
