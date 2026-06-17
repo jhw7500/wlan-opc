@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -181,19 +182,24 @@ int  stub_apply_radio_last_station(void)      { return s_apply_radio_last_statio
  * accessors below (keeps them out of the global namespace). */
 static unsigned s_apply_ip_calls   = 0;
 static uint32_t s_apply_ip_last_ip = 0;
+static char     s_apply_ip_last_essid[OPC_ESSID_FIELD_LEN + 1] = {0};
 static int      s_apply_ip_fail    = 0;
 static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot)
 {
     s_apply_ip_calls++;
     s_apply_ip_last_ip = slot->ip_address;
+    snprintf(s_apply_ip_last_essid, sizeof s_apply_ip_last_essid,
+             "%.*s", (int)sizeof slot->essid, slot->essid);
     return s_apply_ip_fail ? -1 : 0;
 }
 
 /* Test-only accessors (declared extern in test_handler.c). */
-unsigned stub_apply_ip_calls(void)        { return s_apply_ip_calls; }
-uint32_t stub_apply_ip_last_ip(void)      { return s_apply_ip_last_ip; }
-void     stub_apply_ip_reset(void)        { s_apply_ip_calls = 0; s_apply_ip_last_ip = 0; s_apply_ip_fail = 0; }
-void     stub_apply_ip_set_fail(int fail) { s_apply_ip_fail = fail; }
+unsigned    stub_apply_ip_calls(void)           { return s_apply_ip_calls; }
+uint32_t    stub_apply_ip_last_ip(void)         { return s_apply_ip_last_ip; }
+const char *stub_apply_ip_last_essid(void)      { return s_apply_ip_last_essid; }
+void        stub_apply_ip_reset(void)           { s_apply_ip_calls = 0; s_apply_ip_last_ip = 0;
+                                                  s_apply_ip_last_essid[0] = '\0'; s_apply_ip_fail = 0; }
+void        stub_apply_ip_set_fail(int fail)    { s_apply_ip_fail = fail; }
 
 static int stub_prepare_reset(void)
 {

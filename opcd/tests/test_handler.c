@@ -38,10 +38,11 @@ static int failures = 0;
 
 /* platform_stub accessors: observe the change-ip → platform apply wiring
  * (deferred until logout) from this handler test. */
-extern unsigned stub_apply_ip_calls(void);
-extern uint32_t stub_apply_ip_last_ip(void);
-extern void     stub_apply_ip_reset(void);
-extern void     stub_apply_ip_set_fail(int fail);
+extern unsigned     stub_apply_ip_calls(void);
+extern uint32_t     stub_apply_ip_last_ip(void);
+extern void         stub_apply_ip_reset(void);
+extern void         stub_apply_ip_set_fail(int fail);
+extern const char  *stub_apply_ip_last_essid(void);
 extern void     stub_apply_radio_set_fail(int fail);
 extern void     stub_apply_radio_set_fail_once(int fail);
 extern int      stub_apply_radio_calls(void);
@@ -433,9 +434,27 @@ int main(void)
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     stub_apply_ip_reset();
-    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*192.168.1.101*/);
+    {
+        opc_ipcfg_entry_t e13;
+        memset(&e13, 0, sizeof e13);
+        e13.boundary_flag = OPC_LIST_BOUNDARY_START;
+        e13.list_number   = 1;
+        e13.ip_address    = 0xC0A80165; /* 192.168.1.101 */
+        e13.subnet_mask   = 0xFFFFFF00u;
+        strncpy(e13.essid, "cantops-x", sizeof e13.essid - 1);
+        r = do_set_ip_entry(&st, CIP, &e13);
+    }
     ASSERT(r == OPC_RESULT_OK, "change-ip: set-ip-list start ok");
-    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    {
+        opc_ipcfg_entry_t e13end;
+        memset(&e13end, 0, sizeof e13end);
+        e13end.boundary_flag = OPC_LIST_BOUNDARY_END;
+        e13end.list_number   = 1;
+        e13end.ip_address    = 0xC0A80165;
+        e13end.subnet_mask   = 0xFFFFFF00u;
+        strncpy(e13end.essid, "cantops-x", sizeof e13end.essid - 1);
+        r = do_set_ip_entry(&st, CIP, &e13end);
+    }
     ASSERT(r == OPC_RESULT_OK, "change-ip: set-ip-list commit ok");
     r = do_change_ip(&st, CIP, 1);
     ASSERT(r == OPC_RESULT_OK, "change-ip: accepted");
@@ -444,6 +463,8 @@ int main(void)
     opcd_apply_pending_ip_change(&st);   /* main loop applies after logout response */
     ASSERT(stub_apply_ip_calls() == 1, "change-ip: platform apply_ip_change called on logout");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "change-ip: apply gets committed slot ip");
+    ASSERT(strcmp(stub_apply_ip_last_essid(), "cantops-x") == 0,
+           "change-ip: apply gets committed slot essid");
 
     /* 13b. #43 regression: the deferred ChangeIp must NOT apply on a non-logout
      *      wakeup. opcd_apply_pending_ip_change runs every epoll iteration
