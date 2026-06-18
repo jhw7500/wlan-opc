@@ -27,7 +27,9 @@ typedef enum opcd_nl_kind {
     OPCD_NL_DISCONNECT,
     OPCD_NL_ROAM,
     OPCD_NL_CH_SWITCH,
-    OPCD_NL_INTERFACE,   /* NL80211_CMD_NEW_INTERFACE (GET_INTERFACE reply) */
+    OPCD_NL_INTERFACE,   /* NL80211_CMD_NEW_INTERFACE (GET_INTERFACE reply)          */
+    OPCD_NL_DEAUTH,      /* NL80211_CMD_DEAUTHENTICATE — AP-sent deauth (Host MLME)  */
+    OPCD_NL_DISASSOC,    /* NL80211_CMD_DISASSOCIATE — AP-sent disassoc (Host MLME)  */
 } opcd_nl_kind_t;
 
 typedef struct opcd_nl_evt {

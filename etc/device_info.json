@@ -7,7 +7,7 @@
     "manufacture_date": "2026-02-28",
     "shipment_date":    "2026-03-15",
     "ieee_11r":  1,
-    "ieee_11ai": 1,
+    "ieee_11ai": 0,
     "ieee_11k":  1,
     "ieee_11v":  1
 }
