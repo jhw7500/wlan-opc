@@ -28,6 +28,8 @@ static int failures = 0;
 /* genl commands (from linux/nl80211.h) used by these frames. */
 #define NL80211_CMD_GET_INTERFACE     5
 #define NL80211_CMD_NEW_INTERFACE     7
+#define NL80211_CMD_DEAUTHENTICATE   39
+#define NL80211_CMD_DISASSOCIATE     40
 #define NL80211_CMD_CONNECT          46
 #define NL80211_CMD_ROAM             47
 #define NL80211_CMD_DISCONNECT       48
@@ -194,6 +196,38 @@ int main(void)
         ASSERT(ev.mac_present, "disconnect: mac_present");
         ASSERT(memcmp(ev.mac, MAC1, 6) == 0, "disconnect: mac bytes match");
         ASSERT(ev.reason_code == 3, "disconnect: reason 3");
+    }
+
+    /* 2b. DEAUTHENTICATE (cmd 39): AP-sent deauth frame surfaced on the mlme
+     *     group in Host-MLME mode. Recognized as OPCD_NL_DEAUTH so the staging
+     *     layer latches Deauthentication (0x000C) as the AP_DISCONNECT msg id. */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_DEAUTHENTICATE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_attr(&f, NL80211_ATTR_MAC, MAC1, sizeof MAC1);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "deauth: rc==0");
+        ASSERT(ev.kind == OPCD_NL_DEAUTH, "deauth: kind DEAUTH");
+        ASSERT(ev.ifindex == 7, "deauth: ifindex 7");
+    }
+
+    /* 2c. DISASSOCIATE (cmd 40): AP-sent disassoc frame. Recognized as
+     *     OPCD_NL_DISASSOC so staging latches Disassociation (0x000A). */
+    {
+        frame_t f; f_reset(&f);
+        f_hdr(&f, TEST_FAMILY_ID, NL80211_CMD_DISASSOCIATE);
+        f_attr_u32(&f, NL80211_ATTR_IFINDEX, 7);
+        f_finish(&f);
+
+        opcd_nl_evt_t ev;
+        int rc = nl80211_parse_evt(f.buf, f.len, TEST_FAMILY_ID, &ev);
+        ASSERT(rc == 0, "disassoc: rc==0");
+        ASSERT(ev.kind == OPCD_NL_DISASSOC, "disassoc: kind DISASSOC");
+        ASSERT(ev.ifindex == 7, "disassoc: ifindex 7");
     }
 
     /* 3. ROAM (cmd 47): IFINDEX + MAC + WIPHY_FREQ(2437) → channel 6. */
