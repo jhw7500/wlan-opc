@@ -213,6 +213,8 @@ int main(void)
         ASSERT(rc == 0, "deauth: rc==0");
         ASSERT(ev.kind == OPCD_NL_DEAUTH, "deauth: kind DEAUTH");
         ASSERT(ev.ifindex == 7, "deauth: ifindex 7");
+        ASSERT(ev.mac_present, "deauth: mac_present");
+        ASSERT(memcmp(ev.mac, MAC1, 6) == 0, "deauth: mac bytes match");
     }
 
     /* 2c. DISASSOCIATE (cmd 40): AP-sent disassoc frame. Recognized as
@@ -228,6 +230,7 @@ int main(void)
         ASSERT(rc == 0, "disassoc: rc==0");
         ASSERT(ev.kind == OPCD_NL_DISASSOC, "disassoc: kind DISASSOC");
         ASSERT(ev.ifindex == 7, "disassoc: ifindex 7");
+        ASSERT(!ev.mac_present, "disassoc: no mac (none in frame)");
     }
 
     /* 3. ROAM (cmd 47): IFINDEX + MAC + WIPHY_FREQ(2437) → channel 6. */

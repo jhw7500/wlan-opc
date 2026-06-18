@@ -1158,7 +1158,7 @@ static int nxp_get_iface_ssid(int ifindex, char *buf, size_t cap)
  * The "frame BEFORE CMD_DISCONNECT" ordering is specific to Host-MLME on the
  * 9098/mwifiex driver; where it does not hold the code simply falls back to
  * Deauthentication (still safe), so a future porter must not silently rely on it. */
-#define NXP_WLAN_COUNT_MAX 2   /* mlan0/mlan1 — bounds g_ap_disc_msgid + idx guards */
+#define NXP_WLAN_COUNT_MAX 2   /* mlan0/mlan1 — bounds g_ap_disc_msgid + idx guards; must match nl_ifindex_to_idx() */
 static uint16_t g_ap_disc_msgid[NXP_WLAN_COUNT_MAX] = {
     OPC_AP_MSG_DEAUTHENTICATION, OPC_AP_MSG_DEAUTHENTICATION,
 };
