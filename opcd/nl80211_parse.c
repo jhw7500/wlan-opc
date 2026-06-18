@@ -23,6 +23,8 @@
 /* genl commands. */
 #define NL80211_CMD_GET_INTERFACE     5
 #define NL80211_CMD_NEW_INTERFACE     7
+#define NL80211_CMD_DEAUTHENTICATE   39
+#define NL80211_CMD_DISASSOCIATE     40
 #define NL80211_CMD_CONNECT          46
 #define NL80211_CMD_ROAM             47
 #define NL80211_CMD_DISCONNECT       48
@@ -90,6 +92,8 @@ static opcd_nl_kind_t cmd_to_kind(uint8_t cmd)
     case NL80211_CMD_CONNECT:          return OPCD_NL_CONNECT;
     case NL80211_CMD_ROAM:             return OPCD_NL_ROAM;
     case NL80211_CMD_DISCONNECT:       return OPCD_NL_DISCONNECT;
+    case NL80211_CMD_DEAUTHENTICATE:   return OPCD_NL_DEAUTH;
+    case NL80211_CMD_DISASSOCIATE:     return OPCD_NL_DISASSOC;
     case NL80211_CMD_CH_SWITCH_NOTIFY: return OPCD_NL_CH_SWITCH;
     case NL80211_CMD_NEW_INTERFACE:    return OPCD_NL_INTERFACE;
     default:                           return OPCD_NL_IGNORE;
