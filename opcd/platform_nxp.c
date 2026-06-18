@@ -57,8 +57,9 @@
 /* Shared timeout budget for opc_wlan_apply.sh calls (freq and essid paths).
  * 900 ms (not 1000) leaves ~100 ms slack for inter-call overhead in DUAL mode
  * (per-call timeout = OPC_WLAN_APPLY_TIMEOUT_MS/2 = 450 ms × 2 = 900 ms total).
- * All stages (set_network/save_config/reassociate) complete on wpa_cli OK in
- * ms; reassociate only triggers reconnect — it does not await association. */
+ * The script edits wpa_supplicant.conf then runs `wpa_cli reconfigure`, which
+ * returns on wpa_cli OK in ms; reconfigure reloads the conf and re-associates
+ * asynchronously — it does not await association. */
 #define OPC_WLAN_APPLY_TIMEOUT_MS 900
 #define OPC_WLAN_APPLY_POLL_MS    10
 #define OPC_WLAN_APPLY_SH        "/usr/local/scripts/opc_wlan_apply.sh"
@@ -799,9 +800,11 @@ static int run_argv_bounded(const char *label, const char *path,
 
 /* Run "opc_wlan_apply.sh <iface> [freq <mhz>] [ssid <name>]" synchronously.
  * Builds argv from the non-empty fields; freq_mhz==0 omits freq, ssid==NULL/""
- * omits ssid. The script does set_network -> save_config -> reassociate (trigger
- * only). All steps are wpa_cli round-trips (ms), so the bounded sync call stays
- * within budget. freq_buf lives on this frame for the duration of the call. */
+ * omits ssid. The script edits wpa_supplicant.conf in place (ssid/scan_freq/
+ * freq_list) then runs `wpa_cli reconfigure` to apply + persist (freq_list hard
+ * band-lock survives restart); reconfigure reloads the conf and re-associates
+ * asynchronously, so the bounded sync call returns within budget. freq_buf lives
+ * on this frame for the duration of the call. */
 static int run_opc_wlan_apply(const char *iface, uint16_t freq_mhz,
                               const char *ssid, long timeout_ms)
 {
@@ -960,7 +963,7 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
 
     /* essid is best-effort: a failure is logged but does NOT override the IP result
      * (unlike freq apply, which is fatal). Reconnect outcome is reported separately
-     * via the WlanStatusChange indication. essid is non-volatile (save_config).
+     * via the WlanStatusChange indication. essid is non-volatile (conf edit + reconfigure).
      * DUAL targets mlan0 (the management interface). slot->essid is NUL-terminated
      * by the 0x0016 handler, but we bound-copy defensively anyway. */
     if (slot->essid[0] != '\0') {
