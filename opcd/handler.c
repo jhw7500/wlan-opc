@@ -115,8 +115,11 @@ static bool valid_ipcfg_addr(uint32_t ip_host)
  * Check order follows the spec's cause listing; the network/broadcast
  * re-check returns 0x0011 again but sits after the netmask check because
  * it needs a valid mask. default_gateway / ntp_server 0 = "unset" and is
- * accepted: the spec text lists 0.0.0.0 as invalid, but the fields are
- * operationally optional — recorded as a vendor inquiry (#35). */
+ * accepted, but the spec basis differs per field: §3.3.6's gateway cause
+ * (0x0013) fires ONLY on a different-segment GW and lists no 0.0.0.0
+ * prohibition, so GW=0 is spec-compliant; the ntp cause (0x0014) DOES list
+ * 0.0.0.0 as invalid, so accepting NTP=0 is a deliberate deviation (both
+ * fields are operationally optional — vendor inquiry #35). */
 static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_terminated)
 {
     if (!valid_ipcfg_addr(e->ip_address))     return OPC_ERR_IPCFG_IP;        /* 0x0011 */
