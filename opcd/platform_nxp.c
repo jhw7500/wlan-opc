@@ -1153,8 +1153,13 @@ static int nxp_get_iface_ssid(int ifindex, char *buf, size_t cap)
  * subtype here and the following CMD_DISCONNECT(by_ap) reports it. Absent a
  * preceding frame the hint stays Deauthentication — the prior unconditional
  * default, so no regression. Reset on (re)association and after each disconnect
- * so a stale hint never mislabels a later drop. idx is 0/1 (nl_ifindex_to_idx). */
-static uint16_t g_ap_disc_msgid[2] = {
+ * so a stale hint never mislabels a later drop. idx is 0/1 (nl_ifindex_to_idx).
+ *
+ * The "frame BEFORE CMD_DISCONNECT" ordering is specific to Host-MLME on the
+ * 9098/mwifiex driver; where it does not hold the code simply falls back to
+ * Deauthentication (still safe), so a future porter must not silently rely on it. */
+#define NXP_WLAN_COUNT_MAX 2   /* mlan0/mlan1 — bounds g_ap_disc_msgid + idx guards */
+static uint16_t g_ap_disc_msgid[NXP_WLAN_COUNT_MAX] = {
     OPC_AP_MSG_DEAUTHENTICATION, OPC_AP_MSG_DEAUTHENTICATION,
 };
 
@@ -1175,7 +1180,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
 
         /* A successful (re)association clears any stale AP-disconnect subtype
          * hint left by a prior deauth/disassoc frame. */
-        if (idx >= 0 && idx < 2)
+        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
             g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
 
         /* NL80211_CMD_CONNECT commonly omits NL80211_ATTR_WIPHY_FREQ, leaving
@@ -1217,7 +1222,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
             pe.kind                       = OPCD_PEVT_AP_DISCONNECT;
             pe.u.ap_disconnect.idx        = (uint8_t)idx;
             pe.u.ap_disconnect.reason_msg_id =
-                (idx >= 0 && idx < 2) ? g_ap_disc_msgid[idx]
+                (idx >= 0 && idx < NXP_WLAN_COUNT_MAX) ? g_ap_disc_msgid[idx]
                                       : OPC_AP_MSG_DEAUTHENTICATION;
             pe.u.ap_disconnect.result_code   = nev->reason_code;
             /* nev->mac is zeroed when NL80211_ATTR_MAC is absent (mac_present
@@ -1229,7 +1234,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
 
         /* Hint is consumed once per disconnect: reset so it cannot mislabel a
          * later drop (e.g. a deauth/disassoc frame with no following DISCONNECT). */
-        if (idx >= 0 && idx < 2)
+        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
             g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
 
         /* Then the link returns to UP (associated→up), channel cleared.
@@ -1246,14 +1251,16 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
 
     case OPCD_NL_DEAUTH:
         /* AP-sent deauthentication frame (Host MLME). Latch the subtype for the
-         * CMD_DISCONNECT that follows; emit nothing here. */
-        if (idx >= 0 && idx < 2)
+         * CMD_DISCONNECT that follows; emit nothing here. (Written value equals
+         * the array's reset default, so this is a no-op today — kept explicit for
+         * symmetry with the DISASSOC arm and any future per-subtype cause.) */
+        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
             g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
         break;
 
     case OPCD_NL_DISASSOC:
         /* AP-sent disassociation frame (Host MLME). Latch the subtype. */
-        if (idx >= 0 && idx < 2)
+        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
             g_ap_disc_msgid[idx] = OPC_AP_MSG_DISASSOCIATION;
         break;
 
