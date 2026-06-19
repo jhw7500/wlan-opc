@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
+#include "chan_encode.h"
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
@@ -470,6 +471,30 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
     return 0;
 }
 
+/* Pick the device-info WLAN freq/channel per the configured source.
+ * CONFIG → set-radio cache (spec §3.3.4 "설정 주파수"); LIVE → live associated
+ * value (0/0 when not associated); AUTO → live when associated, else config.
+ * Live channel arrives as a raw channel number (no band byte) and is encoded to
+ * the OPC band<<8|ch wire form via opc_chan_field(). */
+static void select_devinfo_freq_ch(opcd_freq_source_t src, bool assoc,
+                                   uint16_t live_freq, uint16_t live_ch,
+                                   uint16_t cfg_freq, uint16_t cfg_ch,
+                                   uint16_t *out_freq, uint16_t *out_ch)
+{
+    bool use_live = (src == OPC_FREQ_SRC_LIVE) ||
+                    (src == OPC_FREQ_SRC_AUTO && assoc);
+    if (use_live && assoc) {
+        *out_freq = live_freq;
+        *out_ch   = opc_chan_field(live_freq, live_ch);
+    } else if (use_live) {            /* LIVE + not associated → no association */
+        *out_freq = 0;
+        *out_ch   = 0;
+    } else {                          /* CONFIG, or AUTO while not associated */
+        *out_freq = cfg_freq;
+        *out_ch   = cfg_ch;
+    }
+}
+
 static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                   uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                   ssize_t *rlen, uint16_t seq)
@@ -531,11 +556,18 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             opcd_platform_link_t link = {0};
             bool w1_mode_live = false, w1_bw_live = false;
             bool w2_mode_live = false, w2_bw_live = false;
+            /* Live freq/channel captured per-WLAN at get_link() time (link is
+             * reused for wlan2 below, so the values must be saved here). */
+            bool w1_assoc = false, w2_assoc = false;
+            uint16_t w1_lfreq = 0, w1_lch = 0, w2_lfreq = 0, w2_lch = 0;
             if (plat->get_link(0, &link) == 0) {
                 memcpy(ack.wlan1.connect_ap_mac, link.bssid, 6);
                 ack.wlan1.snr    = link.snr;
                 ack.wlan1.rssi   = link.rssi;
                 ack.wlan1.status = link.associated ? 0x0001 : 0x0000;
+                w1_assoc = link.associated;
+                w1_lfreq = link.freq_mhz;
+                w1_lch   = link.channel;
                 if (link.associated && link.mode != 0) {
                     ack.wlan1.mode = link.mode;
                     w1_mode_live = true;
@@ -552,6 +584,9 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                     ack.wlan2.snr    = link.snr;
                     ack.wlan2.rssi   = link.rssi;
                     ack.wlan2.status = link.associated ? 0x0001 : 0x0000;
+                    w2_assoc = link.associated;
+                    w2_lfreq = link.freq_mhz;
+                    w2_lch   = link.channel;
                     if (link.associated && link.mode != 0) {
                         ack.wlan2.mode = link.mode;
                         w2_mode_live = true;
@@ -570,13 +605,17 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             ack.device_status = st->boot_status;
             ack.station_type  = effective_station_type(st);
             ack.priority_ch   = st->radio.priority_ch;
-            ack.wlan1.freq_mhz  = st->radio.wlan1.freq_mhz;
-            ack.wlan1.channel   = st->radio.wlan1.channel;
+            select_devinfo_freq_ch(st->conf.device_info_freq_source, w1_assoc,
+                                   w1_lfreq, w1_lch,
+                                   st->radio.wlan1.freq_mhz, st->radio.wlan1.channel,
+                                   &ack.wlan1.freq_mhz, &ack.wlan1.channel);
             if (!w1_mode_live) ack.wlan1.mode      = st->radio.wlan1.mode;
             if (!w1_bw_live)   ack.wlan1.bandwidth = st->radio.wlan1.bandwidth;
             if (ack.station_type == OPC_STATION_DUAL) {
-                ack.wlan2.freq_mhz  = st->radio.wlan2.freq_mhz;
-                ack.wlan2.channel   = st->radio.wlan2.channel;
+                select_devinfo_freq_ch(st->conf.device_info_freq_source, w2_assoc,
+                                       w2_lfreq, w2_lch,
+                                       st->radio.wlan2.freq_mhz, st->radio.wlan2.channel,
+                                       &ack.wlan2.freq_mhz, &ack.wlan2.channel);
                 if (!w2_mode_live) ack.wlan2.mode      = st->radio.wlan2.mode;
                 if (!w2_bw_live)   ack.wlan2.bandwidth = st->radio.wlan2.bandwidth;
             }
