@@ -19,6 +19,14 @@ opcd_freq_source_t opcd_freq_source_parse(const char *conf_path)
     if (!f) return src;                        /* no conf file → default */
     char line[160];
     while (fgets(line, sizeof line, f)) {
+        /* Over-long line (no newline read and not at EOF): discard the rest of
+         * the physical line so its tail is not re-parsed as a separate directive
+         * (Gemini review, PR #61). */
+        if (!strchr(line, '\n') && !feof(f)) {
+            int c;
+            while ((c = fgetc(f)) != '\n' && c != EOF) { /* skip to line end */ }
+            continue;   /* a >159B line is malformed for this key — ignore it */
+        }
         char key[48], val[64];
         /* Same scan as opcd_fault_probe_conf: accepts "key=value" and
          * "key = value"; '#'-comment lines fail the key match and are skipped.

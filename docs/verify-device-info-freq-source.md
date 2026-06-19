@@ -45,14 +45,14 @@ vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout
 
 ## 4. live 모드 (항상 접속값)
 ```bash
-ssh wlan-target -- "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = live\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
+ssh wlan-target "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = live\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
 vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout
 ```
 기대(접속 중): `freq=5240 ch=0x0230`.
 
 ## 5. auto 모드 (접속 시 live)
 ```bash
-ssh wlan-target -- "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = auto\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
+ssh wlan-target "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = auto\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
 vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout
 ```
 기대(접속 중): live와 동일 `freq=5240 ch=0x0230`.
@@ -72,22 +72,22 @@ wlan1.channel    @294 ( 2B): 02 30  = 0x0230   (band 0x02=5GHz | ch 0x30=48)
 
 ## 7. 엣지: 미접속 (절단은 wpa_cli만 — iw 불가)
 ```bash
-ssh wlan-target -- "wpa_cli -i mlan0 disconnect; wpa_cli -i mlan0 status | grep wpa_state"   # DISCONNECTED/SCANNING
+ssh wlan-target "wpa_cli -i mlan0 disconnect; wpa_cli -i mlan0 status | grep wpa_state"   # DISCONNECTED/SCANNING
 
 # 7a. live + 미접속 (모드는 §4에서 live 유지)
 vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout   # 기대 freq=0 ch=0x0000
 
 # 7b. auto + 미접속
-ssh wlan-target -- "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = auto\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
+ssh wlan-target "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = auto\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
 vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout   # 기대 freq=5180 ch=0x0224 (설정값 폴백)
 
 # 7c. 접속 복원 (필수)
-ssh wlan-target -- "wpa_cli -i mlan0 reconnect; sleep 3; wpa_cli -i mlan0 status | grep -E 'wpa_state|freq'"   # COMPLETED / 5240
+ssh wlan-target "wpa_cli -i mlan0 reconnect; sleep 3; wpa_cli -i mlan0 status | grep -E 'wpa_state|freq'"   # COMPLETED / 5240
 ```
 
 ## 8. 원복 (★ 필수)
 ```bash
-ssh wlan-target -- "cp /usr/local/opc/etc/opc.conf.bak /usr/local/opc/etc/opc.conf; systemctl restart opcd; systemctl is-active opcd"
+ssh wlan-target "cp /usr/local/opc/etc/opc.conf.bak /usr/local/opc/etc/opc.conf; systemctl restart opcd; systemctl is-active opcd"
 vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout   # §1 베이스라인과 동일해야 함
 ```
 

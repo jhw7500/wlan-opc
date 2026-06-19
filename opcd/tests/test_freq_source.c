@@ -68,6 +68,18 @@ int main(void)
     write_conf("device_info_freq_source = bogus\n");
     ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG, "unknown value -> config");
 
+    /* over-long line (>159B) is discarded, not split: a directive sitting in its
+     * tail must NOT take effect (Gemini review PR #61). 159 ignorable chars then
+     * the directive, all on one physical line. */
+    {
+        char buf[256];
+        memset(buf, '#', 159);
+        strcpy(buf + 159, "device_info_freq_source = live\n");
+        write_conf(buf);
+        ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG,
+               "over-long line tail not parsed -> config");
+    }
+
     unlink(g_path);
 
     if (failures == 0) { printf("all freq_source tests passed\n"); return 0; }
