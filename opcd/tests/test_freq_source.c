@@ -68,6 +68,13 @@ int main(void)
     write_conf("device_info_freq_source = bogus\n");
     ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG, "unknown value -> config");
 
+    /* '#' inline comment with NO space: %63s takes "auto#x" as the token →
+     * unknown → config (documented edge; a space before '#' avoids it). */
+    write_conf("device_info_freq_source = auto#nospace\n");
+    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG, "value#comment no-space -> config");
+    write_conf("device_info_freq_source = auto # spaced comment\n");
+    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_AUTO, "value + spaced #comment -> auto");
+
     /* over-long line (>159B) is discarded, not split: a directive sitting in its
      * tail must NOT take effect (Gemini review PR #61). 159 ignorable chars then
      * the directive, all on one physical line. */
