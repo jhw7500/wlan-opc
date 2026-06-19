@@ -114,8 +114,34 @@ static int stub_get_ntp_server(uint32_t *server_host)
 /* Link                                                               */
 /* ------------------------------------------------------------------ */
 
+/* Test-only injectable link state (default: not associated). Lets the handler
+ * test exercise the device-info freq-source toggle's associated/live path
+ * without a kernel. STUB ONLY — never consulted by platform_nxp.c. */
+static bool                 s_link_set[2];
+static opcd_platform_link_t s_link[2];
+
+void stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch)
+{
+    if (idx < 0 || idx > 1) return;
+    memset(&s_link[idx], 0, sizeof s_link[idx]);
+    s_link[idx].associated = assoc;
+    s_link[idx].freq_mhz   = freq;
+    s_link[idx].channel    = ch;
+    s_link_set[idx] = true;
+}
+
+void stub_reset_link(void) { s_link_set[0] = s_link_set[1] = false; }
+
 static int stub_get_link(int idx, opcd_platform_link_t *out)
 {
+    /* Injected link takes precedence so WLAN#2 (idx 1) is reachable in tests
+     * even though stub_get_wlan_count() reports 1. The idx>=0 guard keeps the
+     * array access in range — without it a negative idx would read s_link[-1]
+     * (the count check below would otherwise have caught it first). */
+    if (idx >= 0 && idx < 2 && s_link_set[idx]) {
+        *out = s_link[idx];
+        return 0;
+    }
     /* Same bounds form as stub_get_wlan_mac — kept identical so that bumping
      * stub_get_wlan_count() in future cannot cause one accessor to succeed
      * while the other returns -ENODEV. */
