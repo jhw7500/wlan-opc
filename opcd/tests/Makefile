@@ -27,7 +27,7 @@ OPCD_OBJS_SNAPSHOT  := $(OPCDOBJ)/snapshot.o
 OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o \
                        $(OPCDOBJ)/indication.o $(OPCDOBJ)/fault_probe.o \
                        $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/snapshot.o \
-                       $(OPCDOBJ)/platform_stub.o
+                       $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/platform_stub.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
 OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 # Pure parser — no platform backend, no protocol library.

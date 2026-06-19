@@ -119,12 +119,35 @@ static int on_platform_event(const opcd_platform_evt_t *evt, void *ctx)
     return 0;
 }
 
+/* Parse opc.conf for `device_info_freq_source = config|live|auto`.
+ * Same key=value line-scan as opcd_fault_probe_conf(); unknown/missing key or
+ * unrecognized value → CONFIG (spec-strict default). */
+static opcd_freq_source_t parse_devinfo_freq_source(const char *conf_path)
+{
+    opcd_freq_source_t src = OPC_FREQ_SRC_CONFIG;
+    if (!conf_path) return src;
+    FILE *f = fopen(conf_path, "r");
+    if (!f) return src;
+    char line[160];
+    while (fgets(line, sizeof line, f)) {
+        char key[48], val[64];
+        if (sscanf(line, " %47[A-Za-z0-9_] = %63s", key, val) != 2) continue;
+        if (strcmp(key, "device_info_freq_source") != 0) continue;
+        if      (strcmp(val, "live") == 0) src = OPC_FREQ_SRC_LIVE;
+        else if (strcmp(val, "auto") == 0) src = OPC_FREQ_SRC_AUTO;
+        else                               src = OPC_FREQ_SRC_CONFIG;
+    }
+    fclose(f);
+    return src;
+}
+
 static void state_set_defaults(opcd_state_t *st)
 {
     memset(st, 0, sizeof *st);
     st->conf.udp_port             = OPC_DEFAULT_UDP_PORT;
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
+    st->conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
     st->paths.conf        = OPC_PATH_CONF;
     st->paths.password    = OPC_PATH_PASSWORD;
     st->paths.ip_list     = OPC_PATH_IPLIST;
@@ -253,6 +276,7 @@ int main(int argc, char **argv)
     /* opc.conf currently carries only the congestion_* overrides (T6 interim
      * thresholds); other settings still come from defaults / CLI options. */
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
+    st.conf.device_info_freq_source = parse_devinfo_freq_source(st.paths.conf);
 
     ensure_dirs(&st);
     state_load_from_disk(&st);
