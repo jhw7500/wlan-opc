@@ -42,6 +42,7 @@
 | Memory(0x0002) | swapless 타깃이라 사양 정의(페이징) 성립 불가 → **의도적 미발행**(Disk I/O로 일원화) | 확정(코드 변경 불요) | `fault_probe.c` |
 | capability 비트 | `device_info.json` 정적값(전부 1=추정) vs silicon 실광고 미검증 | #35 — 고객사 문의 | `inventory.c` |
 | 0x0018 / gateway | 0x0018(비정상 boundary NG) 벤더 확정 대기 / gateway는 #27로 **의도적 미적용**(브릿지) | #35(A17) / #27(확정) | `handler.c`, `platform_nxp.c:886-889` |
+| **G11** device-info FREQ/CH | §3.3.4 "설정 주파수"(설정값) vs 운영상 접속값 — `device_info_freq_source` 토글(config/live/auto) 구현·**출하 기본 config**(동작 무변화). 표준 의미(설정/접속) 확정 대기 | spec-inquiry G11/letter Q20 — 발주처 회신(회신 시 기본값만 전환, 코드 무변경) | `freq_source.{c,h}`, `handler.c`(select_devinfo_freq_ch) |
 
 ---
 
