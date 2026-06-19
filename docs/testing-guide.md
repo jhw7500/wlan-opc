@@ -132,12 +132,12 @@ sshpass -p '' ssh root@192.168.0.100        # 빈 비번
 | ethernet_mac, ip/netmask/gateway | `/var/log/cantops/json/eth0/link.json` | live | 매 요청 |
 | essid, WLAN mac, AP mac, RSSI, SNR, mode, bw | `/var/log/cantops/json/mlan0/link.json` (mlan1=WLAN#2) | live | 매 요청 |
 | WLAN 개수(1/2) | `/var/log/cantops/json/mlan1/link.json` 존재 여부 | live | — |
-| freq/channel, station_type, priority_ch | `/usr/local/opc/etc/radio.conf` (set-radio 캐시) | config | set-radio 시 |
+| freq/channel, station_type, priority_ch | `/usr/local/opc/etc/radio.conf` (set-radio 캐시). freq/channel은 `opc.conf::device_info_freq_source` 토글에 따라 `config`(기본)=캐시 / `live`·`auto`=접속 시 live | config(기본)/live | set-radio·매 요청 |
 | device_status | opcd 런타임 세션 | runtime | 실시간 |
 
 mlan0/link.json 키 매핑: `info.ssid`→essid, `info.address`→WLAN mac, `link.address`→connect_ap_mac(=associated),
 `link.signal_avg`→RSSI, `channel_info.<freq>.noise`→SNR(`rssi−noise`), `link.tx_bitrate`(HE-/VHT-/MCS)→mode,
-`info.width`→bw. freq/channel은 radio.conf 캐시, mode/bw는 live가 있으면 우선.
+`info.width`→bw. freq/channel은 **`device_info_freq_source`(opc.conf) 토글**: `config`(기본)=radio.conf 캐시 / `live`·`auto`=접속 시 live값(`live`+미접속→0/0, `auto`+미접속→캐시). mode/bw는 항상 live가 있으면 우선. (실타겟 검증: `docs/verify-device-info-freq-source.md`)
 
 ### live 필드는 재시작 없이 즉시 반영 — 파일을 바꿔 입증
 ```bash

@@ -36,7 +36,8 @@ device_info_freq_source = config   # 기본: 항상 설정값(스펙 §3.3.4 준
 
 - opcd 시작 시 opc.conf에서 1회 파싱 → `opcd_conf_t`의 enum 필드에 저장.
 - 미설정 / 인식불가 토큰 → **`config`로 폴백**(안전 기본).
-- 파싱은 기존 opc.conf 리더(`opcd_fault_probe_conf`, `congestion_*` line-scan, `fault_probe.c:148`)와 동일한 `key = value` 라인 스캔 패턴을 opcd 시작부에 추가.
+- 파싱은 기존 opc.conf 리더(`opcd_fault_probe_conf`, `congestion_*` line-scan, `fault_probe.c:148`)와 동일한 `key = value` 라인 스캔. **구현은 `opcd/freq_source.{c,h}` 순수 모듈로 분리**(host 단위테스트 `opcd/tests/test_freq_source.c`; `opcd.c`는 `opcd_freq_source_parse()` 호출). — PR #60 리뷰 후속(파서 단위테스트 갭 보완)
+- ⚠️ **인라인 주석 주의**: `%63s`가 공백에서 멈추므로 값 뒤 `#` 주석은 **앞에 공백 필요**(`device_info_freq_source = auto # note` ✓ / `auto#note` → 토큰 `auto#note`로 읽혀 `config` 폴백). 표준 관례(공백)면 무해 — 기존 `opcd_fault_probe_conf`와 동일.
 
 ## 4. 동작 (wlan1·wlan2 동일 적용)
 
