@@ -49,6 +49,9 @@ extern int      stub_apply_radio_calls(void);
 extern void     stub_apply_radio_reset_calls(void);
 extern int      stub_apply_radio_last_w1_freq(void);
 extern int      stub_apply_radio_last_station(void);
+/* device-info live-link injection (freq-source toggle test) */
+extern void     stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch);
+extern void     stub_reset_link(void);
 
 #define ASSERT(cond, label) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL %s\n", label); failures++; }         \
@@ -327,6 +330,26 @@ static uint16_t do_change_ip(opcd_state_t *st, uint32_t cip, uint16_t slot)
     opc_change_ip_address_ack_t ack;
     if (opc_change_ip_address_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
     return ack.result;
+}
+
+/* Dispatch GetDeviceInfo; return 0 and fill WLAN#1 freq/channel from the ack. */
+static int do_get_devinfo(opcd_state_t *st, uint32_t cip,
+                          uint16_t *w1_freq, uint16_t *w1_ch)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_get_device_info_req_pack(frame, sizeof frame, 1);
+    if (fn <= 0) return -1;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return -1;
+
+    opc_get_device_info_ack_t ack;
+    if (opc_get_device_info_ack_unpack(resp, (size_t)rlen, &ack) != 0) return -1;
+    *w1_freq = ack.wlan1.freq_mhz;
+    *w1_ch   = ack.wlan1.channel;
+    return 0;
 }
 
 int main(void)
@@ -1593,6 +1616,46 @@ int main(void)
                "issue#12-24g: identical config → no revert armed (nothing to undo)");
         ASSERT(stub_apply_radio_calls() == 1,
                "issue#12-24g: identical config → no second apply scheduled");
+    }
+
+    /* 25. device-info FREQ/CH source toggle (device_info_freq_source).
+     *     set-radio stores 5180/ch36(0x0224) as the config; the live link is
+     *     5240/ch48 → opc_chan_field(5240,48)=0x0230. Verify 3 modes × assoc. */
+    {
+        const uint16_t CFG_FREQ = 5180, CFG_CH = (uint16_t)((OPC_BAND_5GHZ << 8) | 36); /* 0x0224 */
+        const uint16_t LIVE_FREQ = 5240, LIVE_CH_RAW = 48;
+        const uint16_t LIVE_CH_ENC = (uint16_t)((OPC_BAND_5GHZ << 8) | 48);              /* 0x0230 */
+        uint16_t f = 0, c = 0;
+
+        /* config: always the set-radio value, regardless of association */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_radio(&st, CIP, CFG_FREQ, CFG_CH);
+        st.conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
+        stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == CFG_FREQ && c == CFG_CH,
+               "freq-src config + assoc -> config value");
+        stub_reset_link();
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == CFG_FREQ && c == CFG_CH,
+               "freq-src config + not-assoc -> config value");
+
+        /* live: associated -> live (band-encoded), not-assoc -> 0/0 */
+        st.conf.device_info_freq_source = OPC_FREQ_SRC_LIVE;
+        stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
+               "freq-src live + assoc -> live value (band-encoded)");
+        stub_reset_link();
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == 0 && c == 0,
+               "freq-src live + not-assoc -> 0/0");
+
+        /* auto: associated -> live, not-assoc -> config */
+        st.conf.device_info_freq_source = OPC_FREQ_SRC_AUTO;
+        stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
+               "freq-src auto + assoc -> live value");
+        stub_reset_link();
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == CFG_FREQ && c == CFG_CH,
+               "freq-src auto + not-assoc -> config value");
     }
 
     unlink(g_pw_path);

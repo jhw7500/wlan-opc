@@ -114,6 +114,24 @@ static int stub_get_ntp_server(uint32_t *server_host)
 /* Link                                                               */
 /* ------------------------------------------------------------------ */
 
+/* Test-only injectable link state (default: not associated). Lets the handler
+ * test exercise the device-info freq-source toggle's associated/live path
+ * without a kernel. STUB ONLY — never consulted by platform_nxp.c. */
+static bool                 s_link_set[2];
+static opcd_platform_link_t s_link[2];
+
+void stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch)
+{
+    if (idx < 0 || idx > 1) return;
+    memset(&s_link[idx], 0, sizeof s_link[idx]);
+    s_link[idx].associated = assoc;
+    s_link[idx].freq_mhz   = freq;
+    s_link[idx].channel    = ch;
+    s_link_set[idx] = true;
+}
+
+void stub_reset_link(void) { s_link_set[0] = s_link_set[1] = false; }
+
 static int stub_get_link(int idx, opcd_platform_link_t *out)
 {
     /* Same bounds form as stub_get_wlan_mac — kept identical so that bumping
@@ -121,6 +139,10 @@ static int stub_get_link(int idx, opcd_platform_link_t *out)
      * while the other returns -ENODEV. */
     if (idx < 0 || idx >= stub_get_wlan_count()) {
         return -ENODEV;
+    }
+    if (idx < 2 && s_link_set[idx]) {
+        *out = s_link[idx];
+        return 0;
     }
     memset(out, 0, sizeof *out);
     out->associated = false;
