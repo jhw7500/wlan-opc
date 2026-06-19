@@ -22,7 +22,7 @@ PLATFORM ?= stub
 
 SRCS := opcd.c store.c store_async.c handler.c indication.c fault_probe.c \
         json_util.c inventory.c ntp_parse.c snapshot.c nl80211_parse.c \
-        chan_encode.c platform_$(PLATFORM).c
+        chan_encode.c freq_source.c platform_$(PLATFORM).c
 OBJS := $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 BIN  := $(OBJDIR)/opcd
 
