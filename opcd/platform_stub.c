@@ -134,15 +134,19 @@ void stub_reset_link(void) { s_link_set[0] = s_link_set[1] = false; }
 
 static int stub_get_link(int idx, opcd_platform_link_t *out)
 {
+    /* Injected link takes precedence so WLAN#2 (idx 1) is reachable in tests
+     * even though stub_get_wlan_count() reports 1. The idx>=0 guard keeps the
+     * array access in range — without it a negative idx would read s_link[-1]
+     * (the count check below would otherwise have caught it first). */
+    if (idx >= 0 && idx < 2 && s_link_set[idx]) {
+        *out = s_link[idx];
+        return 0;
+    }
     /* Same bounds form as stub_get_wlan_mac — kept identical so that bumping
      * stub_get_wlan_count() in future cannot cause one accessor to succeed
      * while the other returns -ENODEV. */
     if (idx < 0 || idx >= stub_get_wlan_count()) {
         return -ENODEV;
-    }
-    if (idx < 2 && s_link_set[idx]) {
-        *out = s_link[idx];
-        return 0;
     }
     memset(out, 0, sizeof *out);
     out->associated = false;

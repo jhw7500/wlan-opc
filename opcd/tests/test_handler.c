@@ -332,9 +332,11 @@ static uint16_t do_change_ip(opcd_state_t *st, uint32_t cip, uint16_t slot)
     return ack.result;
 }
 
-/* Dispatch GetDeviceInfo; return 0 and fill WLAN#1 freq/channel from the ack. */
+/* Dispatch GetDeviceInfo; return 0 and fill WLAN#1 (and optionally WLAN#2)
+ * freq/channel from the ack. w2 pointers may be NULL when only WLAN#1 matters. */
 static int do_get_devinfo(opcd_state_t *st, uint32_t cip,
-                          uint16_t *w1_freq, uint16_t *w1_ch)
+                          uint16_t *w1_freq, uint16_t *w1_ch,
+                          uint16_t *w2_freq, uint16_t *w2_ch)
 {
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t fn = opc_get_device_info_req_pack(frame, sizeof frame, 1);
@@ -347,8 +349,10 @@ static int do_get_devinfo(opcd_state_t *st, uint32_t cip,
 
     opc_get_device_info_ack_t ack;
     if (opc_get_device_info_ack_unpack(resp, (size_t)rlen, &ack) != 0) return -1;
-    *w1_freq = ack.wlan1.freq_mhz;
-    *w1_ch   = ack.wlan1.channel;
+    if (w1_freq) *w1_freq = ack.wlan1.freq_mhz;
+    if (w1_ch)   *w1_ch   = ack.wlan1.channel;
+    if (w2_freq) *w2_freq = ack.wlan2.freq_mhz;
+    if (w2_ch)   *w2_ch   = ack.wlan2.channel;
     return 0;
 }
 
@@ -1633,29 +1637,49 @@ int main(void)
         (void)do_set_radio(&st, CIP, CFG_FREQ, CFG_CH);
         st.conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
         stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == CFG_FREQ && c == CFG_CH,
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == CFG_FREQ && c == CFG_CH,
                "freq-src config + assoc -> config value");
         stub_reset_link();
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == CFG_FREQ && c == CFG_CH,
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == CFG_FREQ && c == CFG_CH,
                "freq-src config + not-assoc -> config value");
 
         /* live: associated -> live (band-encoded), not-assoc -> 0/0 */
         st.conf.device_info_freq_source = OPC_FREQ_SRC_LIVE;
         stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
                "freq-src live + assoc -> live value (band-encoded)");
         stub_reset_link();
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == 0 && c == 0,
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == 0 && c == 0,
                "freq-src live + not-assoc -> 0/0");
 
         /* auto: associated -> live, not-assoc -> config */
         st.conf.device_info_freq_source = OPC_FREQ_SRC_AUTO;
         stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
                "freq-src auto + assoc -> live value");
         stub_reset_link();
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c) == 0 && f == CFG_FREQ && c == CFG_CH,
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == CFG_FREQ && c == CFG_CH,
                "freq-src auto + not-assoc -> config value");
+
+        /* DUAL: exercises the WLAN#2 branch + the stub idx=1 injection
+         * (Gemini review). auto + both associated → wlan1 & wlan2 live values.
+         * wlan2 live 5745/ch149 → opc_chan_field(5745,149)=0x0295. */
+        {
+            const uint16_t W2_FREQ = 5745, W2_CH_RAW = 149;
+            const uint16_t W2_CH_ENC = (uint16_t)((OPC_BAND_5GHZ << 8) | 149); /* 0x0295 */
+            uint16_t f2 = 0, c2 = 0;
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+            (void)do_set_radio_dual(&st, CIP, CFG_FREQ, CFG_CH, CFG_FREQ, CFG_CH);
+            st.conf.device_info_freq_source = OPC_FREQ_SRC_AUTO;
+            stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
+            stub_set_link(1, true, W2_FREQ, W2_CH_RAW);
+            ASSERT(do_get_devinfo(&st, CIP, &f, &c, &f2, &c2) == 0 &&
+                   f == LIVE_FREQ && c == LIVE_CH_ENC &&
+                   f2 == W2_FREQ && c2 == W2_CH_ENC,
+                   "freq-src auto DUAL + assoc -> wlan1 & wlan2 live values");
+            stub_reset_link();
+        }
     }
 
     unlink(g_pw_path);
