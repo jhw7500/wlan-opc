@@ -34,9 +34,12 @@ OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 OPCD_OBJS_NL80211   := $(OPCDOBJ)/nl80211_parse.o
 # Pure channel-field encoder — no platform backend, no protocol library.
 OPCD_OBJS_CHAN      := $(OPCDOBJ)/chan_encode.o
+# Pure opc.conf freq-source parser — no platform backend, no protocol library.
+OPCD_OBJS_FREQSRC   := $(OPCDOBJ)/freq_source.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
-         test_store_async test_fault_probe test_nl80211_parse test_chan_encode
+         test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
+         test_freq_source
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -72,6 +75,11 @@ $(TESTDIR)/test_nl80211_parse: $(TESTDIR)/test_nl80211_parse.o $(OPCD_OBJS_NL802
 # libopcproto). Reuses the host opcd object built by `make native`.
 $(TESTDIR)/test_chan_encode: $(TESTDIR)/test_chan_encode.o $(OPCD_OBJS_CHAN)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_chan_encode.o $(OPCD_OBJS_CHAN)
+
+# Pure opc.conf parser test — links only freq_source.o (no platform backend, no
+# libopcproto). Reuses the host opcd object built by `make native`.
+$(TESTDIR)/test_freq_source: $(TESTDIR)/test_freq_source.o $(OPCD_OBJS_FREQSRC)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_freq_source.o $(OPCD_OBJS_FREQSRC)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

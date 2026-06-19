@@ -8,6 +8,7 @@
 #include "../protocol/commands.h"
 #include "../protocol/indications.h"
 #include "fault_probe.h"
+#include "freq_source.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,16 +18,8 @@ extern "C" {
  * revision, serial, dates, capability bits) used to live here; they now
  * live in inventory.h and are loaded from device_info.json at startup so
  * operators can edit them without rebuilding opcd. */
-/* device-info WLAN FREQ/CH source (opc.conf device_info_freq_source).
- * Spec §3.3.4 defines these fields as the *configured* freq/CH ("설정 주파수"),
- * which is CONFIG (the shipping default — zero behavior change). LIVE/AUTO are
- * opt-in deviations pending vendor confirmation (docs/spec-inquiry.md G11). */
-typedef enum {
-    OPC_FREQ_SRC_CONFIG = 0,  /* always the set-radio config value (spec) */
-    OPC_FREQ_SRC_LIVE,        /* always the live associated value (0/0 if down) */
-    OPC_FREQ_SRC_AUTO,        /* live when associated, config otherwise */
-} opcd_freq_source_t;
-
+/* opcd_freq_source_t (device_info_freq_source) lives in freq_source.h so the
+ * opc.conf parser is host-unit-testable without linking main(). */
 typedef struct opcd_conf {
     uint16_t udp_port;             /* default OPC_DEFAULT_UDP_PORT */
     uint16_t default_station_type; /* OPC_STATION_SINGLE / DUAL */
