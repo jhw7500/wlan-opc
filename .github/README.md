@@ -49,7 +49,7 @@ Automatically reviews pull requests when opened or updated.
 - Critical issue detection (security, bugs, breaking changes)
 - Code quality suggestions
 - Performance considerations
-- Uses Gemini 2.0 Flash (Experimental) model
+- Uses the Gemini model set by the `GEMINI_MODEL` repo/org variable (default: `gemini-3-flash-preview`)
 
 **Triggers:** Automatically on PR opened or synchronized (new commits pushed)
 
