@@ -4,7 +4,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 기준 사양서 | `docs/opc_vhl_protocol_Rev1.00_KO.md` (원본 `Rev1.00_CANTOPS送付用-260525.pdf`, 전 41p) |
+| 기준 사양서 | `docs/spec/opc_vhl_protocol_Rev1.00_KO.md` (원본 `Rev1.00_CANTOPS送付用-260525.pdf`, 전 41p) |
 | 사양 판수 / 일자 | Rev 1.00 / 2026-05-25 (작성 落合庸央) |
 | 분석 대상 코드 | `protocol/{frame,codec,commands,indications}`, `opcd/{handler,opcd,indication,store,inventory}` |
 | 분석 기준 커밋 | `0128f03` (master, 2026-06-11) — 본문 파일:라인 참조는 이 시점 기준 |
@@ -40,6 +40,8 @@
 > - **후속 수정(2026-06-12~06-15)**: D1/D3/D4/D5/D8 입력값 검증 구현(PR #36) · A19 재송 폐기(PR #37) · D12/D13 프레임 경계 구현(PR #38) · **D7/V1 이벤트성 indication producer 완성** — FaultDetect 폴링(PR #39) + WlanStatus/Roaming/ApDisconnect nl80211(PR #46, ASSOCIATED 채널 #48/#49) · A12 ChangeIp deferred apply drain 내부 이동(PR #44/#51). **본문 D2·D7·V1 항목에 해소 반영(분석기준 커밋 `0128f03` 이후 변경분)**
 > - **후속 수정(2026-06-16, PR #53)**: **D9 재정정** — PR #34의 0x0011(입력 주파수) 근사 철회 → apply 런타임 실패 전용 `OPC_ERR_RADIO_APPLY=0x0050` 재도입(발주처 확인 대기, #35) + 실패 시 last-good 설정 재적용으로 원자성 확보("실패=무변화", DUAL partial-apply 발산 제거). 재적용은 리뷰(Gemini HIGH·Codex P1) 반영해 **NG ack 송신 후로 이연**(1초 응답예산 보호) + 동일설정 시 미arm(should_revert). 본문 D9 항목 갱신
 > - **후속 수정(2026-06-16)**: **D12/D13 관대 수신모델** — datagram이 버퍼/declared보다 *길어도* declared Length 신뢰해 `8+Length`까지 처리·trailing 무시(유효 프레임 무손실); 거부는 Length>max·9~63B·*부족*(truncated)만. 순수함수 `opcd_intake_frame_len()` 일원화, frame.c 무변경(trim된 정확 프레임에 SEC-003 검사 유지). 본문 D12/D13 갱신
+> - **후속 갱신(2026-06-29, DFK 공식답변 PPTX 260618 9~10p 반영 — *문서 확정 pass*, 코드 미변경)**: 🟢 확정 8건(무선1·R2 OK의미·R3·R5 지원여부·A8 헤더YES·A12 폐기·M5 기동상태·**기타3 Reset Ack Length=60**) · 🔴 코드정렬 TODO 5건(**D6/T2 List Boundary는 DFK 서면+일본어 원문(継続=continue)으로 page-22 확정** — VHL 수신해석값이라 발주처가 결정, 코드 page-22 정렬 / **A14 0x0013 오기삭제→0x0002 회귀** / T16 미접속 0xFFFF / T6 Current Val Mbps→% / T17 Indication coalesce) · 🟡 A5 무효문자 화이트리스트(백틱 모호)·A17 boundary코드 갱신본대기. **상세 매핑표: `docs/spec-inquiry/proto-todo.md` §DFK-2026-06-18**
+> - **후속 갱신(2026-06-29 오후, 확정 4건 *코드 반영 완료* — `make check` 통과, working tree, 커밋 전; 사용자 승인 범위)**: ① List Boundary page-22 flip(`commands.h` START=0x0001/CONT=0x0000) ② SetIndication 0x0013 제거→0x0002(`handler.c`/`ids.h`/vhlctl) ③ FaultDetect Network Current Val Mbps→사용률%(`fault_probe.c` net_pct) ④ password/ESSID 무효문자 화이트리스트(`handler.c` valid_opc_charset = A-Z a-z 0-9 . - _ + / : = ~ @, 백틱 제외). 본문 **D6·D7·A14·A5** 해소 반영. **미반영(보류)**: T16 미접속 0xFFFF·T17 Indication coalesce(회의/갱신본 대기). code-reviewer 적대적 검토 must-fix 0(net_over 동등성 증명). ⚠️ 레거시 password 락아웃 리스크는 A5에 기록.
 
 ---
 
@@ -64,9 +66,12 @@
 - **사양:** §3.3.5 `0x00010`(5자리) vs §3.3.1 `0x0010`(4자리)
 - **답변:** Error Cause는 2Byte이므로 4자리가 맞음. 5자리일 경우 맨 앞의 0을 빼서 계산(오타).
 
-**A5 · "무효 문자" 정의 부재** — 📌 문의 예정
+**A5 · "무효 문자" 정의 부재** — ✅ 구현 완료 (2026-06-29, DFK 화이트리스트)
 - **사양:** §3.3.5 '무효문자 지정(0x0011/0x0013)' — 무엇이 무효문자인지 미규정 → 검사 작성 불가
-- **답변:** TBD(문의 예정).
+- **답변(DFK 에러1) — 일본어 원본:** **"使用可能な文字はA〜Z、a〜z、0〜9、.\`（ピリオド）-（ハイフン）_（アンダースコア）+（プラス）/（スラッシュ）:（コロン）=（イコール）~（チルダ）@（アットマーク）"**. → 허용 문자 = **영숫자 + `. - _ + / : = ~ @`** (9개 특수문자 화이트리스트). 사양 갱신시 명문화 예정.
+- **백틱 잔여 모호 — 원본 표기 자체(한국어 오역 아님 확정):** 일본어 원본도 마침표 바로 뒤에 백틱이 붙어 있고(`.` + 백틱 + `（ピリオド）`) **백틱만 설명 괄호가 없음**(9개 특수문자는 각각 ピリオド/ハイフン/… 설명 보유). → 백틱은 마침표 입력 시 끼어든 **오타/잉여로 추정**하나 원본에 실재 → **DFK 확인 필요**(10번째 허용 문자인지 vs 삭제). 한글 PPTX의 "접속" 오역과 달리 이 백틱은 번역이 아닌 원본 단계 표기.
+- **✅ 조치 완료(2026-06-29):** `handler.c` `valid_opc_charset()` 신설(허용 A-Z a-z 0-9 . - _ + / : = ~ @, 백틱 제외) + Login(0x0011)·SetPassword 구(0x0011)/신(0x0013)·ESSID 0x0015(SetIpConfigList)에 적용. 검사 순서 = NUL종단 후 charset, mismatch 전. `ids.h` alias(LOGIN_PW_CHAR/OLD_PW_CHAR/NEW_PW_CHAR) 추가, test_handler 보강(백틱·공백·제어문자 거부), `make check` 통과. ChangeIp는 essid 미수신(슬롯 참조)이라 불요. **잔여**: 백틱 허용 여부 DFK 확인.
+- **⚠️ 레거시 락아웃 리스크 (code-review should-fix #4 — 인지/결정 필요):** 구 펌웨어(charset 미강제)가 화이트리스트 밖 문자를 포함한 password를 NVRAM에 저장했다면, 업그레이드 후 정당한 운영자도 Login의 charset 게이트(0x0011)에서 거부 → 로그인·SetPassword 불가 → 공장초기화 외 복구 불가. 기본값 `MyPassword`는 적합(회귀 없음)하고 §3.3.1 0x0011 사양 준수 동작이나, **출하 전 password가 화이트리스트 적합인지 확인** 필요. 마이그레이션 가드(Login charset 완화)는 사용자 결정 대기.
 
 **A6 · 빈 새 패스워드 처리 미정의** — ✅ 종결
 - **사양:** §3.3.5 "최대 127자, NULL종단"만 — 길이 0 허용/거부 침묵
@@ -77,9 +82,10 @@
 - **답변:** 커맨드 미수신으로 적혀 있음. 5분은 시스템 시간으로 계산.
 - **비고:** 현행 코드는 CLOCK_MONOTONIC(경과시간)으로 측정 — NTP 시각 점프에 영향받지 않아 "5분 미수신" 측정에 더 안전하므로 현행 유지.
 
-**A8 · Reserve(56B) 수신 검증 규칙 부재** — ✅ 종결
+**A8 · Reserve(56B) 수신 검증 규칙 부재** — ✅ 종결 (DFK 확인 2026-06-29)
 - **사양:** §3.2 도면에만 Reserve 표기 — 0 강제인지 무시인지 미정의
 - **답변:** 비어 있거나 0으로 올 가능성이 높으나 정의가 없으므로 byte 길이만 체크하면 됨 — 현행(무검증 수용)과 일치.
+- **[확정 2026-06-29]** DFK PPTX 기타2 "공통헤더 64B = 고정 8B + Reserve 56B(8~63)가 맞는지?" → **"YES"** 공식 확인. T3/T10 헤더 모델 확정.
 
 **A9 · GetBasicInfo에 Result/Error 필드 없음** — ✅ 종결
 - **사양:** §3.3.3 "발행조건 없으므로 반드시 응답" — malformed 요청에도 NG 표현 수단 없음
@@ -95,16 +101,18 @@
 **A12 · ChangeIp 경합(0x0012) "처리 종료" 모호** — ✅ 종결
 - **사양:** §3.3.7 "리스트 변경 처리 종료 전"
 - **답변:** IP 주소 변경은 Logout 처리 수신으로 응답 송신 후에 실시(응답 송신까지 대기). 불휘발 저장은 수행하지 않고 설정 변경만(전원 재투입 시 컨피그 IP로 복귀). 즉 변경 요구를 받아도 바로 실행하지 않고 Logout 응답 완료 후 IP 전환 — 현행 deferred-apply 구현과 일치.
+- **[확정 2026-06-29]** DFK PPTX 기타4 "자동 로그아웃(timeout) 시 대기 IP변경을 적용 안 하고 폐기?" → "어드레스 변경요구는 폐기 부탁드립니다 (명시적 Logout 요구가 아니므로)" — 우리 폐기 구현(M4) 공식 확정.
 
 **A13 · SetIPConfigList "갱신" vs "교체"** — 🔧 코드 수정 확정 (merge)
 - **사양:** §3.3.6 "갱신" vs "교체" 문구 양가
 - **답변:** 본 커맨드는 1회 최대 20개, 복수 회 발행으로 128개 수정 가능. 임시 메모리 영역의 값을 교체하고 최종 리스트 수신에 따라 불휘발 메모리에 저장. **커맨드에 갱신할 리스트 번호가 있으므로 전체 교체는 맞지 않다** — 지정 슬롯 갱신(merge).
 - **검증 보강(2026-06-11):** 원본 도면(image26) 우측 주석 "지정된 번호의 리스트를 **갱신한다**(更新する)" — merge 확정. ③의 **D2 수정 항목**으로 연결.
 
-**A14 · SetIndication 'Login 조건 위반' 0x0002/0x0013 중복** — ✅ 수정 완료(2026-06-11, 타 IP→0x0013) + 📌 문의(0x0002 중복)
+**A14 · SetIndication 'Login 조건 위반' 0x0002/0x0013 중복** — ✅ 해소 (2026-06-29, DFK: 0x0013 오기 삭제 → 0x0002, 코드 반영)
 - **사양:** §3.3.9 동일 명칭이 0x0002와 0x0013 두 값으로 나열
-- **답변(해석 확정 2026-06-11):** **0x0001 = 기판이 로그인 자체가 안 된 상태에서 발행 / 0x0013 = 기판은 로그인되어 있으나 로그인된 IP가 아닌 다른 IP로부터 발행.**
-- **코드 수정 후보:** `handle_set_indication_config`의 타 IP 에러를 0x0002 → **0x0013**으로 변경(`check_login_required` 공통 매핑의 명령별 오버라이드 필요). 0x0002와의 중복은 발주처 문의로 최종 확정.
+- **이전 해석(2026-06-11):** 0x0001 = 미로그인 발행 / 0x0013 = 로그인됐으나 타 IP 발행. 코드는 타IP를 0x0002 → **0x0013** override(`handler.c:1004-1009`).
+- **⚠️ DFK 답변(2026-06-29, PPTX 에러2):** "**0x0013는 오기입니다. 사양서 갱신시 삭제하겠습니다**" — 즉 §3.3.9에서 **0x0013을 제거하고 0x0002만 'Login 조건 위반'으로 유지**. 우리가 emit하는 0x0013을 DFK가 삭제하는 방향이라 **현 구현과 충돌**.
+- **✅ 조치 완료(2026-06-29):** handle_set_indication_config의 0x0013 override 제거 → 공통 매핑(미로그인 0x0001 / 타IP 0x0002) 사용. `ids.h`의 `OPC_ERR_IND_OTHER_IP` 정의 삭제, vhlctl 0x0013 라벨 정리, test_handler 14d를 0x0002 기대로 갱신, `make check` 통과. **잔여**: 갱신 사양서에서 0x0001/0x0002 역할 최종 확인. proto-todo §DFK-2026-06-18(에러2).
 
 **A15 · Logout 0x0001 의미 혼동** — ✅ 종결
 - **사양:** §3.3.2 — 0x0001이 Login(기동중)과 Logout(미로그인)에서 다른 조건 지칭
@@ -114,9 +122,10 @@
 - **사양:** §3.3.8 (*1) "Dual일 때만 유효" — 송신측 0 클리어 강제 여부 미정의
 - **답변:** Station Type에 맞지 않는 것을 보냈을 때는 NG + Error Cause = Station Type 이상(0x0010) — invalid station type 거부는 현행 구현돼 있음. SINGLE 시 WLAN#2 필드는 무시(현행 유지).
 
-**A17 · START 없는 CONTINUE/END 응답 미정의** — ✅ 수정 완료(2026-06-11, 0x0018 NG) + 📌 문의(0x0018 값 확정)
+**A17 · START 없는 CONTINUE/END 응답 미정의** — ✅ DFK 추기 약속(2026-06-29) — 값 확정 대기
 - **사양:** §3.3.6 — 비정상 boundary 시퀀스의 result 미규정
-- **답변:** **0x0018을 새로 정의해서 NG 응답** (현행은 OK + 조용히 commit skip). 발주처 문의 예정.
+- **답변:** **0x0018을 새로 정의해서 NG 응답** (현행 코드는 0x0018 NG 구현, `handler.c:709-724`).
+- **[DFK 2026-06-29, PPTX 에러3]** "사양서 갱신시 추기하겠습니다" — DFK가 비정상 시퀀스 에러코드를 사양에 추가 약속(**구체 값 미제시**). 우리 제안 0x0018 채택 여부는 갱신본 확인 대기. ※ '어느 값이 START인가'는 기타1/D6(page-22 REOPEN)와 연계.
 
 **A18 · channel CH 범위 규제도메인 의존** — ✅ 종결
 - **사양:** §3.3.4/3.3.8 "예 2.4G 1~11" — 밴드별 정확한 CH 집합 미정의
@@ -150,7 +159,7 @@
 | V2 | **set-radio mode/bw/channel 실드라이버 반영** | 현재 wifi.sh freq만 적용, 나머지 실HW 반영 범위 |
 | V3 | **ChangeIp ESSID/GW/NTP 전환** | wpa_supplicant 재설정 필요 — 현재 eth0 IP/netmask만 적용 |
 | V4 | **스텔스 AP ESSID NULL 처리 / logger info.ssid 갭** | ✅ `nxp_get_essid`가 link.json `info.ssid` 부재 시 nl80211 GET_INTERFACE(`NL80211_ATTR_SSID`) 커널 직접조회 fallback (2026-06-16, #48/#49 채널조회 동형) — 실타깃 검증 `essid='FXE3000_JHW'`(logger가 SSID 미기록인데도 정상 출력). 순수 스텔스(빈 SSID) 처리는 별도 |
-| V5 | **11r/ai/k/v capability 비트** | `device_info.json` 정적값 vs 실 silicon 광고 — 📌 고객사 문의 후 확정(2026-06-12 결정, #35 등록) |
+| V5 | **11r/ai/k/v capability 비트** | `device_info.json` 정적값 vs 실 silicon 광고 — 📌 고객사 문의 후 확정(2026-06-12 결정, #35). **[DFK 2026-06-29 PPTX 무선5]** "링크상태 아님, **지원여부**" → 정적 capability 해석 공식 확인. subset(88W9098: r/k/v 지원, ai 미지원)은 실측값 유지 |
 | V6 | **Dual radio WLAN#2/priority_ch 채움** | 실 dual-radio 동작 |
 | V7 | **Protocol Version 협상** | 멀티버전 장치 상호운용 (현재 version 미검증) |
 | V8 | **세션 IP-only 식별 (스푸핑)** | 신뢰망/L2/방화벽 격리 필요성 (SEC-001) |
@@ -198,10 +207,13 @@
 - **구현:** 항상 0x0010(불일치)만 반환
 - **해결:** NULL종단 검증(0x0012) 구현. **잔여:** 무효문자(0x0011)는 A5 발주처 답변 대기
 
-**D6 · List Boundary Flag 코드↔문서 정반대 (3중 드리프트)** — **해소 (2026-06-11, 문서 갱신)**
-- **사양:** page-22 vs page-24 모순은 **원본 docx에 실재** (변환 오류 아님). 단, 원본 재확인에서 번역본에 누락됐던 본문 문장("시작 리스트(**0x0000**)와 계속 리스트(0x0001)를 수신하면…") 발견 — **원본 3개 언급 중 2개가 START=0x0000 지지**
-- **구현:** 코드 = page-24(START=0x0000, `commands.h:270` "vendor confirmed") — **원본 다수 증거와 일치, 변경 불필요**
-- **조치:** stale했던 proto-todo T2를 RESOLVED(page-24 확정)로 갱신, 번역본에 누락 문장 보완. seed.yaml(page-22 기록)은 이력 문서라 미수정 — 드리프트 해소
+**D6 · List Boundary Flag 코드↔문서 정반대 (3중 드리프트)** — ✅ 해소 (2026-06-29, DFK 서면 page-22 확정 + 코드 반영)
+- **이 필드는 VHL→opcd 수신 해석값**(`handler.c:709-730`이 boundary_flag로 staging 분기) → **어느 값이 START인지는 발주처(VHL 송신측)가 정함**. 우리는 자체 확정 권한 없이 추측해 온 항목.
+- **사양:** page-22(개시0x0001/계속0x0000) vs page-24(개시0x0000/계속0x0001) 모순은 **원본 docx에 실재**.
+- **이력(미확정):** seed.yaml은 처음부터 page-22 + "vendor follow-up TODO". 2026-06-11에 **구두** 확인이라며 page-24(START=0x0000)로 추측 변경·코드 반영(서면 근거 없음).
+- **✅ DFK 서면 확정(2026-06-29, PPTX 기타1):** 일본어 원본 **"仕様書を更新し、開始（0x0001）、継続（0x0000）、完了（0x0002）に統一します"** → **page-22 확정**. 한국어 PPTX "접속(0x0000)"은 `継続`(continue)의 오역이라 가운데값=continue 명확(재확인 불필요).
+- **✅ 구현(page-22 반영 완료, 2026-06-29):** `commands.h`의 `OPC_LIST_BOUNDARY_START`=**0x0001** / `CONTINUE`=**0x0000** / END=0x0002로 flip(daemon을 VHL 송신측에 정렬). pack/unpack은 값 그대로라 무변경, staging 분기·vhlctl·테스트는 상수 참조로 자동 정합. `test_codec.c`에 와이어 절대값(0x0001/0x0000/0x0002) 검증 추가(상수 flip이 조용히 통과 못 하도록). START_END(0x0003) 미지원 유지. `make check` 통과. proto-todo T2.
+- **조치:** 코드(`commands.h:274-276`) **미변경 — DFK 재확인 후 결정**(사용자 2026-06-29: 모호한 단일 답변으로 와이어값을 뒤집지 않음. 재확인 시 page-22면 flip + 회귀테스트 + A17 boundary 코드 연계). **proto-todo T2 REOPENED** 참조. seed.yaml(page-22 기록)이 DFK 답변과 재정합됨.
 
 **D7 · 이벤트성 indication 4종 발행 경로 없음** — `indication.c`, `platform_nxp.c` — ✅ 해소(FaultDetect 2026-06-12 · 잔여 3종 producer 2026-06-15 PR #46)
 - **사양 §3.4:** WlanStatusChange/Roaming/ApDisconnect/FaultDetect
@@ -209,6 +221,7 @@
 - **해소 ①(2026-06-12):** **FaultDetect(0x0010)는 폴링 폭주 프로브로 발행 경로 구현**(`fault_probe.c`, `opcd_ind_tick`) — **T6 임시 정책(전부 발주처 확인 대기 #35)**: 임계 80%(opc.conf `congestion_*` 키로 가변) · 판별은 indication 보고 주기 · 지속 시 매 주기 재통지 · Current Val 단위 CPU/Disk=%, Network=Mbps · **Memory(0x0002)는 swapless 타깃이라 사양 정의(페이징) 성립 불가 → 미발행, Disk I/O(0x0003)로 일원화**
 - **해소 ②(2026-06-15, PR #46):** 잔여 3종(WlanStatusChange/Roaming/ApDisconnect) producer를 `nxp_drain_events`에 raw nl80211(CONNECT/DISCONNECT/ROAM 이벤트) 연동으로 구현 — `drain_events` no-op 해제. ASSOCIATED 채널 누락은 커널 `GET_INTERFACE` 동기 조회로 보강(PR #48/#49)
 - **실타깃 검증(2026-06-15 · 와이어 캡처 2026-06-16, 타깃 214.5 cts-wlan):** WlanStatusChange(CONNECT/DISCONNECT)를 `wpa_cli -i mlan0 disconnect/reconnect`로 end-to-end 포착 — 캡처값 **DISCONNECTED `wlan_status=0x0002, ch=0x0000` / CONNECTED `wlan_status=0x0001, ch=0x0230`(5G band|ch48), 양자 Length=60**(헤더 규칙 일치). CONNECTED의 정확한 채널값은 **ASSOCIATED 채널 보강(#48/#49) race 해소도 실증**. 상세: `tmp/device_test_192.168.214.5_20260616_v1_wlanstatus_e2e.md`. **Roaming·ApDisconnect는 미검증** — ApDisconnect는 AP-주도 deauth(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행되어 로컬 트리거 불가, Roaming은 핸드오버 환경 필요(→ #47 항목1 잔여)
+- **DFK 답변 반영(2026-06-29, PPTX Indication 1·3):** (1) **Current Val 단위** — DFK "사용률 0-100%(전 자원 %)" → **✅ 구현 완료**: Network Current Val을 Mbps→사용률%로 변경(`fault_probe.c` `net_pct = mbps*100/link`, 0-100% clamp; `indication.c`; net_over 판정은 정수연산상 동등 — code-review 증명). (2) **주기내 다중사상** — DFK "통지 주기의 **마지막 상태변화 1회만**(coalesce)" vs 현 에지 즉시·개별 → **⏳ 보류**(proto-todo T17, 회의에서 에지모델 trade-off 협의 예정). **임계 80%(가변)는 DFK가 "벤더 재량" 위임** → 확정.
 
 **D8 · SetRadio 주파수/CH 값 검증 없음** — `handler.c:609-655` — ✅ 부분 해결(2026-06-12)
 - **사양 §3.3.8:** 0x0011(주파수)/0x0012(CH)
@@ -265,7 +278,7 @@
 - **기본 비밀번호 `MyPassword` 노출** — 사양 위반 조항은 없음 → 엄밀히는 "보안 위험"이지 deviation 아님. 근거: SECURITY.md(운영 최초 변경 필수)
 - **세션 UDP 소스 IP-only 식별** — 스푸핑 가능. 근거: SECURITY.md SEC-001(신뢰망 전제)
 - **wlan_id 부재 → Dual WLAN#1/#2 구분 불가** — indication에 wlan_id 필드 없음. 근거: 사양 §3.4 한계, 코드 주석(`opcd.c` on_platform_event). **처리 방침(2026-06-12 사용자 결정): 📌 고객사 문의 예정(#35 항목 6) — 답변 전까지 잠정적으로 주 WLAN(mlan0) 기준으로만 발행**
-- **Reset Ack Length=60** — 사양 표기 0 vs body(4)+reserve 해석. 근거: `commands.h:406`. **[보강 2026-06-11]** 원본 도면(image38)도 Length=0 표기 확정(Reserve 8~63 + Result 64~67을 그리면서도 0) — 도면 자체가 Length 규칙(전체−8=60)과 자기모순. 코드는 일관 규칙(60)을 채택. **[확정 2026-06-12 사용자 판정]** Length=60이 맞음 — 도면의 0은 Reset 요구(진짜 빈 요구)에서 복사된 오타로 판단(리셋통지 §3.4.6 도면도 Length=60으로 일관). **proto-todo T15 RESOLVED, 벤더 확인 대기 해제** — 불일치가 있다면 상호운용 시험의 Reset 교환에서 즉시 드러남
+- **Reset Ack Length=60** — 사양 표기 0 vs body(4)+reserve 해석. 근거: `commands.h:406`. **[보강 2026-06-11]** 원본 도면(image38)도 Length=0 표기 확정(Reserve 8~63 + Result 64~67을 그리면서도 0) — 도면 자체가 Length 규칙(전체−8=60)과 자기모순. 코드는 일관 규칙(60)을 채택. **[확정 2026-06-12 사용자 판정]** Length=60이 맞음 — 도면의 0은 Reset 요구(진짜 빈 요구)에서 복사된 오타로 판단(리셋통지 §3.4.6 도면도 Length=60으로 일관). **proto-todo T15 RESOLVED, 벤더 확인 대기 해제** — 불일치가 있다면 상호운용 시험의 Reset 교환에서 즉시 드러남. **✅ [DFK 2026-06-29 + 사용자 확정]** DFK "오기입니다, 사양서 갱신시 삭제하겠습니다" + 사용자 판정(2026-06-29): **도면의 Length=0 표기가 오기, 60이 맞음**. "삭제"=잘못된 Length=0 표기 정정이며 Result/Error Cause 본문은 유지(Length=60). **우리 코드 60 그대로 맞음 — 변경 없음.** T11/T15 모호성 해소
 - **proto-todo T6/T9 call-site 참조 stale** — ✅ 해소(2026-06-12, 문서 갱신: T6 INTERIM 구현 반영 + 실제 심볼로 정정, T9 producer 부재/배관 현황 명시)
 
 ---
@@ -309,4 +322,4 @@
 2. **적대적 재검증** — "구현≠스펙" 주장 전건을 별도 에이전트가 코드를 다시 읽어 거짓양성 제거(5건 기각).
 3. **직접 코드확인** — 자동검증 누락분(setradio 0x0050, ResetNotice 발행조건)은 수동 grep/read로 확정.
 
-*본 문서는 코드리뷰 리포트(`docs/review-report.md`)와 상호보완적이며, 사양 적합성·상호운용 관점을 다룬다.*
+*본 문서는 코드리뷰 리포트(`docs/testing/review-report.md`)와 상호보완적이며, 사양 적합성·상호운용 관점을 다룬다.*

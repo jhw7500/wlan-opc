@@ -2,8 +2,8 @@
 
 > 작성일: 2026-06-19 · 작성: wlan-opc 팀
 > 상태: **설계 승인 → 구현 계획 대기**
-> 관련: `docs/opc_vhl_protocol_Rev1.00_KO.md` §3.3.4(:470/:745), `docs/spec-inquiry.md` G11,
-> `docs/spec-conformance.md`(#17 SetRadio Result 인접), `opcd/handler.c`, `opcd/platform.h`
+> 관련: `docs/spec/opc_vhl_protocol_Rev1.00_KO.md` §3.3.4(:470/:745), `docs/spec-inquiry/spec-inquiry.md` G11,
+> `docs/spec-inquiry/spec-conformance.md`(#17 SetRadio Result 인접), `opcd/handler.c`, `opcd/platform.h`
 
 ## 1. 배경 / 문제
 
@@ -85,5 +85,5 @@ device_info_freq_source = config   # 기본: 항상 설정값(스펙 §3.3.4 준
 
 ## 9. 미해결 (고객사 확인 대기)
 
-- device-info FREQ/CH의 표준 의미가 **설정값**인지 **접속값**인지 발주처 확정 필요 → `docs/spec-inquiry.md` **G11**.
+- device-info FREQ/CH의 표준 의미가 **설정값**인지 **접속값**인지 발주처 확정 필요 → `docs/spec-inquiry/spec-inquiry.md` **G11**.
   회신에 따라 출하 기본값을 `config`↔`auto`로 전환(코드 변경 불필요, 설정만).

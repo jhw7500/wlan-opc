@@ -1,9 +1,9 @@
 # OPC 사양 발주처 문의 리스트 (Spec Inquiry to Vendor)
 
-> 기준 사양서: `docs/opc_vhl_protocol_Rev1.00_KO.md` (無線基板共通制御通信仕様書 Rev1.00 / 2026-05-25, 落合庸央)
+> 기준 사양서: `docs/spec/opc_vhl_protocol_Rev1.00_KO.md` (無線基板共通制御通信仕様書 Rev1.00 / 2026-05-25, 落合庸央)
 > 작성일: 2026-06-17 · 작성: wlan-opc 팀
 > 목적: 사용자 약식 문의 18항목을 **사양 §절 번호**로 정렬하고, 각 항목의 (전제 정확성 / 사내 결정 현황 / 발주처 문의 가치)를 판정해 발주처(CONTEC / 落合) 발송용으로 정리.
-> 교차참조: `docs/spec-conformance.md`(A#/D#/V#), `docs/proto-todo.md`(T#), `docs/implementation-status.md`
+> 교차참조: `docs/spec-inquiry/spec-conformance.md`(A#/D#/V#), `docs/spec-inquiry/proto-todo.md`(T#), `docs/implementation/implementation-status.md`
 
 **판정 범례**
 - 🟢 유효 — 그대로 발주처에 물을 가치 있음
@@ -53,7 +53,7 @@
 | G8 | **§3.3.10** (리셋 요구 응답) | Reset Ack Length = 0 vs 60 | 사양 도면 0(자기모순), 사내 60 채택 (T15). 상호운용 리스크 | 중 |
 | G9 | **§3.4.7** (Keep Alive) | Timestamp 문자열 형식·시각 동기원(NTP 의존?) | "최대 31자 문자열"만 규정 | 하 |
 | G10 | **§2.2** (그림 2-2) | Dual Station 그림 "2124MHz" 표기 — 2.4GHz 유효 주파수 아님(2412~) | 사양 오타 의심 | 하 |
-| G11 | **§3.3.4** (장치 정보, WLAN FREQ/CH) | device-info의 FREQ/Channel을 **설정값(spec)** vs **접속(live)값** 중 무엇으로 반환? | 🔵 사양 :470/745 "**설정** 주파수/CH" 명시 vs 운영상 접속값 유용. 사내 토글(config/live/auto) 신설·출하 기본 config (`docs/design-device-info-freq-source.md`). 17번(SetRadio Result)과 인접 | 상 |
+| G11 | **§3.3.4** (장치 정보, WLAN FREQ/CH) | device-info의 FREQ/Channel을 **설정값(spec)** vs **접속(live)값** 중 무엇으로 반환? | 🔵 사양 :470/745 "**설정** 주파수/CH" 명시 vs 운영상 접속값 유용. 사내 토글(config/live/auto) 신설·출하 기본 config (`docs/implementation/design-device-info-freq-source.md`). 17번(SetRadio Result)과 인접 | 상 |
 
 ---
 
