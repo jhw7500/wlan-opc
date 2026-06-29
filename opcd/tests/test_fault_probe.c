@@ -75,6 +75,12 @@ int main(void)
     opcd_fault_evaluate(&p, 0, 100, 0, 1000,
                         25000000 /* 200 Mbit/s */, 100, &r);
     ASSERT(r.net_over && r.net_pct == 100,   "evaluate: 200Mbps/100link clamps to 100%");
+    /* sub-Mbps precision on a slow link (Gemini review): 9.7 Mbit/s on a
+     * 10 Mbit/s link = 97%, not 90% — a whole-Mbps floor before the % would
+     * drop the 0.7 Mbit/s and read 9 Mbps → 90%. */
+    opcd_fault_evaluate(&p, 0, 100, 0, 1000,
+                        1212500 /* 9.7 Mbit/s = 1212500 B/s */, 10, &r);
+    ASSERT(r.net_over && r.net_pct == 97,    "evaluate: 9.7Mbps/10link = 97% (no Mbps floor)");
 
     /* 4. conf overrides (key=value; unknown keys and comments ignored). */
     char conf[64];
