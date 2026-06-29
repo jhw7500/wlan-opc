@@ -126,7 +126,7 @@ void opcd_ind_tick(opcd_state_t *st)
             if (rep.disk_over)
                 (void)opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct);
             if (rep.net_over)
-                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_mbps);
+                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_pct);
         }
     }
 

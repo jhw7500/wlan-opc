@@ -122,12 +122,16 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
          * anomaly) must saturate instead of wrapping uint64. */
         if (d_net_bytes > UINT64_MAX / 8u) d_net_bytes = UINT64_MAX / 8u;
         uint64_t mbps = (d_net_bytes * 8ULL / elapsed_ms) / 1000u;
-        /* net_over is judged on the uncapped rate; net_mbps (the wire
-         * current_val, uint16) saturates at 65535 — a capture showing 65535
-         * means "at least 65.5 Gbit/s", not the exact trigger rate. */
-        out->net_mbps = (uint16_t)(mbps > 65535u ? 65535u : mbps);
-        if (link_mbps > 0)
-            out->net_over = mbps * 100u >= (uint64_t)link_mbps * p->threshold_pct;
+        /* current_val is link utilisation % (DFK 2026-06-29: 사용률 0-100%), not
+         * raw Mbps (proto-todo T6). Without a known link speed the percentage is
+         * undefined, so the resource stays un-flagged (net_pct 0, not over).
+         * Over-link traffic saturates at 100% rather than exceeding it. */
+        if (link_mbps > 0) {
+            uint64_t pct = mbps * 100u / link_mbps;
+            if (pct > 100u) pct = 100u;
+            out->net_pct  = (uint16_t)pct;
+            out->net_over = pct >= p->threshold_pct;
+        }
     }
 }
 

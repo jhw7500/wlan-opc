@@ -64,6 +64,7 @@ static char g_radio_path[128];
 
 /* error_cause of the last ack seen by the matching do_* helper below */
 static uint16_t g_last_ind_err, g_last_iplist_err, g_last_radio_err;
+static uint16_t g_last_login_err, g_last_pw_err;
 
 /* Bind a loopback UDP socket on an ephemeral port; returns the fd and the
  * chosen port. Used to observe the deferred Set* acks (PERF-001). */
@@ -126,6 +127,7 @@ static uint16_t do_login(opcd_state_t *st, uint32_t cip, const char *password)
 
     opc_login_ack_t ack;
     if (opc_login_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_login_err = ack.error_cause;
     return ack.result;
 }
 
@@ -149,6 +151,7 @@ static uint16_t do_set_password(opcd_state_t *st, uint32_t cip,
 
     opc_set_password_ack_t ack;
     if (opc_set_password_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_pw_err = ack.error_cause;
     return ack.result;
 }
 
@@ -403,6 +406,57 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK, "set-password: valid new password accepted");
     ASSERT(strcmp(st.password, "NewSecret123") == 0,
            "set-password: password updated");
+
+    /* 6. E1 (DFK 2026-06-29 written answer): password / ESSID character whitelist
+     *    = A-Z a-z 0-9 . - _ + / : = ~ @ (the source's lone backtick is excluded
+     *    as a typo). proto-todo §DFK-2026-06-18 (에러1). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    r = do_login(&st, CIP, "bad pass!");            /* space and '!' disallowed */
+    ASSERT(r == OPC_RESULT_NG && g_last_login_err == OPC_ERR_LOGIN_PW_CHAR,
+           "E1: Login invalid password char → 0x0011");
+    r = do_login(&st, CIP, "tick`bad");             /* backtick disallowed (the typo char) */
+    ASSERT(r == OPC_RESULT_NG && g_last_login_err == OPC_ERR_LOGIN_PW_CHAR,
+           "E1: Login backtick → 0x0011");
+    { char ctl[8]; ctl[0] = 'a'; ctl[1] = (char)0x01; ctl[2] = 'b'; ctl[3] = '\0';
+      r = do_login(&st, CIP, ctl);                  /* control char disallowed */
+      ASSERT(r == OPC_RESULT_NG && g_last_login_err == OPC_ERR_LOGIN_PW_CHAR,
+             "E1: Login control char → 0x0011"); }
+    init_state(&st, "Good.Pass-1_+/:=~@");          /* every allowed special char */
+    r = do_login(&st, CIP, "Good.Pass-1_+/:=~@");
+    ASSERT(r == OPC_RESULT_OK, "E1: Login full allowed charset → OK");
+
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_password(&st, CIP, OPC_PASSWORD_DEFAULT, "newbad`tick");  /* backtick disallowed */
+    ASSERT(r == OPC_RESULT_NG && g_last_pw_err == OPC_ERR_NEW_PW_CHAR,
+           "E1: SetPassword new password backtick → 0x0013");
+    r = do_set_password(&st, CIP, "old bad!", "GoodNew1");
+    ASSERT(r == OPC_RESULT_NG && g_last_pw_err == OPC_ERR_OLD_PW_CHAR,
+           "E1: SetPassword old password invalid char → 0x0011");
+
+    /* ESSID invalid char → 0x0015 (do_set_ip_list takes no essid arg → inline). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    {
+        opc_set_ip_config_list_req_t ipreq;
+        memset(&ipreq, 0, sizeof ipreq);
+        ipreq.entry_count = 1;
+        ipreq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START;
+        ipreq.entries[0].list_number   = 1;
+        ipreq.entries[0].ip_address    = 0xC0A80165u;
+        ipreq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        strncpy(ipreq.entries[0].essid, "bad essid!",
+                sizeof ipreq.entries[0].essid - 1);
+        uint8_t f[OPC_FRAME_MAX]; ssize_t fn =
+            opc_set_ip_config_list_req_pack(f, sizeof f, 5, &ipreq);
+        uint8_t rp[OPC_FRAME_MAX]; ssize_t rl = 0;
+        (void)opcd_dispatch(&st, f, (size_t)fn, CIP, 5000, rp, sizeof rp, &rl);
+        opc_set_ip_config_list_ack_t eack;
+        (void)opc_set_ip_config_list_ack_unpack(rp, (size_t)rl, &eack);
+        ASSERT(eack.result == OPC_RESULT_NG &&
+               eack.error_cause == OPC_ERR_IPCFG_ESSID_CHAR,
+               "E1: ESSID invalid char → 0x0015");
+    }
 
     /* ---- P1: SEC-002 indication session-lifetime + recipient validation ---- */
 
@@ -776,16 +830,17 @@ int main(void)
            st.ip_list.present[3] == 0,
            "A17: stale staging cleared on logout → END after re-login NGs");
 
-    /* 14d. A14: SetIndication from a non-login IP → 0x0013 (was the common
-     *      0x0002); the not-logged-in case stays 0x0001. */
+    /* 14d. A14 (DFK 2026-06-29 written answer: "0x0013 is a typo, will be deleted
+     *      on spec update"): SetIndication from a logged-in *other* IP → 0x0002
+     *      (the common login-condition); the not-logged-in case stays 0x0001. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     r = do_set_indication(&st, CIP, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
     ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_LOGIN_VIOLATION,
            "A14: not logged in → 0x0001 unchanged");
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     r = do_set_indication(&st, CIP + 1, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
-    ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_OTHER_IP,
-           "A14: other IP while logged in → 0x0013");
+    ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_LOGIN_CONDITION,
+           "A14: other IP while logged in → 0x0002 (0x0013 deleted per DFK)");
 
     /* 14e. D10: non-unicast indication recipient → 0x0012 (spec "IP 주소 이상"). */
     r = do_set_indication(&st, CIP, 0xFFFFFFFF, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
