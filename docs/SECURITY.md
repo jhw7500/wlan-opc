@@ -30,7 +30,7 @@ OPC 제어 프로토콜은 **사양상 암호화·메시지 인증이 없는 평
 - **임의 (동일 세그먼트) 유니캐스트 허용은 유지한다 (확정).** 현재 코드는 비유니캐스트만
   거부하고 임의 유니캐스트 수신자를 받는다(`opcd/handler.c::valid_unicast_ipv4`,
   주석 "Arbitrary unicast is allowed per spec"). loopback(`127.0.0.1`)도 OK로
-  문서화되어 있다(`docs/testing-guide.md`). 신뢰망 전제 하에서 비유니캐스트 거부 +
+  문서화되어 있다(`docs/testing/testing-guide.md`). 신뢰망 전제 하에서 비유니캐스트 거부 +
   세션-수명 종속으로 리플렉터 표면은 충분히 좁다.
 - **`period_seconds` 하한 캡은 적용하지 않는다.** 사양 SetIndicationConfig는
   Indication Period를 **0~255초로 명시**(0=사상 변화 즉시 통지, 1~255=주기 통지)하므로,

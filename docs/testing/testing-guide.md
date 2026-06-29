@@ -4,7 +4,7 @@ opcd / vhlctl / protocol을 직접 테스트하는 방법. 3가지 레벨(단위
 device-info 데이터 소스 확인법을 다룬다.
 
 > 시점별 검증 결과(실측값)는 `tmp/device_test_*.md` 리포트를, 1차 인수 체크리스트는
-> `docs/manual-runthrough.md`를 참조. 이 문서는 **방법**만 담는다.
+> `docs/testing/manual-runthrough.md`를 참조. 이 문서는 **방법**만 담는다.
 
 작업 디렉토리: `<repo-root>/wlan-package/wlan-opc`
 
@@ -137,7 +137,7 @@ sshpass -p '' ssh root@192.168.0.100        # 빈 비번
 
 mlan0/link.json 키 매핑: `info.ssid`→essid, `info.address`→WLAN mac, `link.address`→connect_ap_mac(=associated),
 `link.signal_avg`→RSSI, `channel_info.<freq>.noise`→SNR(`rssi−noise`), `link.tx_bitrate`(HE-/VHT-/MCS)→mode,
-`info.width`→bw. freq/channel은 **`device_info_freq_source`(opc.conf) 토글**: `config`(기본)=radio.conf 캐시 / `live`·`auto`=접속 시 live값(`live`+미접속→0/0, `auto`+미접속→캐시). mode/bw는 항상 live가 있으면 우선. (실타겟 검증: `docs/verify-device-info-freq-source.md`)
+`info.width`→bw. freq/channel은 **`device_info_freq_source`(opc.conf) 토글**: `config`(기본)=radio.conf 캐시 / `live`·`auto`=접속 시 live값(`live`+미접속→0/0, `auto`+미접속→캐시). mode/bw는 항상 live가 있으면 우선. (실타겟 검증: `docs/implementation/verify-device-info-freq-source.md`)
 
 ### live 필드는 재시작 없이 즉시 반영 — 파일을 바꿔 입증
 ```bash
@@ -201,7 +201,7 @@ $VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) �
 `0x01` InitComplete · `0x02` WlanStatusChange · `0x04` Roaming · `0x08` ApDisconnect ·
 `0x10` FaultDetect · `0x20` ResetNotice · `0x80` KeepAlive
 
-> **이벤트성 producer 구현됨**(2026-06-15): FaultDetect(0x10) 폴링 폭주 프로브(`fault_probe.c`) · WlanStatusChange(0x02)/Roaming(0x04)/ApDisconnect(0x08) nl80211 연동(PR #46, `nxp_drain_events`). 무선 이벤트 트리거는 **`wpa_cli -i mlan0 disconnect/reconnect`** 사용(`iw … disconnect`는 wpa_supplicant가 SME 소유라 "Operation not permitted"). ApDisconnect는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행 — 로컬 disconnect는 WlanStatusChange만 냄. 실타깃 검증(2026-06-15, 214.5): WlanStatusChange ✓ / Roaming·ApDisconnect는 트리거 환경 잔여(#47). 상세 절차는 `docs/manual-runthrough.md` §4 / 세션 메모리 참조.
+> **이벤트성 producer 구현됨**(2026-06-15): FaultDetect(0x10) 폴링 폭주 프로브(`fault_probe.c`) · WlanStatusChange(0x02)/Roaming(0x04)/ApDisconnect(0x08) nl80211 연동(PR #46, `nxp_drain_events`). 무선 이벤트 트리거는 **`wpa_cli -i mlan0 disconnect/reconnect`** 사용(`iw … disconnect`는 wpa_supplicant가 SME 소유라 "Operation not permitted"). ApDisconnect는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행 — 로컬 disconnect는 WlanStatusChange만 냄. 실타깃 검증(2026-06-15, 214.5): WlanStatusChange ✓ / Roaming·ApDisconnect는 트리거 환경 잔여(#47). 상세 절차는 `docs/testing/manual-runthrough.md` §4 / 세션 메모리 참조.
 > 항상 발생: InitComplete(0x01, enable/login/logout 시), KeepAlive(0x80, period마다), ResetNotice(0x20, reset 시).
 
 ### ErrorCause (protocol/ids.h) — `0x0010`은 다의(ARCH-001)
