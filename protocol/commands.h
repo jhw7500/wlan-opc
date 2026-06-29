@@ -261,18 +261,24 @@ int     opc_set_password_ack_unpack(const uint8_t *frame, size_t frame_len,
 #define OPC_SET_IP_CONFIG_LIST_BODY_MAX  (20 * OPC_IPCFG_ENTRY_LEN)   /* 1280 */
 #define OPC_SET_IP_CONFIG_LIST_REQ_LENGTH(n)  (56 + (n) * OPC_IPCFG_ENTRY_LEN)
 
-/* Boundary-flag values per spec page 24 (field description).
+/* Boundary-flag values per spec page 22 (body description), confirmed by
+ * DFK's written answer (PPTX 2026-06-29, 일본어 원본:
+ * "仕様書を更新し、開始0x0001 / 継続0x0000 / 完了0x0002に統一します"). proto-todo T2.
  *
- * Spec ambiguity: page 22 (body description) lists START=0x0001 and
- * CONTINUE=0x0000, while page 24 (field description) lists START=0x0000
- * and CONTINUE=0x0001. The vendor confirmed the page-24 field
- * description as authoritative.
+ * These flags are received from the VHL in a SetIpConfigList request and
+ * *interpreted* here (handler.c staging) — we do not define them, so the
+ * vendor's choice is authoritative.
  *
- * START_END (page-22 body 0x0003) is absent from the field description
- * and has been dropped — atomic single-frame commit is no longer
- * supported; callers must send a START frame followed by an END frame. */
-#define OPC_LIST_BOUNDARY_START      0x0000
-#define OPC_LIST_BOUNDARY_CONTINUE   0x0001
+ * Spec ambiguity (now resolved): page 22 (body) lists START=0x0001 /
+ * CONTINUE=0x0000; page 24 (field description) lists the opposite
+ * START=0x0000 / CONTINUE=0x0001. An earlier *verbal* vendor note had us
+ * adopt page-24; DFK's written answer reverted it to page-22.
+ *
+ * START_END (page-22 body 0x0003) is absent from DFK's answer and stays
+ * dropped — atomic single-frame commit is unsupported; callers must send a
+ * START frame followed by an END frame. */
+#define OPC_LIST_BOUNDARY_START      0x0001
+#define OPC_LIST_BOUNDARY_CONTINUE   0x0000
 #define OPC_LIST_BOUNDARY_END        0x0002
 
 typedef struct opc_ipcfg_entry {

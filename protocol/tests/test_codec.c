@@ -274,6 +274,14 @@ static int test_set_ip_config_list(void)
     }
     ssize_t n = opc_set_ip_config_list_req_pack(frame, sizeof frame, 0x0020, &ri);
     ASSERT(n > 0, "req pack");
+    /* Boundary-flag absolute wire encoding (spec page-22 / DFK 2026-06-29 written
+     * answer: 開始0x0001 / 継続0x0000 / 完了0x0002). Body begins at offset 64 and
+     * each 64-byte entry leads with the boundary_flag be16. The round-trip below
+     * only compares constants to themselves; these assert the literal byte so a
+     * flipped constant cannot pass silently. */
+    ASSERT(opc_be16_read(&frame[64 + 0 * OPC_IPCFG_ENTRY_LEN]) == 0x0001, "wire START=0x0001");
+    ASSERT(opc_be16_read(&frame[64 + 1 * OPC_IPCFG_ENTRY_LEN]) == 0x0000, "wire CONTINUE=0x0000");
+    ASSERT(opc_be16_read(&frame[64 + 2 * OPC_IPCFG_ENTRY_LEN]) == 0x0002, "wire END=0x0002");
     ASSERT(opc_be16_read(&frame[6])
            == OPC_SET_IP_CONFIG_LIST_REQ_LENGTH(ri.entry_count), "req length");
     opc_set_ip_config_list_req_t ro;
