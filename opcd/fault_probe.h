@@ -24,7 +24,8 @@ extern "C" {
  *     Disk I/O (0x0003)
  *   - Disk (0x0003): /proc/diskstats io_ticks utilisation, current_val = %
  *   - Network (0x0004): (rx+tx) rate vs link speed, threshold = 80% of the
- *     capacity, current_val = measured Mbps
+ *     capacity, current_val = link utilisation % (DFK 2026-06-29: 사용률 0-100%;
+ *     proto-todo T6 — was Mbps before the answer)
  *
  * Source paths are struct fields rather than literals so unit tests can
  * point the probe at synthetic files — the same temp-path pattern the store
@@ -60,7 +61,7 @@ typedef struct opcd_fault_probe {
 typedef struct opcd_fault_report {
     bool     cpu_over;  uint16_t cpu_pct;
     bool     disk_over; uint16_t disk_pct;
-    bool     net_over;  uint16_t net_mbps;
+    bool     net_over;  uint16_t net_pct;
 } opcd_fault_report_t;
 
 /* Defaults: 80% threshold, mmcblk0, eth0, real /proc and /sys paths. */

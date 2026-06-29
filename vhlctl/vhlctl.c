@@ -85,9 +85,9 @@ static const char *err_str(uint16_t e)
      * (see ids.h), so they cannot map to a single named constant — keep the
      * literals with combined labels. Interpret by the issuing command. */
     case 0x0010:                     return "0x0010 (indication-violation/pw-mismatch/slot-range/station-type)";
-    case 0x0011:                     return "0x0011 (slot-empty/radio-freq)";
+    case 0x0011:                     return "0x0011 (slot-empty/radio-freq/ipcfg-ip/pw-char)";
     case 0x0012:                     return "0x0012 (ip-change-conflict/ind-recipient-ip)";
-    case 0x0013:                     return "0x0013 (radio-mode/ind-other-ip)";
+    case 0x0013:                     return "0x0013 (radio-mode/ipcfg-gw/new-pw-char)";
     case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
     case OPC_ERR_LIST_SEQUENCE:      return "0x0018 (list-sequence)";
     /* SetRadioConfig apply failure — a runtime fault, distinct from the 0x0011
