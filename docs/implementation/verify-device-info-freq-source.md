@@ -1,7 +1,7 @@
 # device_info_freq_source 토글 실타겟 검증 절차
 
 > 대상: PR #60 (`opc.conf`의 `device_info_freq_source = config|live|auto`).
-> 설계: `docs/design-device-info-freq-source.md` · 일반 테스트법: `docs/testing-guide.md`.
+> 설계: `docs/implementation/design-device-info-freq-source.md` · 일반 테스트법: `docs/testing/testing-guide.md`.
 > 플레이스홀더: `<OPC_IP>` = 무선보드(opcd 상주), `<VHL_IP>` = pim-camera(vhlctl 실행).
 > opcd는 UDP :50607 systemd 상주, opc.conf = `/usr/local/opc/etc/opc.conf`.
 
