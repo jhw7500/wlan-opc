@@ -91,7 +91,7 @@ void fd_dump_indication (FILE *fp, uint16_t ind_id, const uint8_t *frame, size_t
 
 - 신규: `vhlctl/fielddump.h`, `vhlctl/fielddump.c`, `vhlctl/tests/test_fielddump.c`, `vhlctl/tests/Makefile`
 - 수정: `vhlctl/Makefile`(fielddump.o 링크), 루트 `Makefile`(check에 vhlctl/tests), `vhlctl.c`(`--hex` 플래그 + 3개 cmd 분기)
-- 문서: `docs/testing-guide.md`에 `--hex` 사용법 1단락 추가
+- 문서: `docs/testing/testing-guide.md`에 `--hex` 사용법 1단락 추가
 
 ## 구현 변경 — 누적(cumulative) offset 채택 (2026-06-05)
 

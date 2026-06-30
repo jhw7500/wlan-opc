@@ -383,7 +383,7 @@ git commit -m "test(opcd): ChangeIp essid가 슬롯→apply_ip_change로 전달�
 ## Task 6: 통합 빌드 검증 + spec/문서 동기화
 
 **Files:**
-- (검증 전용) + Modify: `docs/spec-conformance.md` 또는 `docs/implementation-status.md` 의 1.1/1.2 항목 상태 갱신
+- (검증 전용) + Modify: `docs/spec-inquiry/spec-conformance.md` 또는 `docs/implementation/implementation-status.md` 의 1.1/1.2 항목 상태 갱신
 
 - [ ] **Step 1: 전체 빌드/테스트**
 
@@ -397,13 +397,13 @@ Expected: `make check` FAIL 0, nxp 빌드 무경고.
 
 - [ ] **Step 2: 추적 문서 갱신**
 
-`docs/implementation-status.md` 의 1.2(ChangeIp essid apply) 를 "구현(wpa_cli 런타임, 비휘발)"으로, 1.1 의 freq 적용 경로를 "opc_wlan_apply.sh(wpa_cli)로 전환, mode/bw 는 여전히 미반영"으로 갱신. (gitignore 인 `proto-todo.md` 가 아니라 tracked 문서에 기록 — 프로젝트 규칙.)
+`docs/implementation/implementation-status.md` 의 1.2(ChangeIp essid apply) 를 "구현(wpa_cli 런타임, 비휘발)"으로, 1.1 의 freq 적용 경로를 "opc_wlan_apply.sh(wpa_cli)로 전환, mode/bw 는 여전히 미반영"으로 갱신. (gitignore 인 `proto-todo.md` 가 아니라 tracked 문서에 기록 — 프로젝트 규칙.)
 
 - [ ] **Step 3: Commit (사용자 승인 후)**
 
 ```bash
 cd <wlan-opc>
-git add docs/implementation-status.md
+git add docs/implementation/implementation-status.md
 git commit -m "docs(opcd): wpa_cli 런타임 freq/essid 적용 반영 — impl-status 1.1/1.2 갱신"
 ```
 
