@@ -124,9 +124,17 @@ static bool valid_opc_charset(const char *s)
     for (; *s != '\0'; s++) {
         unsigned char c = (unsigned char)*s;
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || strchr(".-_+/:=~@", (int)c) != NULL)
+            (c >= '0' && c <= '9'))
             continue;
-        return false;
+        /* allowed specials by direct comparison instead of a per-char strchr
+         * scan (Gemini review): . - _ + / : = ~ @ */
+        switch (c) {
+        case '.': case '-': case '_': case '+': case '/':
+        case ':': case '=': case '~': case '@':
+            continue;
+        default:
+            return false;
+        }
     }
     return true;
 }
