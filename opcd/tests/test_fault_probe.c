@@ -61,10 +61,26 @@ int main(void)
     opcd_fault_evaluate(&p, 79, 100, 0, 1000,
                         11250000 /* bytes in 1 s = 90 Mbit/s */, 100, &r);
     ASSERT(!r.cpu_over && r.cpu_pct == 79,   "evaluate: cpu 79% under 80");
-    ASSERT(r.net_over && r.net_mbps == 90,   "evaluate: 90 Mbps over 80% of 100");
+    /* Network current_val is utilisation % (DFK 2026-06-29, 사용률 0-100%), not raw
+     * Mbps: 90 Mbit/s on a 100 Mbit/s link = 90% → over 80%. */
+    ASSERT(r.net_over && r.net_pct == 90,    "evaluate: 90Mbps/100link = 90% over 80");
     opcd_fault_evaluate(&p, 0, 100, 0, 1000,
                         9000000 /* 72 Mbit/s */, 100, &r);
-    ASSERT(!r.net_over && r.net_mbps == 72,  "evaluate: 72 Mbps under 80% of 100");
+    ASSERT(!r.net_over && r.net_pct == 72,   "evaluate: 72Mbps/100link = 72% under 80");
+    /* %, not Mbps: the same 90 Mbit/s on a 200 Mbit/s link = 45% → under 80. */
+    opcd_fault_evaluate(&p, 0, 100, 0, 1000,
+                        11250000 /* 90 Mbit/s */, 200, &r);
+    ASSERT(!r.net_over && r.net_pct == 45,   "evaluate: 90Mbps/200link = 45% under 80");
+    /* over-link traffic saturates at 100%, never wraps past it. */
+    opcd_fault_evaluate(&p, 0, 100, 0, 1000,
+                        25000000 /* 200 Mbit/s */, 100, &r);
+    ASSERT(r.net_over && r.net_pct == 100,   "evaluate: 200Mbps/100link clamps to 100%");
+    /* sub-Mbps precision on a slow link (Gemini review): 9.7 Mbit/s on a
+     * 10 Mbit/s link = 97%, not 90% — a whole-Mbps floor before the % would
+     * drop the 0.7 Mbit/s and read 9 Mbps → 90%. */
+    opcd_fault_evaluate(&p, 0, 100, 0, 1000,
+                        1212500 /* 9.7 Mbit/s = 1212500 B/s */, 10, &r);
+    ASSERT(r.net_over && r.net_pct == 97,    "evaluate: 9.7Mbps/10link = 97% (no Mbps floor)");
 
     /* 4. conf overrides (key=value; unknown keys and comments ignored). */
     char conf[64];
@@ -122,7 +138,7 @@ int main(void)
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0, "sample: second call ok");
     ASSERT(r.cpu_over && r.cpu_pct == 90,    "sample: cpu 90% detected");
     ASSERT(r.disk_over && r.disk_pct >= 90,  "sample: disk ~95% detected");
-    ASSERT(r.net_over && r.net_mbps >= 85,   "sample: ~90 Mbps detected");
+    ASSERT(r.net_over && r.net_pct >= 85,    "sample: ~90% detected (90Mbps/100link)");
 
     /* 6. unreadable sources leave resources un-flagged (fail-soft). */
     opcd_fault_probe_init(&p);

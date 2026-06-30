@@ -121,13 +121,24 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
          * Clamp before the multiply: a pathological delta (sysfs counter
          * anomaly) must saturate instead of wrapping uint64. */
         if (d_net_bytes > UINT64_MAX / 8u) d_net_bytes = UINT64_MAX / 8u;
-        uint64_t mbps = (d_net_bytes * 8ULL / elapsed_ms) / 1000u;
-        /* net_over is judged on the uncapped rate; net_mbps (the wire
-         * current_val, uint16) saturates at 65535 — a capture showing 65535
-         * means "at least 65.5 Gbit/s", not the exact trigger rate. */
-        out->net_mbps = (uint16_t)(mbps > 65535u ? 65535u : mbps);
-        if (link_mbps > 0)
-            out->net_over = mbps * 100u >= (uint64_t)link_mbps * p->threshold_pct;
+        /* current_val is link utilisation % (DFK 2026-06-29: 사용률 0-100%), not
+         * raw Mbps (proto-todo T6). Compute the percentage directly from bits to
+         * avoid the precision loss of flooring to whole Mbps first (Gemini review:
+         * 9.7 Mbit/s of a 10 Mbit/s link must read 97%, not the 90% a whole-Mbps
+         * floor would give by truncating to 9 Mbps). Derivation:
+         *   Mbit/s = bytes*8 / (elapsed_ms*1000);  pct = (Mbit/s / link_mbps) * 100
+         *          = bytes*8 / (elapsed_ms * 10 * link_mbps).
+         * Without a known link speed the percentage is undefined, so the resource
+         * stays un-flagged (net_pct 0, not over). Over-link traffic saturates at
+         * 100% rather than exceeding it. (d_net_bytes is clamped to UINT64_MAX/8
+         * above, so the *8 cannot overflow.) */
+        if (link_mbps > 0) {
+            uint64_t denom = (uint64_t)elapsed_ms * 10u * (uint64_t)link_mbps;
+            uint64_t pct = denom ? (d_net_bytes * 8ULL) / denom : 0;
+            if (pct > 100u) pct = 100u;
+            out->net_pct  = (uint16_t)pct;
+            out->net_over = pct >= p->threshold_pct;
+        }
     }
 }
 

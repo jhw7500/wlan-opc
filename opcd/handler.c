@@ -112,6 +112,33 @@ static bool valid_ipcfg_addr(uint32_t ip_host)
     return valid_unicast_ipv4(ip_host) && (ip_host >> 24) != 127u;
 }
 
+/* Allowed character set for passwords and ESSIDs, per DFK's written answer
+ * (2026-06-29 PPTX 에러1): A-Z a-z 0-9 . - _ + / : = ~ @. The lone backtick in
+ * the source's ".`(ピリオド)" is treated as a stray typo and excluded (E1,
+ * proto-todo §DFK-2026-06-18 — revisit if DFK confirms the backtick). The
+ * argument must be a NUL-terminated field (callers verify NUL-termination
+ * first); an empty string is trivially valid (emptiness is enforced
+ * separately where it matters). */
+static bool valid_opc_charset(const char *s)
+{
+    for (; *s != '\0'; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9'))
+            continue;
+        /* allowed specials by direct comparison instead of a per-char strchr
+         * scan (Gemini review): . - _ + / : = ~ @ */
+        switch (c) {
+        case '.': case '-': case '_': case '+': case '/':
+        case ':': case '=': case '~': case '@':
+            continue;
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
 /* §3.3.6 per-entry value validation (D1). Returns 0 or the NG error cause.
  * Check order follows the spec's cause listing; the network/broadcast
  * re-check returns 0x0011 again but sits after the netmask check because
@@ -143,6 +170,7 @@ static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_termina
     if (e->ntp_server != 0 && !valid_ipcfg_addr(e->ntp_server))
         return OPC_ERR_IPCFG_NTP;                                             /* 0x0014 */
     if (!essid_terminated)                    return OPC_ERR_IPCFG_ESSID_NUL; /* 0x0016 */
+    if (!valid_opc_charset(e->essid))         return OPC_ERR_IPCFG_ESSID_CHAR;/* 0x0015 (E1) */
     return 0;
 }
 
@@ -370,6 +398,12 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
          * lists 0x0001/0x0002 ahead of the field-format causes, and exclusive
          * control is Login's primary semantic. */
         result = OPC_RESULT_NG; err = OPC_ERR_PW_NUL;
+    } else if (!valid_opc_charset(req.password)) {
+        /* §3.3.1 0x0011: password contains a disallowed character (E1, DFK
+         * 2026-06-29). Checked after NUL-termination (so the field is a valid C
+         * string) and before the mismatch check (so a bad charset reports
+         * 0x0011, not a generic 0x0010 mismatch). */
+        result = OPC_RESULT_NG; err = OPC_ERR_LOGIN_PW_CHAR;
     } else if (st->password[0] == '\0') {
         /* Empty stored password is "not provisioned" — it must never
          * authenticate. Without this, strncmp("", "") == 0 lets an empty
@@ -648,6 +682,12 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
         } else if (!req.new_password_terminated) {
             /* §3.3.5 0x0014: new password not NUL-terminated (D4) */
             result = OPC_RESULT_NG; err = OPC_ERR_NEW_PW_NUL;
+        } else if (!valid_opc_charset(req.old_password)) {
+            /* §3.3.5 0x0011: old password disallowed character (E1, DFK 2026-06-29) */
+            result = OPC_RESULT_NG; err = OPC_ERR_OLD_PW_CHAR;
+        } else if (!valid_opc_charset(req.new_password)) {
+            /* §3.3.5 0x0013: new password disallowed character (E1, DFK 2026-06-29) */
+            result = OPC_RESULT_NG; err = OPC_ERR_NEW_PW_CHAR;
         } else if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0) {
             result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else if (newlen == 0) {
@@ -1001,13 +1041,11 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
                 if (st->logged_in) opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
             }
         }
-    } else {
-        /* A14 (spec §3.3.9): "issued from a non-login IP" carries its own
-         * code 0x0013 for this command — override the common 0x0002 mapping
-         * check_login_required just stored. The not-logged-in case stays
-         * 0x0001. */
-        if (err == OPC_ERR_LOGIN_CONDITION) err = OPC_ERR_IND_OTHER_IP;
     }
+    /* A14 (DFK 2026-06-29 written answer: the 0x0013 "non-login IP" code is a typo,
+     * to be deleted on the next spec update). Login-condition errors therefore stay
+     * exactly as check_login_required mapped them — not-logged-in → 0x0001,
+     * logged-in-but-other-IP → 0x0002 — with no command-specific override. */
     opc_set_indication_config_ack_t ack = { .result = result, .error_cause = err };
     emit_ack(rlen, opc_set_indication_config_ack_pack(resp, rcap, seq, &ack));
     return 0;
