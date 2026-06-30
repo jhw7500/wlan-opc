@@ -25,5 +25,8 @@ docs/opc_vhl_protocol_Rev1.00_KO.md
 docs/manual-runthrough.md
 docs/spec-conformance.pdf
 
+# docs: 외부사(DFK) 미팅 자료 — 보안상 git 추적 제외 (로컬 보존)
+docs/dfk-meeting/
+
 # Compound Engineering tooling (machine-local)
 .compound-engineering/
