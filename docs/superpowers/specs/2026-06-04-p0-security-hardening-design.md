@@ -1,7 +1,7 @@
 # P0 보안 하드닝 설계
 
 - **작성일:** 2026-06-04
-- **근거:** `wlan-package/docs/review-report.md`(2026-06-02 종합 리뷰) 심층 분석 → P0 우선순위. 빈 비밀번호를 만들 수 있는 코드 경로(`set-password`로 빈 비번 설정 → 빈 로그인 통과)가 잠재 버그.
+- **근거:** `wlan-package/docs/testing/review-report.md`(2026-06-02 종합 리뷰) 심층 분석 → P0 우선순위. 빈 비밀번호를 만들 수 있는 코드 경로(`set-password`로 빈 비번 설정 → 빈 로그인 통과)가 잠재 버그.
 - **정정:** 초기에 "라이브 장치(192.168.0.100)가 빈 비밀번호 로그인을 통과시킨다"고 본 것은 오판이었다 — `vhlctl login`의 기본 `--password`가 `"MyPassword"`(vhlctl.c)라, 무인자 `login`이 보낸 기본 비밀번호를 빈 비번으로 오인한 것. 명시적 `login --password ''`는 정상적으로 NG. 장치의 실제 노출은 **빈 비밀번호가 아니라 알려진 기본 비밀번호**(SEC-005)다.
 - **브랜치:** `harden/p0-password-errorcode`
 - **PR:** 단일 PR (3개 항목 묶음)

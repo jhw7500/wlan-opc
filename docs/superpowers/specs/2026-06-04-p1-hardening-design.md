@@ -1,7 +1,7 @@
 # P1 하드닝 설계 (SEC-002 / ARCH-002 / ARCH-003)
 
 - **작성일:** 2026-06-04
-- **근거:** `wlan-package/docs/review-report.md` P1 항목 + P0 심층 분석
+- **근거:** `wlan-package/docs/testing/review-report.md` P1 항목 + P0 심층 분석
 - **브랜치:** `harden/p1-indication-session-pack`
 - **PR:** 단일 PR (3개 항목, SEC-002와 ARCH-002가 session teardown에서 결합)
 
