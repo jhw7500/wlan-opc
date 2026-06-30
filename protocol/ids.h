@@ -95,10 +95,12 @@
 /* 0x0011–0x0014 are likewise spec-overloaded: each name below intentionally
  * aliases the same wire value with a different, command-scoped meaning.
  *   0x0011 = SLOT_EMPTY (ChangeIp) | RADIO_FREQ (SetRadio) | IPCFG_IP (SetIpConfigList)
+ *            | LOGIN_PW_CHAR (Login) | OLD_PW_CHAR (SetPassword)
  *   0x0012 = IP_CHANGE_CONFLICT (ChangeIp) | IND_RECIPIENT_IP (SetIndication)
  *            | PW_NUL (Login/SetPassword) | IPCFG_NETMASK (SetIpConfigList)
  *            | RADIO_CH (SetRadio)
- *   0x0013 = RADIO_MODE (SetRadio) | IND_OTHER_IP (SetIndication) | IPCFG_GW (SetIpConfigList)
+ *   0x0013 = RADIO_MODE (SetRadio) | IPCFG_GW (SetIpConfigList) | NEW_PW_CHAR (SetPassword)
+ *            [IND_OTHER_IP (SetIndication) removed 2026-06-29 — DFK confirmed it a typo]
  *   0x0014 = RADIO_BW (SetRadio) | NEW_PW_NUL (SetPassword) | IPCFG_NTP (SetIpConfigList)
  * Each handler must use only its own command's names, and a single switch must
  * never mix two same-valued names — that is a duplicate-case compile error.
@@ -110,8 +112,11 @@
                                                        * OPC_ERR_RADIO_APPLY (D9). */
 #define OPC_ERR_IND_RECIPIENT_IP              0x0012  /* SetIndicationConfig: recipient IP invalid
                                                        * (non-unicast) — spec "IP 주소 이상" (D10) */
-#define OPC_ERR_IND_OTHER_IP                  0x0013  /* SetIndicationConfig: issued from a non-login IP
-                                                       * (A14; overlap with 0x0002 — vendor inquiry) */
+/* OPC_ERR_IND_OTHER_IP (0x0013) removed 2026-06-29: DFK's written answer (PPTX
+ * 에러2) confirmed "0x0013는 오기입니다. 사양서 갱신시 삭제하겠습니다" — a
+ * SetIndicationConfig from a logged-in other IP now returns the common
+ * OPC_ERR_LOGIN_CONDITION (0x0002), matching the not-logged-in/0x0001 pairing.
+ * proto-todo §DFK-2026-06-18 (에러2), A14. */
 #define OPC_ERR_LIST_SEQUENCE                 0x0018  /* SetIpConfigList: CONTINUE/END without prior
                                                        * START (A17).
                                                        * FIXME: wire value unconfirmed — 0x0018 is the
@@ -133,13 +138,18 @@
 #define OPC_ERR_PW_NUL                        0x0012  /* Login §3.3.1 / SetPassword(old) §3.3.5:
                                                        * password field not NUL-terminated */
 #define OPC_ERR_NEW_PW_NUL                    0x0014  /* SetPassword: new password not NUL-terminated */
+#define OPC_ERR_LOGIN_PW_CHAR                 0x0011  /* Login §3.3.1: password contains a disallowed
+                                                       * character (E1; charset confirmed by DFK
+                                                       * 2026-06-29 — A-Z a-z 0-9 . - _ + / : = ~ @) */
+#define OPC_ERR_OLD_PW_CHAR                   0x0011  /* SetPassword §3.3.5: old password disallowed char (E1) */
+#define OPC_ERR_NEW_PW_CHAR                   0x0013  /* SetPassword §3.3.5: new password disallowed char (E1) */
 #define OPC_ERR_IPCFG_IP                      0x0011  /* SetIpConfigList: impossible IP (0.0.0.0/bcast/mcast) */
 #define OPC_ERR_IPCFG_NETMASK                 0x0012  /* SetIpConfigList: not a valid netmask */
 #define OPC_ERR_IPCFG_GW                      0x0013  /* SetIpConfigList: gateway outside the entry's subnet */
 #define OPC_ERR_IPCFG_NTP                     0x0014  /* SetIpConfigList: impossible NTP server IP */
-#define OPC_ERR_IPCFG_ESSID_CHAR              0x0015  /* SetIpConfigList: invalid ESSID characters.
-                                                       * UNUSED — semantics undefined in the spec;
-                                                       * reserved pending the A5 inquiry (#35) */
+#define OPC_ERR_IPCFG_ESSID_CHAR              0x0015  /* SetIpConfigList §3.3.6: ESSID contains a
+                                                       * disallowed character (E1; charset confirmed by
+                                                       * DFK 2026-06-29 — A-Z a-z 0-9 . - _ + / : = ~ @) */
 #define OPC_ERR_IPCFG_ESSID_NUL               0x0016  /* SetIpConfigList: ESSID not NUL-terminated */
 #define OPC_ERR_IPCFG_LIST_SIZE               0x0017  /* SetIpConfigList: Length is not 56 + 64*n */
 #define OPC_ERR_RADIO_CH                      0x0012  /* SetRadioConfig: unsupported CH/band (incl. 6 GHz — A21) */
