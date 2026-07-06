@@ -168,7 +168,12 @@ Gemini(앱/워크플로) + Codex 리뷰 4건 수용·1건 기각, `opcd.c` 하�
 - **F2 iface→idx**: `idx=0` 강제 대신 iface로 idx 결정(mlan0=0/mlan1=1/그외 drop) → mlan1은 `on_platform_event` 단일-STA 가드가 정상 drop(오귀속 제거, 와이어계약 정합).
 - **F3 로그 rate-limit**: malformed datagram 로그를 1/64로 제한(로컬 오작동 프로세스 로그 스팸 방지).
 - **F4(기각)**: `parse_bssid`의 `v[i]>0xFF`는 `%2x`가 이미 2자리 제한이라 dead check(무해) — 변경 없음.
-- 실기기 재검: valid→0x0004 발행 / channel누락·mlan1→drop 확인.
+
+라운드2(claude 리뷰) 반영:
+- **[MEDIUM] 512B 초과 datagram**: `recvfrom`에 `MSG_TRUNC`로 실제 길이 확인 → 512B 초과 시 drop(잘린 페이로드를 완전한 것으로 오파싱 방지, rate-limit 로그).
+- **[LOW] rssi/snr 클램프**: `int8_t` 캐스트 전 [-128,127] 클램프(범위밖 값의 impl-defined 변환 회피).
+- **[LOW 보류]** `parse_bssid`/`roam_datagram_to_evt` host 단위테스트 — static 함수 추출 리팩터 필요, 동작은 e2e로 커버됨, 후속 과제.
+- 실기기 재검: valid→0x0004 발행 / channel누락·mlan1·**초과(813B)** datagram→drop 확인.
 
 ## 참조
 - 실측·층위 분석: 세션 메모리 `on-target-indication-testing`

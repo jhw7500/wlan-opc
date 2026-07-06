@@ -289,6 +289,11 @@ static int roam_datagram_to_evt(const char *json, opcd_platform_evt_t *evt)
     if (opc_json_integer(json, "freq", &freq) != 0 || freq < 2400 || freq > 7300)
         return -1;
 
+    /* Clamp to int8_t range: real rssi(dBm)/snr(dB) are always in range, but a
+     * stray out-of-range value would be implementation-defined on cast. */
+    if (snr  >  127) snr  =  127; else if (snr  < -128) snr  = -128;
+    if (rssi >  127) rssi =  127; else if (rssi < -128) rssi = -128;
+
     memset(evt, 0, sizeof *evt);
     evt->kind = OPCD_PEVT_ROAMING;
     evt->u.roaming.idx     = idx;
@@ -524,13 +529,23 @@ int main(int argc, char **argv)
                  * (debug log only), never block, never crash. */
                 while (1) {
                     char buf[513];   /* contract caps payload at 512 B + NUL */
-                    ssize_t rn = recvfrom(roam_fd, buf, sizeof buf - 1, 0,
-                                          NULL, NULL);
+                    ssize_t rn = recvfrom(roam_fd, buf, sizeof buf - 1,
+                                          MSG_TRUNC, NULL, NULL);
                     if (rn < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         if (errno == EINTR) continue;
                         LOG("roam recvfrom: %s", strerror(errno));
                         break;
+                    }
+                    /* MSG_TRUNC returns the FULL datagram length even when it
+                     * overflowed the buffer; a truncated payload must not be
+                     * parsed as if complete. Drop anything over the 512 B cap. */
+                    if (rn > (ssize_t)(sizeof buf - 1)) {
+                        static unsigned long oversize_cnt;
+                        if ((oversize_cnt++ % 64) == 0)
+                            LOG("roam-notify: oversized datagram (%zd B) — dropped (drops=%lu)",
+                                rn, oversize_cnt);
+                        continue;
                     }
                     buf[rn] = '\0';
                     opcd_platform_evt_t revt;
