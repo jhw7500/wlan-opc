@@ -161,6 +161,15 @@ python 기본 포트(50608)와 opcd `OPC_DEFAULT_ROAM_NOTIFY_PORT`(50608)는 **�
 - **wpa_supplicant 내부 bgscan**: mlan0 conf(`wpa_supplicant-mlan0.conf:11`) **주석처리=비활성** → 우회 자율 로밍 없음. (mlan1은 활성이나 opcd mlan0-only라 무관.) ⚠️ **잔여 리스크**: 런타임에 operator가 mlan0 bgscan을 켜면 그 로밍은 커널 CMD_CONNECT만 내어 3훅 우회·미통지(설계 §1/§8의 '재연결 구분 불가' 케이스, 차기 과제).
 - **런타임 미완(타깃 복귀 시)**: (a) 포트 50608 실기기 미충돌 `ss -lunp`, (b) 실제 로밍 1회 유발해 3경로만 경유하는지 로그 확인, (c) `wpa_cli roam` rc=0-but-FAIL 여부. — opcd `udp_port`=50607(test-env.json 확인)이라 50608 로컬 무충돌.
 
+### 9.5 코드리뷰 반영 (PR #64, 2026-07-06)
+Gemini(앱/워크플로) + Codex 리뷰 4건 수용·1건 기각, `opcd.c` 하드닝(와이어 포맷 불변):
+- **F5(Codex P2) 포트 충돌 가드**: `roam_notify_port == udp_port`이면 SO_REUSEADDR로 루프백 roam bind와 wildcard 제어 bind가 충돌해 로컬 VHL 요청이 roam_fd로 흡수(→무응답 타임아웃)될 수 있음 → 동일 포트 시 roam-notify **비활성화**(경고 로그).
+- **F1 channel/freq 필수 검증**: 누락/범위밖이면 datagram **drop**(`opc_chan_field(0,0)`=0x0000 발행 방지). `channel∈[1,255]`, `freq∈[2400,7300]`.
+- **F2 iface→idx**: `idx=0` 강제 대신 iface로 idx 결정(mlan0=0/mlan1=1/그외 drop) → mlan1은 `on_platform_event` 단일-STA 가드가 정상 drop(오귀속 제거, 와이어계약 정합).
+- **F3 로그 rate-limit**: malformed datagram 로그를 1/64로 제한(로컬 오작동 프로세스 로그 스팸 방지).
+- **F4(기각)**: `parse_bssid`의 `v[i]>0xFF`는 `%2x`가 이미 2자리 제한이라 dead check(무해) — 변경 없음.
+- 실기기 재검: valid→0x0004 발행 / channel누락·mlan1→drop 확인.
+
 ## 참조
 - 실측·층위 분석: 세션 메모리 `on-target-indication-testing`
 - opcd: `opcd/opcd.c`(epoll) · `opcd/platform.h`(evt) · `opcd/indication.c` · `opcd/nl80211_parse.c`

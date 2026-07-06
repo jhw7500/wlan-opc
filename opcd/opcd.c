@@ -254,9 +254,10 @@ static int parse_bssid(const char *s, uint8_t mac[6])
 
 /* Decode one roam-notify JSON datagram (flat top-level object, per design
  * §9.1 WIRE CONTRACT) into a ROAMING platform event. `json` must be
- * NUL-terminated. Returns 0 and fills *evt on success; -1 if the mandatory
- * ap_mac is missing/malformed (drop silently). idx is forced to 0 (mlan0-only
- * interim policy — see on_platform_event). */
+ * NUL-terminated. Returns 0 and fills *evt on success; -1 if a mandatory field
+ * (ap_mac / channel / freq) is missing or out of range, or the iface is not a
+ * known WLAN index (drop silently). idx is derived from the iface field so the
+ * on_platform_event single-STA guard can reject non-primary roams. */
 static int roam_datagram_to_evt(const char *json, opcd_platform_evt_t *evt)
 {
     char mac_str[32];
@@ -266,15 +267,31 @@ static int roam_datagram_to_evt(const char *json, opcd_platform_evt_t *evt)
     if (parse_bssid(mac_str, mac) != 0)
         return -1;
 
+    /* iface → idx: mlan0=0, mlan1=1, anything else dropped. Absent iface
+     * defaults to the primary (0). An mlan1 notify is then dropped downstream
+     * by the on_platform_event single-STA guard rather than mis-emitted as
+     * mlan0 (was: idx hard-forced to 0). */
+    char iface[16];
+    uint8_t idx = 0;
+    if (opc_json_string(json, "iface", iface, sizeof iface) == 0) {
+        if (strcmp(iface, "mlan0") == 0)      idx = 0;
+        else if (strcmp(iface, "mlan1") == 0) idx = 1;
+        else return -1;
+    }
+
     long rssi = 0, snr = 0, channel = 0, freq = 0;
-    (void)opc_json_integer(json, "rssi", &rssi);      /* optional → 0 */
-    (void)opc_json_integer(json, "snr", &snr);        /* optional → 0 */
-    (void)opc_json_integer(json, "channel", &channel);
-    (void)opc_json_integer(json, "freq", &freq);
+    (void)opc_json_integer(json, "rssi", &rssi);      /* optional → 0 (best-effort) */
+    (void)opc_json_integer(json, "snr", &snr);        /* optional → 0 (best-effort) */
+    /* channel/freq are mandatory: a Roaming(0x04) carrying channel 0 is
+     * meaningless, so drop rather than emit opc_chan_field(0, 0). */
+    if (opc_json_integer(json, "channel", &channel) != 0 || channel < 1 || channel > 255)
+        return -1;
+    if (opc_json_integer(json, "freq", &freq) != 0 || freq < 2400 || freq > 7300)
+        return -1;
 
     memset(evt, 0, sizeof *evt);
     evt->kind = OPCD_PEVT_ROAMING;
-    evt->u.roaming.idx     = 0;                        /* mlan0-only */
+    evt->u.roaming.idx     = idx;
     evt->u.roaming.snr     = (int8_t)snr;
     evt->u.roaming.rssi    = (int8_t)rssi;
     memcpy(evt->u.roaming.mac, mac, sizeof mac);
@@ -370,10 +387,21 @@ int main(int argc, char **argv)
     st.udp_fd = udp_fd;
 
     /* Roam-notify listener on loopback (non-fatal — a bind failure just means
-     * no local roam indications; the daemon still serves the VHL protocol). */
-    int roam_fd = open_roam_socket(st.conf.roam_notify_port);
-    if (roam_fd < 0)
-        LOG("roam-notify listener unavailable — local roam indications disabled");
+     * no local roam indications; the daemon still serves the VHL protocol).
+     * Refuse to share the control UDP port: with SO_REUSEADDR the loopback roam
+     * bind and the wildcard control bind would collide, and localhost VHL
+     * requests to that port could be delivered to the roam socket (parsed as
+     * garbage, never answered → silent client timeouts). Disable roam-notify
+     * in that misconfiguration. */
+    int roam_fd = -1;
+    if (st.conf.roam_notify_port == st.conf.udp_port) {
+        LOG("roam-notify port %u collides with control udp port — roam-notify disabled",
+            st.conf.roam_notify_port);
+    } else {
+        roam_fd = open_roam_socket(st.conf.roam_notify_port);
+        if (roam_fd < 0)
+            LOG("roam-notify listener unavailable — local roam indications disabled");
+    }
 
     int sig_fd   = open_signalfd();
     int timer_fd = open_timerfd_1s();
@@ -507,7 +535,12 @@ int main(int argc, char **argv)
                     buf[rn] = '\0';
                     opcd_platform_evt_t revt;
                     if (roam_datagram_to_evt(buf, &revt) != 0) {
-                        LOG("roam-notify: malformed datagram (%zd B) — ignored", rn);
+                        /* Rate-limit: a misbehaving local sender must not flood
+                         * the log. Emit 1-in-64 malformed drops with a count. */
+                        static unsigned long malformed_cnt;
+                        if ((malformed_cnt++ % 64) == 0)
+                            LOG("roam-notify: malformed datagram (%zd B) — ignored (drops=%lu)",
+                                rn, malformed_cnt);
                         continue;
                     }
                     on_platform_event(&revt, &st);
