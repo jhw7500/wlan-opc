@@ -32,11 +32,14 @@
 
 #include "../protocol/codec.h"
 #include "../protocol/indications.h"   /* OPC_WLAN_STATUS_CONNECTED/DISCONNECTED */
+#include "chan_encode.h"
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
+#include "json_util.h"
 #include "opcd_state.h"
 #include "platform.h"
+#include "roam_notify_conf.h"
 #include "snapshot.h"
 #include "store.h"
 #include "store_async.h"
@@ -123,6 +126,7 @@ static void state_set_defaults(opcd_state_t *st)
 {
     memset(st, 0, sizeof *st);
     st->conf.udp_port             = OPC_DEFAULT_UDP_PORT;
+    st->conf.roam_notify_port     = OPC_DEFAULT_ROAM_NOTIFY_PORT;
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
     st->conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
@@ -206,6 +210,78 @@ static int open_udp_socket(uint16_t port)
     return fd;
 }
 
+/* Roam-notify listener: same non-blocking UDP socket as open_udp_socket() but
+ * bound to 127.0.0.1 (loopback only) — the roam-notify sender is a local
+ * process (wifi_roam.py / passive_roam.py) so the port is never exposed off
+ * the box. Returns -1 on any failure (non-fatal at the call site). */
+static int open_roam_socket(uint16_t port)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) { LOG("roam socket: %s", strerror(errno)); return -1; }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in sa = {0};
+    sa.sin_family      = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port        = htons(port);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+        LOG("roam bind 127.0.0.1:%u failed: %s", port, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Parse a "xx:xx:xx:xx:xx:xx" BSSID string into mac[6]. Returns 0 on success,
+ * -1 on any malformed input (trailing garbage tolerated only after the 6th
+ * octet). */
+static int parse_bssid(const char *s, uint8_t mac[6])
+{
+    unsigned v[6];
+    char tail = 0;
+    int n = sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x%c",
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &tail);
+    /* Accept exactly the 6 octets (n==6), or 6 octets followed by one trailing
+     * char (n==7) — the closing quote is stripped by opc_json_string, so a
+     * clean address yields n==6. Reject anything with fewer octets. */
+    if (n < 6) return -1;
+    for (int i = 0; i < 6; i++) {
+        if (v[i] > 0xFF) return -1;
+        mac[i] = (uint8_t)v[i];
+    }
+    return 0;
+}
+
+/* Decode one roam-notify JSON datagram (flat top-level object, per design
+ * §9.1 WIRE CONTRACT) into a ROAMING platform event. `json` must be
+ * NUL-terminated. Returns 0 and fills *evt on success; -1 if the mandatory
+ * ap_mac is missing/malformed (drop silently). idx is forced to 0 (mlan0-only
+ * interim policy — see on_platform_event). */
+static int roam_datagram_to_evt(const char *json, opcd_platform_evt_t *evt)
+{
+    char mac_str[32];
+    if (opc_json_string(json, "ap_mac", mac_str, sizeof mac_str) != 0)
+        return -1;
+    uint8_t mac[6];
+    if (parse_bssid(mac_str, mac) != 0)
+        return -1;
+
+    long rssi = 0, snr = 0, channel = 0, freq = 0;
+    (void)opc_json_integer(json, "rssi", &rssi);      /* optional → 0 */
+    (void)opc_json_integer(json, "snr", &snr);        /* optional → 0 */
+    (void)opc_json_integer(json, "channel", &channel);
+    (void)opc_json_integer(json, "freq", &freq);
+
+    memset(evt, 0, sizeof *evt);
+    evt->kind = OPCD_PEVT_ROAMING;
+    evt->u.roaming.idx     = 0;                        /* mlan0-only */
+    evt->u.roaming.snr     = (int8_t)snr;
+    evt->u.roaming.rssi    = (int8_t)rssi;
+    memcpy(evt->u.roaming.mac, mac, sizeof mac);
+    evt->u.roaming.channel = opc_chan_field((uint32_t)freq, (uint16_t)channel);
+    return 0;
+}
+
 static int open_signalfd(void)
 {
     sigset_t mask;
@@ -255,6 +331,8 @@ int main(int argc, char **argv)
      * thresholds); other settings still come from defaults / CLI options. */
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
     st.conf.device_info_freq_source = opcd_freq_source_parse(st.paths.conf);
+    st.conf.roam_notify_port =
+        opcd_roam_notify_port_parse(st.paths.conf, st.conf.roam_notify_port);
 
     ensure_dirs(&st);
     state_load_from_disk(&st);
@@ -291,12 +369,19 @@ int main(int argc, char **argv)
     if (udp_fd < 0) { g_teardown(); return 1; }
     st.udp_fd = udp_fd;
 
+    /* Roam-notify listener on loopback (non-fatal — a bind failure just means
+     * no local roam indications; the daemon still serves the VHL protocol). */
+    int roam_fd = open_roam_socket(st.conf.roam_notify_port);
+    if (roam_fd < 0)
+        LOG("roam-notify listener unavailable — local roam indications disabled");
+
     int sig_fd   = open_signalfd();
     int timer_fd = open_timerfd_1s();
     int ep       = epoll_create1(EPOLL_CLOEXEC);
     if (sig_fd < 0 || timer_fd < 0 || ep < 0) {
         LOG("setup failed");
         close(udp_fd);
+        if (roam_fd  >= 0) close(roam_fd);
         if (sig_fd   >= 0) close(sig_fd);
         if (timer_fd >= 0) close(timer_fd);
         if (ep       >= 0) close(ep);
@@ -347,6 +432,19 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Roam-notify datagrams from the local WLAN roaming executor. Non-fatal on
+     * registration failure (same idiom as store_fd): close and mark -1 so the
+     * dispatch loop's `fd == roam_fd` arm stays inert. */
+    if (roam_fd >= 0) {
+        struct epoll_event ev_roam = { .events = EPOLLIN, .data.fd = roam_fd };
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, roam_fd, &ev_roam) != 0) {
+            LOG("epoll_ctl(roam_fd=%d) failed: %s — roam-notify disabled",
+                roam_fd, strerror(errno));
+            close(roam_fd);
+            roam_fd = -1;
+        }
+    }
+
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
     while (!st.should_exit && !st.should_reset) {
@@ -390,6 +488,29 @@ int main(int argc, char **argv)
                         drain_rc);
                     epoll_ctl(ep, EPOLL_CTL_DEL, evt_fd, NULL);
                     evt_fd = -1;
+                }
+            } else if (fd == roam_fd) {
+                /* Local roam-notify datagrams (loopback only). Drain the whole
+                 * non-blocking socket; each datagram is one flat JSON object
+                 * (design §9.1 WIRE CONTRACT). Malformed/short → drop silently
+                 * (debug log only), never block, never crash. */
+                while (1) {
+                    char buf[513];   /* contract caps payload at 512 B + NUL */
+                    ssize_t rn = recvfrom(roam_fd, buf, sizeof buf - 1, 0,
+                                          NULL, NULL);
+                    if (rn < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        if (errno == EINTR) continue;
+                        LOG("roam recvfrom: %s", strerror(errno));
+                        break;
+                    }
+                    buf[rn] = '\0';
+                    opcd_platform_evt_t revt;
+                    if (roam_datagram_to_evt(buf, &revt) != 0) {
+                        LOG("roam-notify: malformed datagram (%zd B) — ignored", rn);
+                        continue;
+                    }
+                    on_platform_event(&revt, &st);
                 }
             } else if (fd == udp_fd) {
                 while (1) {
@@ -509,6 +630,7 @@ int main(int argc, char **argv)
     }
     if (g_teardown) g_teardown();
     close(udp_fd);
+    if (roam_fd >= 0) close(roam_fd);
     close(sig_fd);
     close(timer_fd);
     close(ep);
