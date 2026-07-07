@@ -22,12 +22,14 @@ extern "C" {
  * opc.conf parser is host-unit-testable without linking main(). */
 typedef struct opcd_conf {
     uint16_t udp_port;             /* default OPC_DEFAULT_UDP_PORT */
+    uint16_t roam_notify_port;     /* default OPC_DEFAULT_ROAM_NOTIFY_PORT */
     uint16_t default_station_type; /* OPC_STATION_SINGLE / DUAL */
     uint32_t login_idle_s;         /* configurable for tests (default OPC_LOGIN_IDLE_S) */
     opcd_freq_source_t device_info_freq_source; /* default OPC_FREQ_SRC_CONFIG */
 } opcd_conf_t;
 
-#define OPC_DEFAULT_UDP_PORT  50607
+#define OPC_DEFAULT_UDP_PORT         50607
+#define OPC_DEFAULT_ROAM_NOTIFY_PORT 50608
 #define OPC_PASSWORD_DEFAULT  "MyPassword"
 
 /* Filesystem paths under /usr/local/opc/etc — defaults. */
