@@ -193,44 +193,39 @@ static int ensure_dirs(const opcd_state_t *st)
     return 0;
 }
 
-static int open_udp_socket(uint16_t port)
+/* Create a non-blocking (SOCK_NONBLOCK|SOCK_CLOEXEC) UDP socket with
+ * SO_REUSEADDR, bound to bind_addr:port. `what` labels failures in the log.
+ * Returns the fd, or -1 on any failure (the fd is closed before returning). */
+static int open_udp_socket_addr(uint16_t port, uint32_t bind_addr, const char *what)
 {
     int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0) { LOG("socket: %s", strerror(errno)); return -1; }
+    if (fd < 0) { LOG("%s socket: %s", what, strerror(errno)); return -1; }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in sa = {0};
     sa.sin_family      = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    sa.sin_addr.s_addr = htonl(bind_addr);
     sa.sin_port        = htons(port);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        LOG("bind :%u failed: %s", port, strerror(errno));
+        LOG("%s bind port %u failed: %s", what, port, strerror(errno));
         close(fd);
         return -1;
     }
     return fd;
 }
 
-/* Roam-notify listener: same non-blocking UDP socket as open_udp_socket() but
- * bound to 127.0.0.1 (loopback only) — the roam-notify sender is a local
- * process (wifi_roam.py / passive_roam.py) so the port is never exposed off
- * the box. Returns -1 on any failure (non-fatal at the call site). */
+/* VHL control socket — wildcard bind (reachable from the wired/VHL host). */
+static int open_udp_socket(uint16_t port)
+{
+    return open_udp_socket_addr(port, INADDR_ANY, "udp");
+}
+
+/* Roam-notify listener — loopback only; the sender is a local process
+ * (wifi_roam.py / passive_roam.py) so the port is never exposed off the box.
+ * Returns -1 on any failure (non-fatal at the call site). */
 static int open_roam_socket(uint16_t port)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0) { LOG("roam socket: %s", strerror(errno)); return -1; }
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in sa = {0};
-    sa.sin_family      = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port        = htons(port);
-    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        LOG("roam bind 127.0.0.1:%u failed: %s", port, strerror(errno));
-        close(fd);
-        return -1;
-    }
-    return fd;
+    return open_udp_socket_addr(port, INADDR_LOOPBACK, "roam-notify");
 }
 
 /* parse_bssid() + roam_datagram_to_evt() live in roam_datagram.c so the
@@ -469,6 +464,7 @@ int main(int argc, char **argv)
                         LOG("roam recvfrom: %s", strerror(errno));
                         break;
                     }
+                    if (rn == 0) continue;   /* empty datagram — nothing to parse */
                     /* MSG_TRUNC returns the FULL datagram length even when it
                      * overflowed the buffer; a truncated payload must not be
                      * parsed as if complete. Drop anything over the 512 B cap. */

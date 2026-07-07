@@ -31,6 +31,12 @@ int main(void)
     CHECK(roam_parse_bssid("04:ba:d6:ec:0b", mac) != 0, "parse_bssid: too few octets");
     CHECK(roam_parse_bssid("zz:ba:d6:ec:0b:08", mac) != 0, "parse_bssid: non-hex");
     CHECK(roam_parse_bssid("", mac) != 0, "parse_bssid: empty");
+    /* Trailing garbage after the 6th octet is tolerated (design §9.1: %c
+     * absorbs the 7th separator, n==7 still accepted). */
+    CHECK(roam_parse_bssid("04:ba:d6:ec:0b:08:99", mac) == 0 && mac[5]==0x08,
+          "parse_bssid: trailing octet tolerated (n==7)");
+    CHECK(roam_parse_bssid("00:00:00:00:00:00", mac) == 0 && mac[0]==0 && mac[5]==0,
+          "parse_bssid: all-zero MAC accepted");
 
     /* ---- roam_datagram_to_evt ---- */
     opcd_platform_evt_t evt;
