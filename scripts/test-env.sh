@@ -1,4 +1,5 @@
-# wlan-opc on-target 테스트 환경 로더 (source 전용)
+# shellcheck shell=bash
+# wlan-opc on-target 테스트 환경 로더 (source 전용 — 실행 아닌 `source scripts/test-env.sh`)
 #
 #   source scripts/test-env.sh              # repo 루트의 test-env.json 사용
 #   source scripts/test-env.sh /path/x.json # 다른 config
@@ -52,6 +53,17 @@ print(f'TEST_SSH={shlex.quote(str(g("ssh.user"))+"@"+str(g("ssh.host")))}')
 PY
 )" || { echo "test-env: JSON 파싱 실패 ($_te_cfg)" >&2; return 1 2>/dev/null || exit 1; }
 eval "$_te_assign"
+
+# --- 필수 필드 검증: 빈 값이면 조기 실패 (예: example 복사 후 키 누락) ---
+for _te_req in TEST_OPC_HOST TEST_OPC_PORT PW VHLCTL_BIN; do
+  if [ -z "${!_te_req}" ]; then
+    echo "test-env: 필수 필드 누락/빈값: $_te_req ($_te_cfg)" >&2
+    unset _te_req
+    return 1 2>/dev/null || exit 1
+  fi
+done
+unset _te_req
+[ "$PW" = "CHANGE_ME" ] && echo "test-env: warn: password가 예시값(CHANGE_ME) 그대로입니다" >&2
 
 # --- vhlctl 경로: 상대경로면 config(=repo 루트) 기준 절대경로로 (CWD 무관) ---
 _te_root="$(cd "$(dirname "$_te_cfg")" && pwd)"

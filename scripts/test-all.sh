@@ -23,10 +23,15 @@ chk(){ local d="$1" e="$2"; shift 2; local o; o="$("$@" 2>&1)"
 skipn(){ printf '  SKIP  %s  (%s)\n' "$1" "$2"; skip=$((skip+1)); }
 
 # --- 안전: etc 스냅샷 + 복원 트랩 ---
+# 스냅샷 실패(타겟 오프라인/ssh 오류/cp 실패) 시 즉시 중단 — 트랩 설정 전이므로 타겟 무변경.
+# 복원은 반드시 백업(etc.testbak) 존재 확인 후에만 rm -rf — 백업 없이 etc를 지우면
+# 타겟 설정 디렉토리가 통째로 유실된다 (PR #65 리뷰: Codex P1 + Gemini CRITICAL).
 sec "SETUP: etc 스냅샷"
-vhl_ssh 'rm -rf /usr/local/opc/etc.testbak; cp -a /usr/local/opc/etc /usr/local/opc/etc.testbak && echo snapshot-ok' 2>&1 | tail -1
+snap=$(vhl_ssh 'rm -rf /usr/local/opc/etc.testbak; cp -a /usr/local/opc/etc /usr/local/opc/etc.testbak && echo snapshot-ok' 2>&1 | tail -1)
+echo "  $snap"
+[ "$snap" = "snapshot-ok" ] || { echo "  스냅샷 실패 — 중단(타겟 미변경)"; exit 1; }
 restore(){ echo; sec "TEARDOWN: etc 복원 + opcd 재시작"
-  vhl_ssh 'rm -rf /usr/local/opc/etc; mv /usr/local/opc/etc.testbak /usr/local/opc/etc 2>/dev/null; systemctl restart opcd; sleep 1; echo restored=$(systemctl is-active opcd)' 2>&1 | tail -1
+  vhl_ssh 'if [ -d /usr/local/opc/etc.testbak ]; then rm -rf /usr/local/opc/etc && mv /usr/local/opc/etc.testbak /usr/local/opc/etc; else echo "testbak 없음 — etc 보존"; fi; systemctl restart opcd; sleep 1; echo restored=$(systemctl is-active opcd)' 2>&1 | tail -1
   $VHL logout >/dev/null 2>&1 || true; }
 trap restore EXIT
 
@@ -56,7 +61,7 @@ timeout 7 "$VHLCTL_BIN" --hex listen --bind "0.0.0.0:$TEST_LISTEN_PORT" > "$LOG.
 LP=$!; sleep 6
 $VHL set-indication --bits 0x80 --period 0 --to "$VHLIP:$TEST_LISTEN_PORT" >/dev/null 2>&1   # teardown
 wait $LP 2>/dev/null
-ka=$(grep -c "req_id" "$LOG.ka" 2>/dev/null || echo 0)
+ka=$(grep -c "indication 0x0080" "$LOG.ka" 2>/dev/null || echo 0)
 if [ "${ka:-0}" -ge 2 ]; then printf '  PASS  KeepAlive 수신 %d프레임 (seq 단조/teardown)\n' "$ka"; pass=$((pass+1))
 else printf '  \033[31mFAIL\033[0m  KeepAlive 수신 부족(%s)\n' "$ka"; fail=$((fail+1)); FAILED="${FAILED}\n  - KeepAlive"; fi
 
@@ -132,4 +137,6 @@ sec "RESULT"
 printf '  PASS=%d  FAIL=%d  SKIP=%d\n' "$pass" "$fail" "$skip"
 [ "$fail" -gt 0 ] && printf '  실패:%b\n' "$FAILED"
 rm -f "$LOG".ka "$LOG".rn "$LOG".roam 2>/dev/null
+# CI/스크립트 게이트용: 실패가 있으면 비0 종료 (PR #65 리뷰: Codex P2)
+[ "$fail" -gt 0 ] && exit 1
 exit 0

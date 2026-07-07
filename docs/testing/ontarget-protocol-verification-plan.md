@@ -254,16 +254,23 @@ tcpdump -r evidence/L6_reqack.pcap -n -X | less
 
 ## 6. 자동화 / 증거수집
 
-무선 OTA 불안정 대비 — **장치 내부에서 setsid 완주** 후 로그만 회수(testing-guide 권장 패턴):
+**리포 동봉 스위트**: `scripts/test-all.sh` (호스트=VHL에서 실행, `test-env.json` 환경 로드,
+etc 스냅샷/복원 트랩·PASS/FAIL 집계·실패 시 비0 종료 내장):
 ```bash
-scp scripts/onboard_verify.sh root@192.168.0.100:/tmp/
-ssh root@192.168.0.100 'cd /tmp && setsid bash onboard_verify.sh > /tmp/verify.log 2>&1 < /dev/null &'
+cp test-env.json.example test-env.json   # 실제 값 기입 (비추적)
+bash scripts/test-all.sh                 # 전체 스윕 — exit 0 = 전부 PASS
+```
+무선 OTA 불안정 대비 — **장치 내부에서 setsid 완주** 후 로그만 회수(testing-guide 권장 패턴,
+`<onboard-script>.sh`는 자리표시자 — 검증 항목을 담은 임의 스크립트로 대체, 리포 미포함):
+```bash
+scp <onboard-script>.sh root@192.168.0.100:/tmp/
+ssh root@192.168.0.100 'cd /tmp && setsid bash <onboard-script>.sh > /tmp/verify.log 2>&1 < /dev/null &'
 scp root@192.168.0.100:/tmp/verify.log evidence/
 scp root@192.168.0.100:/tmp/*.pcap     evidence/
 # 장치 내부 vhlctl(무선 무관, 안정):
 #   /usr/local/opc/bin/vhlctl --host 127.0.0.1 --port 50607 device-info
 ```
-**PASS/FAIL 집계 골격**:
+**PASS/FAIL 집계 골격** (test-all.sh의 `chk` 패턴):
 ```bash
 pass=0; fail=0
 chk(){ desc="$1"; exp="$2"; shift 2; out=$("$@" 2>&1)
