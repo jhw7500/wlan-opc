@@ -32,11 +32,15 @@
 
 #include "../protocol/codec.h"
 #include "../protocol/indications.h"   /* OPC_WLAN_STATUS_CONNECTED/DISCONNECTED */
+#include "chan_encode.h"
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
+#include "json_util.h"
 #include "opcd_state.h"
 #include "platform.h"
+#include "roam_datagram.h"
+#include "roam_notify_conf.h"
 #include "snapshot.h"
 #include "store.h"
 #include "store_async.h"
@@ -123,6 +127,7 @@ static void state_set_defaults(opcd_state_t *st)
 {
     memset(st, 0, sizeof *st);
     st->conf.udp_port             = OPC_DEFAULT_UDP_PORT;
+    st->conf.roam_notify_port     = OPC_DEFAULT_ROAM_NOTIFY_PORT;
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
     st->conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
@@ -188,23 +193,43 @@ static int ensure_dirs(const opcd_state_t *st)
     return 0;
 }
 
-static int open_udp_socket(uint16_t port)
+/* Create a non-blocking (SOCK_NONBLOCK|SOCK_CLOEXEC) UDP socket with
+ * SO_REUSEADDR, bound to bind_addr:port. `what` labels failures in the log.
+ * Returns the fd, or -1 on any failure (the fd is closed before returning). */
+static int open_udp_socket_addr(uint16_t port, uint32_t bind_addr, const char *what)
 {
     int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (fd < 0) { LOG("socket: %s", strerror(errno)); return -1; }
+    if (fd < 0) { LOG("%s socket: %s", what, strerror(errno)); return -1; }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in sa = {0};
     sa.sin_family      = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    sa.sin_addr.s_addr = htonl(bind_addr);
     sa.sin_port        = htons(port);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        LOG("bind :%u failed: %s", port, strerror(errno));
+        LOG("%s bind port %u failed: %s", what, port, strerror(errno));
         close(fd);
         return -1;
     }
     return fd;
 }
+
+/* VHL control socket — wildcard bind (reachable from the wired/VHL host). */
+static int open_udp_socket(uint16_t port)
+{
+    return open_udp_socket_addr(port, INADDR_ANY, "udp");
+}
+
+/* Roam-notify listener — loopback only; the sender is a local process
+ * (wifi_roam.py / passive_roam.py) so the port is never exposed off the box.
+ * Returns -1 on any failure (non-fatal at the call site). */
+static int open_roam_socket(uint16_t port)
+{
+    return open_udp_socket_addr(port, INADDR_LOOPBACK, "roam-notify");
+}
+
+/* parse_bssid() + roam_datagram_to_evt() live in roam_datagram.c so the
+ * wire-parsing/validation logic is host unit-testable (test_roam_datagram.c). */
 
 static int open_signalfd(void)
 {
@@ -255,6 +280,8 @@ int main(int argc, char **argv)
      * thresholds); other settings still come from defaults / CLI options. */
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
     st.conf.device_info_freq_source = opcd_freq_source_parse(st.paths.conf);
+    st.conf.roam_notify_port =
+        opcd_roam_notify_port_parse(st.paths.conf, st.conf.roam_notify_port);
 
     ensure_dirs(&st);
     state_load_from_disk(&st);
@@ -291,12 +318,30 @@ int main(int argc, char **argv)
     if (udp_fd < 0) { g_teardown(); return 1; }
     st.udp_fd = udp_fd;
 
+    /* Roam-notify listener on loopback (non-fatal — a bind failure just means
+     * no local roam indications; the daemon still serves the VHL protocol).
+     * Refuse to share the control UDP port: with SO_REUSEADDR the loopback roam
+     * bind and the wildcard control bind would collide, and localhost VHL
+     * requests to that port could be delivered to the roam socket (parsed as
+     * garbage, never answered → silent client timeouts). Disable roam-notify
+     * in that misconfiguration. */
+    int roam_fd = -1;
+    if (st.conf.roam_notify_port == st.conf.udp_port) {
+        LOG("roam-notify port %u collides with control udp port — roam-notify disabled",
+            st.conf.roam_notify_port);
+    } else {
+        roam_fd = open_roam_socket(st.conf.roam_notify_port);
+        if (roam_fd < 0)
+            LOG("roam-notify listener unavailable — local roam indications disabled");
+    }
+
     int sig_fd   = open_signalfd();
     int timer_fd = open_timerfd_1s();
     int ep       = epoll_create1(EPOLL_CLOEXEC);
     if (sig_fd < 0 || timer_fd < 0 || ep < 0) {
         LOG("setup failed");
         close(udp_fd);
+        if (roam_fd  >= 0) close(roam_fd);
         if (sig_fd   >= 0) close(sig_fd);
         if (timer_fd >= 0) close(timer_fd);
         if (ep       >= 0) close(ep);
@@ -347,6 +392,19 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Roam-notify datagrams from the local WLAN roaming executor. Non-fatal on
+     * registration failure (same idiom as store_fd): close and mark -1 so the
+     * dispatch loop's `fd == roam_fd` arm stays inert. */
+    if (roam_fd >= 0) {
+        struct epoll_event ev_roam = { .events = EPOLLIN, .data.fd = roam_fd };
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, roam_fd, &ev_roam) != 0) {
+            LOG("epoll_ctl(roam_fd=%d) failed: %s — roam-notify disabled",
+                roam_fd, strerror(errno));
+            close(roam_fd);
+            roam_fd = -1;
+        }
+    }
+
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
     while (!st.should_exit && !st.should_reset) {
@@ -390,6 +448,45 @@ int main(int argc, char **argv)
                         drain_rc);
                     epoll_ctl(ep, EPOLL_CTL_DEL, evt_fd, NULL);
                     evt_fd = -1;
+                }
+            } else if (fd == roam_fd) {
+                /* Local roam-notify datagrams (loopback only). Drain the whole
+                 * non-blocking socket; each datagram is one flat JSON object
+                 * (design §9.1 WIRE CONTRACT). Malformed/short → drop silently
+                 * (debug log only), never block, never crash. */
+                while (1) {
+                    char buf[513];   /* contract caps payload at 512 B + NUL */
+                    ssize_t rn = recvfrom(roam_fd, buf, sizeof buf - 1,
+                                          MSG_TRUNC, NULL, NULL);
+                    if (rn < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        if (errno == EINTR) continue;
+                        LOG("roam recvfrom: %s", strerror(errno));
+                        break;
+                    }
+                    if (rn == 0) continue;   /* empty datagram — nothing to parse */
+                    /* MSG_TRUNC returns the FULL datagram length even when it
+                     * overflowed the buffer; a truncated payload must not be
+                     * parsed as if complete. Drop anything over the 512 B cap. */
+                    if (rn > (ssize_t)(sizeof buf - 1)) {
+                        static unsigned long oversize_cnt;
+                        if ((oversize_cnt++ % 64) == 0)
+                            LOG("roam-notify: oversized datagram (%zd B) — dropped (drops=%lu)",
+                                rn, oversize_cnt);
+                        continue;
+                    }
+                    buf[rn] = '\0';
+                    opcd_platform_evt_t revt;
+                    if (roam_datagram_to_evt(buf, &revt) != 0) {
+                        /* Rate-limit: a misbehaving local sender must not flood
+                         * the log. Emit 1-in-64 malformed drops with a count. */
+                        static unsigned long malformed_cnt;
+                        if ((malformed_cnt++ % 64) == 0)
+                            LOG("roam-notify: malformed datagram (%zd B) — ignored (drops=%lu)",
+                                rn, malformed_cnt);
+                        continue;
+                    }
+                    on_platform_event(&revt, &st);
                 }
             } else if (fd == udp_fd) {
                 while (1) {
@@ -509,6 +606,7 @@ int main(int argc, char **argv)
     }
     if (g_teardown) g_teardown();
     close(udp_fd);
+    if (roam_fd >= 0) close(roam_fd);
     close(sig_fd);
     close(timer_fd);
     close(ep);
