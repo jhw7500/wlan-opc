@@ -38,10 +38,13 @@ OPCD_OBJS_CHAN      := $(OPCDOBJ)/chan_encode.o
 OPCD_OBJS_FREQSRC   := $(OPCDOBJ)/freq_source.o
 # Pure opc.conf roam-notify-port parser — no platform backend, no protocol library.
 OPCD_OBJS_ROAMCONF  := $(OPCDOBJ)/roam_notify_conf.o
+# roam-notify datagram parser — links roam_datagram.o + its deps (json_util for
+# field extraction, chan_encode for the channel field). No platform backend.
+OPCD_OBJS_ROAMDGRAM := $(OPCDOBJ)/roam_datagram.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/chan_encode.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
          test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
-         test_freq_source test_roam_notify_conf
+         test_freq_source test_roam_notify_conf test_roam_datagram
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -87,6 +90,11 @@ $(TESTDIR)/test_freq_source: $(TESTDIR)/test_freq_source.o $(OPCD_OBJS_FREQSRC)
 # backend, no libopcproto). Reuses the host opcd object built by `make native`.
 $(TESTDIR)/test_roam_notify_conf: $(TESTDIR)/test_roam_notify_conf.o $(OPCD_OBJS_ROAMCONF)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_roam_notify_conf.o $(OPCD_OBJS_ROAMCONF)
+
+# roam-notify datagram parser test — links roam_datagram.o + json_util.o +
+# chan_encode.o (no platform backend, no libopcproto).
+$(TESTDIR)/test_roam_datagram: $(TESTDIR)/test_roam_datagram.o $(OPCD_OBJS_ROAMDGRAM)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_roam_datagram.o $(OPCD_OBJS_ROAMDGRAM)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
