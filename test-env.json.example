@@ -1,0 +1,25 @@
+{
+  "_note": "wlan-opc on-target 테스트 환경값 스키마. 이 파일을 test-env.json으로 복사해 실제 값 기입 후 `source scripts/test-env.sh`로 로드. test-env.json은 비밀번호를 담으므로 .gitignore 비추적. 다른 경로 사용: TEST_ENV_JSON=<path> source scripts/test-env.sh",
+  "opc": {
+    "host": "192.168.0.100",
+    "port": 50607,
+    "timeout_ms": 2000
+  },
+  "vhl": {
+    "ip": "192.168.0.2",
+    "listen_port": 9999
+  },
+  "auth": {
+    "password": "CHANGE_ME"
+  },
+  "ssh": {
+    "user": "root",
+    "host": "192.168.0.100"
+  },
+  "paths": {
+    "vhlctl": "build/native/vhlctl/vhlctl"
+  },
+  "expect": {
+    "essid": ""
+  }
+}
