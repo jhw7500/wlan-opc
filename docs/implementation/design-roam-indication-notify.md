@@ -111,10 +111,91 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 4. 기대: 수신기에 **`req_id=0x0004`(Roaming)** + SNR/RSSI/AP MAC/CH 페이로드. (현재는 0x0004 미발행)
 5. 회귀: 순수 재연결(`wpa_cli disconnect/reconnect`)은 **Roaming 미발행**(WlanStatus만) 확인 — 재연결/로밍 구분 입증.
 
-## 8. 커버리지 / 한계
-- bgscan 자율 로밍은 이 경로를 안 거쳐 **미통지**(차기 과제). 현재 보드 로밍은 host-based(위 3경로)라
-  실질 커버됨 — **단, "모든 로밍이 이 3경로를 거친다"를 구현 전 실측 확인** 권장.
-- FT(802.11r) 도입 시엔 커널이 CMD_ROAM을 내므로 기존 nl80211 경로로도 발행됨 → **단일 로밍에 Roaming(0x04)이 이중 발행될 수 있음**(nl80211 경로 + UDP notify). 현 보드는 host-based SME라 CMD_ROAM 미발행 = 이중발행 없음. **FT 활성화 시 전략**(도입 시점 확정 과제, claude 리뷰 지적): (a) 로밍 실행체의 UDP notify를 조건부 비활성화(FT면 커널이 권위 소스), 또는 (b) opcd에서 nl80211 ROAM 수신 후 짧은 창 동안 UDP notify를 억제해 한 소스만 채택. 병행하여 소비측(VHL)이 동일 `req_id` 중복을 무해 dedup 처리하는지 오동작하는지 실측 확인.
+## 8. 커버리지 / 한계 / bgscan 차기과제 스코핑 (2026-07-07 확정)
+
+### 8.1 커버리지 현황 (소스 전수 확정)
+- **프로그램적 로밍 실행체는 `wifi_roam.py`·`passive_roam.py` 2개뿐이며 same/cross-SSID 전 경로가
+  3훅 `notify_roam`으로 수렴**(wifi_roam.py:1510/:1740, passive_roam.py:198/:201).
+  `wifi_periodic_roam.sh`는 passive_roam.py 위임이라 커버.
+- `wifi_bgscan.py`(커스텀 iw 스캐너)는 자율 로밍을 **유발하지 않음** — 외부 요청 스캔 결과는
+  wpa_supplicant 네트워크 선택에서 명시 제외(hostap v2.10 `events.c:2171` external_scan).
+- 무notify 잔여 경로(알려진 한계): 수동 `wpa_cli roam/select_network/reassociate`
+  (wifi.sh:1139/:1223·opc_wlan_apply.sh:53 의 안내 메시지 경유 수동 실행 포함),
+  `wifi connect`/`wifi radio`류 재결합(wifi.sh:1294/:1304/:1755-1775), **wifi_checker.sh 복구
+  reassoc(:237/:266 — 링크품질 트리거의 현존 자동 경로, 다른 BSS 재결합 가능·경계 사례)**,
+  opc_wlan_apply reconfigure, FW 주도 roam(wifi_event.sh:116 'roamed to' — opcd 휴면 ROAM arm 담당).
+  ~~passive_roam.py subprocess timeout 미세갭~~ → **수리됨(2026-07-07)**: timeout 후 실 결합 BSS가
+  from과 다르면 통지(get_associated_bssid 재사용, 조회실패/미변경 시 생략=오발행 없음).
+
+### 8.2 wpa_supplicant 내부 bgscan 갭 — 스코핑 결론
+- mlan0 실행 conf의 bgscan은 주석=비활성(`wpa_supplicant-mlan0.conf:11`). 단 타겟 바이너리에
+  bgscan **simple 모듈이 이미 컴파일됨**(strings 실측; learn 미컴파일=스코프 제외) — 주석 1줄
+  해제로 즉시 활성 가능. **갭은 잠재적이나 활성화 문턱이 매우 낮다.** 배포 conf 중 유일한 활성
+  bgscan은 **mlan1 템플릿**(`wpa_supplicant-mlan1.conf:11`) — opcd는 mlan0-only(단일-STA #35:
+  mlan1 이벤트 drop)라 즉시 갭 아님. **결정(2026-07-07)**: mlan1은 현재 미사용이며 추후 **DBDC
+  구현 시 고려대상** → 템플릿 bgscan은 **유지(스코프 제외)**, DBDC로 mlan1이 활성화/opcd 스코프에
+  편입되는 시점에 본 갭이 실존하게 되므로 그 시점을 Phase 1 트리거로 연동(§8.3 ⑤).
+- bgscan은 스캔 스케줄러일 뿐, 로밍 결정·실행은 wpa_supplicant core(need_to_roam_within_ess).
+  **활성화돼도 커널 관측은 여전히 CMD_CONNECT뿐**(PREV_BSSID는 요청 방향 attr, 이벤트엔 없음)
+  → §1 기각 논리는 유지되나 로밍 '의도'가 3훅 밖(supplicant 내부)에 존재하게 됨.
+- bgscan 외 자율 로밍 벡터(전부 3훅 우회): (V1) associated 중 `wpa_cli scan` 자기요청 스캔의
+  within-ESS 평가(배포 스크립트엔 현재 없음 — 소스 전수 확인), (V2) 11v BTM(wnm_bss_tm_connect),
+  (V3) 단절 후 재연결, (V4) FW roaming offload(→CMD_ROAM, 휴면 arm 담당).
+  **bgscan 가드만으로 자율 로밍 0이 보장되지 않는다.**
+- supplicant 자율 로밍의 유일한 catch-all 관측 지점 = **wpa_ctrl 소켓 ATTACH 상주 모니터**:
+  v2.10에 `CTRL-EVENT-DO-ROAM cur_bssid=.. sel_bssid=..`(events.c:2003) 존재 +
+  `CTRL-EVENT-CONNECTED` 재발행(새 BSSID 포함). `wpa_cli -a` 액션 스크립트는 dedup
+  (wpa_cli.c:4260, 동일 network id면 미호출)으로 same-SSID 전이를 못 잡아 **확정 배제**.
+  '성공 로밍엔 CTRL-EVENT-DISCONNECTED 미발행'은 이 타겟에서 **실측 확인됨(2026-07-07,
+  수동 roam 2회 양방향 ch36↔ch40)** — ctrl 스트림은 `Trying to associate →
+  CTRL-EVENT-SUBNET-STATUS-UPDATE → CTRL-EVENT-CONNECTED(새 bssid)`만 발행. 그래도 Phase 1
+  상태머신은 방어적으로 **DO-ROAM latch + 짧은 창 내 BSSID 전이**(DISCONNECTED
+  (locally_generated=1) 직후 CONNECTED 포함)로 설계한다(자율로밍 경로 미실측분 방어).
+
+### 8.3 조건부 로드맵 (결정)
+- **Phase 0 (현행 채택, 가드 구현됨 2026-07-07)**: 3훅 커버리지 유지 + '내부 bgscan 비활성'을
+  운영 전제로 격상 + 가드 — (a) 부팅 conf lint: 비주석 `bgscan=` 검출 시 syslog 경고
+  (**wifi_init.sh** extra_ssid sync 직후, mlan0 전용), (b) wifi_checker.sh 주기(300s)
+  `get_network <id> bgscan` 조회(**전 network id 순회** — 모드 A extra_ssid 자동 블록 포함,
+  mlan0 전용), (c) wpa.log(-d) 의 `bgscan: Initialized module`(hostap 2.10 bgscan.c:64) 감시
+  (전역 set 간접 탐지). 탐지 패턴은 실타겟 conf로 검증됨(mlan0 무매치/mlan1 매치/미설정
+  network는 FAIL 필터).
+  **가드 한계(명시)**: 전역 `wpa_cli set bgscan`은 ctrl로 무탐지(hostap 2.10 전역 getter NULL,
+  config.c:5072/:5096)이고 연결 중 즉시 적용됨(wpa_supplicant.c:7592-7595) → (c)가 유일한 보조
+  탐지이며, SIGNAL_MONITOR probe 역이용은 CQM 등록 부작용으로 비채택. 대응은 경고-only
+  (자동 해제는 operator 의도 충돌). opcd(C) 무변경·신규 발행 소스 없음 → 재연결 오발행 구조적
+  0(§7 테스트5 유지).
+- **Phase 1 (트리거 발생 시)**: wpa_ctrl ATTACH 상주 모니터(신규 `wifi_roam_monitor.py`+systemd
+  유닛, ~500 LOC/2-repo PR 2건) + opcd UDP 수신부 **dedup 창**(ap_mac 키 ~3s, §8.5 FT 전략(b)와
+  동일 자리라 선구현 시 재사용). 3훅은 권위 소스(트리거 시점 페이로드) 유지·모니터는 backstop.
+  **dedup 소스 우선순위**: first-wins가 아니라 창 내 실행체 notify 도착 시 교체/우선(권위
+  페이로드 폐기 방지).
+  - 트리거: ① mlan0 내부 bgscan 활성 요구 ② 11v BTM AP 도입 ③ 운영 절차의 `wpa_cli scan` 사용
+    ④ Phase 0 가드 경고 실관측 ⑤ **DBDC 구현으로 mlan1 활성화/opcd 스코프 편입**(템플릿 bgscan
+    활성 실재라 편입 즉시 갭 실존 — DBDC 설계 단계에서 본 절 재평가 필수).
+  - Phase 1 선행 온타겟 확인 — **2026-07-07 실측 반영**:
+    (a) ROAM_SUPPORT 광고: **정황 없음**(wpa.log에 bss-selection/driver-based 문자열 무 +
+    moal 모듈 roam 파라미터 무) — 최종 확정만 자율로밍 평가 시점 로그로 잔여.
+    (b) 로밍 ctrl 시퀀스: **실측 완료**(위 §8.2) — DISCONNECTED 미발행 확인.
+    **DO-ROAM 실발행만 잔여**(자율로밍에서만 관측 가능 — Phase 1 착수 시 bgscan 임시 활성으로 확인).
+    (c) SIGNAL_POLL: **동작 확인**(RSSI/NOISE/FREQUENCY 반환).
+    (d) FW roaming offload: **미사용 정황**(모듈 파라미터 부재).
+    (e) 스펙 §3.4.3 'AP MAC' semantics(로밍 전 vs 후) 재점검 — 잔여(DFK 문의 채널).
+- **기각 — opcd 내부 CONNECT BSSID-diff 합성**: 재연결 오발이 스펙 §3.4.3('임계값 하회' 트리거
+  사건) 위반, §1 기각 실측 유효, FW 로밍은 휴면 ROAM arm(platform_nxp.c:1270-1288) 담당이라
+  고유 이득 없음. DFK 스펙 semantics 재합의 없이는 채택 불가.
+
+### 8.4 운영 전제 (위반 시 Roaming(0x04) 커버리지 파손)
+1. mlan0 conf 내부 bgscan 비활성 유지(주석). 2. 런타임 `wpa_cli set/set_network … bgscan` 금지
+(update_config=1 되쓰기 유의, **전역 set은 ctrl로 무탐지**). 3. associated 중 `wpa_cli scan` 운영
+사용 금지(iw 스캔은 external_scan 제외라 안전). 4. 11v BTM AP 미사용. 5. FW roaming offload
+미사용/ROAM_SUPPORT 미광고(온타겟 확인 필요). 6. opcd mlan0-only — mlan1 템플릿 bgscan은 유지
+결정(스코프 제외), **DBDC 구현 시 재평가(Phase 1 트리거 ⑤)**. 7. FT(802.11r) 미사용(§8.5).
+8. bgscan learn 미컴파일 유지.
+9. 수동 `wpa_cli roam/select_network/reassociate`·`wifi connect/radio`류 재결합은 통지 대상 외.
+
+### 8.5 FT(802.11r) 이중발행 (기존 유지)
+FT 도입 시엔 커널이 CMD_ROAM을 내므로 기존 nl80211 경로로도 발행됨 → **단일 로밍에 Roaming(0x04)이 이중 발행될 수 있음**(nl80211 경로 + UDP notify). 현 보드는 host-based SME라 CMD_ROAM 미발행 = 이중발행 없음. **FT 활성화 시 전략**(도입 시점 확정 과제, claude 리뷰 지적): (a) 로밍 실행체의 UDP notify를 조건부 비활성화(FT면 커널이 권위 소스), 또는 (b) opcd에서 nl80211 ROAM 수신 후 짧은 창 동안 UDP notify를 억제해 한 소스만 채택 — **§8.3 Phase 1 의 dedup 창과 동일 지점이라 (b) 선구현 시 재사용됨**. 병행하여 소비측(VHL)이 동일 `req_id` 중복을 무해 dedup 처리하는지 오동작하는지 실측 확인.
 
 ## 9. 구현 확정 (2026-07-06 코드검증 반영)
 
