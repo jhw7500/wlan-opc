@@ -31,7 +31,7 @@ snap=$(vhl_ssh 'rm -rf /usr/local/opc/etc.testbak; cp -a /usr/local/opc/etc /usr
 echo "  $snap"
 [ "$snap" = "snapshot-ok" ] || { echo "  스냅샷 실패 — 중단(타겟 미변경)"; exit 1; }
 restore(){ echo; sec "TEARDOWN: etc 복원 + opcd 재시작"
-  vhl_ssh 'if [ -d /usr/local/opc/etc.testbak ]; then rm -rf /usr/local/opc/etc && mv /usr/local/opc/etc.testbak /usr/local/opc/etc; else echo "testbak 없음 — etc 보존"; fi; systemctl restart opcd; sleep 1; echo restored=$(systemctl is-active opcd)' 2>&1 | tail -1
+  vhl_ssh 'if [ -d /usr/local/opc/etc.testbak ]; then rm -rf /usr/local/opc/etc && { mv /usr/local/opc/etc.testbak /usr/local/opc/etc || cp -a /usr/local/opc/etc.testbak /usr/local/opc/etc; }; else echo "testbak 없음 — etc 보존"; fi; systemctl restart opcd; sleep 1; echo restored=$(systemctl is-active opcd)' 2>&1 | tail -1
   $VHL logout >/dev/null 2>&1 || true; }
 trap restore EXIT
 
@@ -48,7 +48,12 @@ chk "2nd-host(loopback) login → NG 0x0002"  "0x0002"       vhl_ssh "/usr/local
 sec "2. GetDeviceInfo"
 chk "device-info vendor(0x00902cfb)"        "0x00902cfb"   $VHL device-info
 chk "device-info hardware(HW-1.0.0)"        "HW-1.0.0"     $VHL device-info
-chk "device-info live essid(jhw_wlan)"      "jhw_wlan"     $VHL device-info
+# 기대 ESSID는 환경값(test-env.json expect.essid) — 비우면 필드 존재만 확인(랩 SSID 하드코딩 회피)
+if [ -n "${TEST_EXPECT_ESSID:-}" ]; then
+  chk "device-info live essid($TEST_EXPECT_ESSID)" "$TEST_EXPECT_ESSID" $VHL device-info
+else
+  chk "device-info essid 필드 존재"           "essid"        $VHL device-info
+fi
 
 # ============ 3. SetIndicationConfig + Indication 발행 ============
 sec "3. SetIndicationConfig / Indication"

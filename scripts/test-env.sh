@@ -49,13 +49,15 @@ emit("VHLIP",            "vhl.ip")
 emit("TEST_LISTEN_PORT", "vhl.listen_port")
 emit("PW",               "auth.password")
 emit("VHLCTL_BIN",       "paths.vhlctl")
+emit("TEST_EXPECT_ESSID", "expect.essid")  # 선택: 비우면 test-all.sh가 essid 존재만 확인
 print(f'TEST_SSH={shlex.quote(str(g("ssh.user"))+"@"+str(g("ssh.host")))}')
 PY
 )" || { echo "test-env: JSON 파싱 실패 ($_te_cfg)" >&2; return 1 2>/dev/null || exit 1; }
 eval "$_te_assign"
 
-# --- 필수 필드 검증: 빈 값이면 조기 실패 (예: example 복사 후 키 누락) ---
-for _te_req in TEST_OPC_HOST TEST_OPC_PORT PW VHLCTL_BIN; do
+# --- 필수 필드 검증: 스위트가 무조건 소비하는 전 필드, 빈 값이면 조기 실패 ---
+# (예: timeout_ms 빈값 → $VHL이 "--timeout "으로 끝나 다음 서브커맨드를 삼킴)
+for _te_req in TEST_OPC_HOST TEST_OPC_PORT TEST_OPC_TIMEOUT VHLIP TEST_LISTEN_PORT PW VHLCTL_BIN; do
   if [ -z "${!_te_req}" ]; then
     echo "test-env: 필수 필드 누락/빈값: $_te_req ($_te_cfg)" >&2
     unset _te_req
@@ -63,6 +65,10 @@ for _te_req in TEST_OPC_HOST TEST_OPC_PORT PW VHLCTL_BIN; do
   fi
 done
 unset _te_req
+if [ "$TEST_SSH" = "@" ]; then
+  echo "test-env: 필수 필드 누락/빈값: ssh.user/ssh.host ($_te_cfg)" >&2
+  return 1 2>/dev/null || exit 1
+fi
 [ "$PW" = "CHANGE_ME" ] && echo "test-env: warn: password가 예시값(CHANGE_ME) 그대로입니다" >&2
 
 # --- vhlctl 경로: 상대경로면 config(=repo 루트) 기준 절대경로로 (CWD 무관) ---
@@ -72,14 +78,14 @@ case "$VHLCTL_BIN" in
   *)  VHLCTL_BIN="${_te_root}/${VHLCTL_BIN#./}" ;;
 esac
 
-export VHLCTL_BIN VHLIP PW TEST_SSH TEST_LISTEN_PORT TEST_OPC_HOST TEST_OPC_PORT TEST_OPC_TIMEOUT
+export VHLCTL_BIN VHLIP PW TEST_SSH TEST_LISTEN_PORT TEST_OPC_HOST TEST_OPC_PORT TEST_OPC_TIMEOUT TEST_EXPECT_ESSID
 export VHL="$VHLCTL_BIN --host $TEST_OPC_HOST --port $TEST_OPC_PORT --timeout $TEST_OPC_TIMEOUT"
 
 # --- 편의 함수 ---
 vhl()        { local t; for t in $(seq 1 8); do $VHL "$@" && return 0; echo "  ..retry $t" >&2; done; return 1; }
 vhl_login()  { $VHL login --password "$PW"; }
 vhl_listen() { "$VHLCTL_BIN" --hex listen --bind "0.0.0.0:${TEST_LISTEN_PORT}"; }
-vhl_ssh()    { ssh "$TEST_SSH" "$@"; }
+vhl_ssh()    { ssh -o ConnectTimeout=10 "$TEST_SSH" "$@"; }
 
 # --- 요약 (비번 마스킹) ---
 echo "loaded: OPC=${TEST_OPC_HOST}:${TEST_OPC_PORT} VHL=${VHLIP} listen=${TEST_LISTEN_PORT} pw=*** bin=${VHLCTL_BIN}"

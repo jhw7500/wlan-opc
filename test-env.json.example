@@ -18,5 +18,8 @@
   },
   "paths": {
     "vhlctl": "build/native/vhlctl/vhlctl"
+  },
+  "expect": {
+    "essid": ""
   }
 }
