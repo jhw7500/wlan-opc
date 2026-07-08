@@ -28,6 +28,7 @@ void opcd_logf(int priority, const char *fmt, ...)
 
 const char *opcd_ip4str(uint32_t ip, char buf[16])
 {
+    if (!buf) return "?";   /* 방어: 호출부 printf 에 안전한 리터럴 폴백 */
     snprintf(buf, 16, "%u.%u.%u.%u",
              (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
     return buf;
@@ -67,11 +68,16 @@ const char *opcd_ind_name(uint16_t ind_id)
 int opcd_ack_result_peek(const uint8_t *frame, size_t frame_len,
                          uint16_t *result, uint16_t *error_cause)
 {
-    /* 단순 Ack = 64B 헤더 + Result(2B)@64 + ErrorCause(2B)@66 → frame 68B.
-     * Length 필드(=frame-8=60)까지 요구하진 않는다 — 호출자는 이미 pack 된
-     * 자국 프레임을 넘기므로 길이+타입 검사로 충분하다. */
-    if (frame_len != 68) return 0;
+    /* Result(2B)@64 + ErrorCause(2B)@66 가 payload 선두인 ack 만 대상:
+     *   - 단순 ack (frame 68B = 64B 헤더 + 4B)
+     *   - GetDeviceInfo ack (frame 416B — result/error_cause 선두, NG 응답 포함)
+     * GetBasicInfo ack(80B)는 result 필드가 없어(vendor_code 선두) 제외.
+     * Length 필드까지 요구하진 않는다 — 호출자는 이미 pack 된 자국 프레임을
+     * 넘기므로 길이+타입+id 검사로 충분하다. */
+    if (!frame || frame_len < 68) return 0;
     if (frame[1] != OPC_CMD_ACK) return 0;
+    uint16_t id = (uint16_t)((frame[2] << 8) | frame[3]);
+    if (frame_len != 68 && id != OPC_REQ_GET_DEVICE_INFO) return 0;
     if (result)      *result      = (uint16_t)((frame[64] << 8) | frame[65]);
     if (error_cause) *error_cause = (uint16_t)((frame[66] << 8) | frame[67]);
     return 1;

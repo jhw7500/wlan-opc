@@ -1105,16 +1105,23 @@ int opcd_dispatch(opcd_state_t *st,
 {
     opc_header_t hdr;
     char ipb[16];
+    /* 에러 경로 WARN 은 외부 임의 호스트가 유발 가능 — 1/64 rate limit 으로
+     * logger.log 플러딩 방지. 정상 RX/TX 감사는 무제한(그 자체가 감사 대상). */
     if (opc_frame_parse(frame, frame_len, &hdr, NULL, NULL) != 0) {
-        OLOG_WARN("RX malformed frame (%zuB) from=%s:%u — dropped",
-                  frame_len, opcd_ip4str(client_ip, ipb), client_port);
+        static unsigned long malformed_cnt;
+        if ((malformed_cnt++ % 64) == 0)
+            OLOG_WARN("RX malformed frame (%zuB) from=%s:%u — dropped (count=%lu)",
+                      frame_len, opcd_ip4str(client_ip, ipb), client_port,
+                      malformed_cnt);
         *resp_len = 0;
         return -1;
     }
     if (hdr.command_type != OPC_CMD_REQUEST) {
-        OLOG_WARN("RX non-request (type=0x%02x id=0x%04x) from=%s:%u — dropped",
-                  hdr.command_type, hdr.req_indication_id,
-                  opcd_ip4str(client_ip, ipb), client_port);
+        static unsigned long nonreq_cnt;
+        if ((nonreq_cnt++ % 64) == 0)
+            OLOG_WARN("RX non-request (type=0x%02x id=0x%04x) from=%s:%u — dropped (count=%lu)",
+                      hdr.command_type, hdr.req_indication_id,
+                      opcd_ip4str(client_ip, ipb), client_port, nonreq_cnt);
         *resp_len = 0;
         return -1;
     }
@@ -1135,8 +1142,13 @@ int opcd_dispatch(opcd_state_t *st,
                                              client_port, resp, resp_cap, resp_len, seq);
         }
     }
-    OLOG_WARN("RX unknown request 0x%04x seq=%u from=%s:%u — dropped",
-              hdr.req_indication_id, seq, opcd_ip4str(client_ip, ipb), client_port);
+    {
+        static unsigned long unknown_cnt;
+        if ((unknown_cnt++ % 64) == 0)
+            OLOG_WARN("RX unknown request 0x%04x seq=%u from=%s:%u — dropped (count=%lu)",
+                      hdr.req_indication_id, seq, opcd_ip4str(client_ip, ipb),
+                      client_port, unknown_cnt);
+    }
     *resp_len = 0;   /* unknown request id, or a table row with no handler */
     return -1;
 }

@@ -476,9 +476,12 @@ int main(int argc, char **argv)
                      * parsed as if complete. Drop anything over the 512 B cap. */
                     if (rn > (ssize_t)(sizeof buf - 1)) {
                         static unsigned long oversize_cnt;
-                        if ((oversize_cnt++ % 64) == 0)
+                        if ((oversize_cnt++ % 64) == 0) {
                             LOG("roam-notify: oversized datagram (%zd B) — dropped (drops=%lu)",
                                 rn, oversize_cnt);
+                            OLOG_WARN("roam-notify: oversized datagram (%zdB) — dropped (drops=%lu)",
+                                      rn, oversize_cnt);
+                        }
                         continue;
                     }
                     buf[rn] = '\0';
@@ -542,9 +545,15 @@ int main(int argc, char **argv)
                         if ((size_t)rn > sizeof rx)
                             LOG("oversize datagram (%zd B): declared length bad — rejected", rn);
                         {
-                            char ipb[16];
-                            OLOG_WARN("RX bad-length datagram (%zdB) from=%s:%u — 0x0003/drop",
-                                      rn, opcd_ip4str(cip, ipb), cprt);
+                            /* 외부 임의 호스트가 유발 가능한 경로 — 1/64 rate
+                             * limit 으로 logger.log 플러딩 방지(roam-notify
+                             * malformed 와 동일 패턴). */
+                            static unsigned long badlen_cnt;
+                            if ((badlen_cnt++ % 64) == 0) {
+                                char ipb[16];
+                                OLOG_WARN("RX bad-length datagram (%zdB) from=%s:%u — 0x0003/drop (count=%lu)",
+                                          rn, opcd_ip4str(cip, ipb), cprt, badlen_cnt);
+                            }
                         }
                         opcd_reject_bad_length(&st, rx, buffered, cip, cprt);
                         continue;
@@ -585,11 +594,17 @@ int main(int argc, char **argv)
                                 LOG("req 0x%04X seq=%u served in %lld.%03lld ms",
                                     hdr.req_indication_id, hdr.sequence_number,
                                     us / 1000, us % 1000);
-                                /* 감사 로그: 응답 결과(단순 ack 는 OK/NG+cause,
-                                 * basic/device-info 데이터 ack 는 길이만). */
+                                /* 감사 로그: 응답 결과. 송신 실패는 성공으로
+                                 * 기록하지 않는다(ERR). 단순/device-info ack 는
+                                 * OK/NG+cause, basic-info 데이터 ack 는 길이만. */
                                 uint16_t ares, acause;
                                 char ipb[16];
-                                if (opcd_ack_result_peek(tx, (size_t)tx_len, &ares, &acause))
+                                if (w != tx_len)
+                                    OLOG_ERR("TX %s ack seq=%u to=%s:%u send failed (%zd/%zd)",
+                                             opcd_req_name(hdr.req_indication_id),
+                                             hdr.sequence_number,
+                                             opcd_ip4str(cip, ipb), cprt, w, tx_len);
+                                else if (opcd_ack_result_peek(tx, (size_t)tx_len, &ares, &acause))
                                     OLOG_INFO("TX %s ack seq=%u to=%s:%u %s err=0x%04x (%lld.%03lldms)",
                                               opcd_req_name(hdr.req_indication_id),
                                               hdr.sequence_number,

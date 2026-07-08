@@ -13,6 +13,7 @@ static void test_ip4str(void)
     assert(strcmp(opcd_ip4str(0xC0A8D605u, buf), "192.168.214.5") == 0);
     assert(strcmp(opcd_ip4str(0u, buf), "0.0.0.0") == 0);
     assert(strcmp(opcd_ip4str(0xFFFFFFFFu, buf), "255.255.255.255") == 0);
+    assert(strcmp(opcd_ip4str(0u, NULL), "?") == 0);   /* NULL buf 방어 폴백 */
 }
 
 static void test_names(void)
@@ -45,15 +46,30 @@ static void test_ack_result_peek(void)
     assert(opcd_ack_result_peek(ack, sizeof ack, &res, &cause) == 1);
     assert(res == 0x0000 && cause == 0x0000);
 
-    /* 길이 불일치(데이터 ack: basic-info 80B 등) → 0 */
-    uint8_t data_ack[80] = {0};
-    data_ack[1] = 0x02;
-    assert(opcd_ack_result_peek(data_ack, sizeof data_ack, &res, &cause) == 0);
+    /* GetBasicInfo ack(80B, id 0x0001) — result 필드 없음(vendor_code 선두) → 0 */
+    uint8_t basic_ack[80] = {0};
+    basic_ack[1] = 0x02;
+    basic_ack[2] = 0x00; basic_ack[3] = 0x01;
+    assert(opcd_ack_result_peek(basic_ack, sizeof basic_ack, &res, &cause) == 0);
+
+    /* GetDeviceInfo ack(416B, id 0x0002) — result/error_cause 선두 → peek 성공.
+     * (indication ON 중 NG 0x0010 응답도 감사에 남아야 한다 — PR #66 Codex P2) */
+    uint8_t dev_ack[416] = {0};
+    dev_ack[1] = 0x02;
+    dev_ack[2] = 0x00; dev_ack[3] = 0x02;
+    dev_ack[64] = 0x00; dev_ack[65] = 0x01;  /* NG */
+    dev_ack[66] = 0x00; dev_ack[67] = 0x10;  /* indication-violation */
+    assert(opcd_ack_result_peek(dev_ack, sizeof dev_ack, &res, &cause) == 1);
+    assert(res == 0x0001 && cause == 0x0010);
 
     /* 타입 불일치(indication) → 0 */
     uint8_t ind[68] = {0};
     ind[1] = 0x03;
     assert(opcd_ack_result_peek(ind, sizeof ind, &res, &cause) == 0);
+
+    /* NULL frame / 68B 미만 → 0 */
+    assert(opcd_ack_result_peek(NULL, 68, &res, &cause) == 0);
+    assert(opcd_ack_result_peek(ack, 67, &res, &cause) == 0);
 
     /* NULL 출력 인자 허용 */
     ack[1] = 0x02;
