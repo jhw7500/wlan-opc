@@ -27,7 +27,7 @@ OPCD_OBJS_SNAPSHOT  := $(OPCDOBJ)/snapshot.o
 OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o \
                        $(OPCDOBJ)/indication.o $(OPCDOBJ)/fault_probe.o \
                        $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/snapshot.o \
-                       $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/platform_stub.o
+                       $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/opcd_log.o $(OPCDOBJ)/platform_stub.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
 OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 # Pure parser — no platform backend, no protocol library.
@@ -41,10 +41,12 @@ OPCD_OBJS_ROAMCONF  := $(OPCDOBJ)/roam_notify_conf.o
 # roam-notify datagram parser — links roam_datagram.o + its deps (json_util for
 # field extraction, chan_encode for the channel field). No platform backend.
 OPCD_OBJS_ROAMDGRAM := $(OPCDOBJ)/roam_datagram.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/chan_encode.o
+# 감사 로그 순수 헬퍼(ip4str/이름표/ack peek) — no platform backend, no protocol library.
+OPCD_OBJS_OLOG      := $(OPCDOBJ)/opcd_log.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
          test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
-         test_freq_source test_roam_notify_conf test_roam_datagram
+         test_freq_source test_roam_notify_conf test_roam_datagram test_opcd_log
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -95,6 +97,11 @@ $(TESTDIR)/test_roam_notify_conf: $(TESTDIR)/test_roam_notify_conf.o $(OPCD_OBJS
 # chan_encode.o (no platform backend, no libopcproto).
 $(TESTDIR)/test_roam_datagram: $(TESTDIR)/test_roam_datagram.o $(OPCD_OBJS_ROAMDGRAM)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_roam_datagram.o $(OPCD_OBJS_ROAMDGRAM)
+
+# 감사 로그 헬퍼 테스트 — 순수 함수만 검증(no libopcproto). opcd_logf 는
+# opcd_log_init() 전 no-op 계약이라 테스트에서 호스트 syslog 를 오염시키지 않는다.
+$(TESTDIR)/test_opcd_log: $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

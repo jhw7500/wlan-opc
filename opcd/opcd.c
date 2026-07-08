@@ -37,6 +37,7 @@
 #include "indication.h"
 #include "inventory.h"
 #include "json_util.h"
+#include "opcd_log.h"
 #include "opcd_state.h"
 #include "platform.h"
 #include "roam_datagram.h"
@@ -375,6 +376,11 @@ int main(int argc, char **argv)
      * must land on the signalfd, not terminate the process through the
      * worker's default disposition. Creation failure is non-fatal —
      * handlers fall back to the original synchronous write path. */
+    /* 프로토콜 감사 로그 활성화 — 이후의 RX/TX/exec/error 가 logger.log 로 감. */
+    opcd_log_init();
+    OLOG_INFO("start: udp_port=%u roam_notify_port=%u",
+              (unsigned)st.conf.udp_port, (unsigned)st.conf.roam_notify_port);
+
     st.store_async = opc_store_async_create();
     if (!st.store_async)
         LOG("async NVRAM writer unavailable — Set* persists run synchronously");
@@ -481,11 +487,22 @@ int main(int argc, char **argv)
                         /* Rate-limit: a misbehaving local sender must not flood
                          * the log. Emit 1-in-64 malformed drops with a count. */
                         static unsigned long malformed_cnt;
-                        if ((malformed_cnt++ % 64) == 0)
+                        if ((malformed_cnt++ % 64) == 0) {
                             LOG("roam-notify: malformed datagram (%zd B) — ignored (drops=%lu)",
                                 rn, malformed_cnt);
+                            OLOG_WARN("roam-notify: malformed datagram (%zdB) — ignored (drops=%lu)",
+                                      rn, malformed_cnt);
+                        }
                         continue;
                     }
+                    OLOG_INFO("exec: roam-notify idx=%u ap=%02x:%02x:%02x:%02x:%02x:%02x "
+                              "ch_field=0x%04x rssi=%d snr=%d → Roaming indication",
+                              revt.u.roaming.idx,
+                              revt.u.roaming.mac[0], revt.u.roaming.mac[1],
+                              revt.u.roaming.mac[2], revt.u.roaming.mac[3],
+                              revt.u.roaming.mac[4], revt.u.roaming.mac[5],
+                              revt.u.roaming.channel,
+                              revt.u.roaming.rssi, revt.u.roaming.snr);
                     on_platform_event(&revt, &st);
                 }
             } else if (fd == udp_fd) {
@@ -524,6 +541,11 @@ int main(int argc, char **argv)
                          * length instead, so it is handled below. */
                         if ((size_t)rn > sizeof rx)
                             LOG("oversize datagram (%zd B): declared length bad — rejected", rn);
+                        {
+                            char ipb[16];
+                            OLOG_WARN("RX bad-length datagram (%zdB) from=%s:%u — 0x0003/drop",
+                                      rn, opcd_ip4str(cip, ipb), cprt);
+                        }
                         opcd_reject_bad_length(&st, rx, buffered, cip, cprt);
                         continue;
                     }
@@ -563,6 +585,23 @@ int main(int argc, char **argv)
                                 LOG("req 0x%04X seq=%u served in %lld.%03lld ms",
                                     hdr.req_indication_id, hdr.sequence_number,
                                     us / 1000, us % 1000);
+                                /* 감사 로그: 응답 결과(단순 ack 는 OK/NG+cause,
+                                 * basic/device-info 데이터 ack 는 길이만). */
+                                uint16_t ares, acause;
+                                char ipb[16];
+                                if (opcd_ack_result_peek(tx, (size_t)tx_len, &ares, &acause))
+                                    OLOG_INFO("TX %s ack seq=%u to=%s:%u %s err=0x%04x (%lld.%03lldms)",
+                                              opcd_req_name(hdr.req_indication_id),
+                                              hdr.sequence_number,
+                                              opcd_ip4str(cip, ipb), cprt,
+                                              ares == 0 ? "OK" : "NG", acause,
+                                              us / 1000, us % 1000);
+                                else
+                                    OLOG_INFO("TX %s ack seq=%u to=%s:%u len=%zd (%lld.%03lldms)",
+                                              opcd_req_name(hdr.req_indication_id),
+                                              hdr.sequence_number,
+                                              opcd_ip4str(cip, ipb), cprt, tx_len,
+                                              us / 1000, us % 1000);
                             }
                         }
                     } else {
@@ -602,6 +641,7 @@ int main(int argc, char **argv)
 
     if (st.should_reset) {
         LOG("reset requested — exiting (systemd will restart)");
+        OLOG_INFO("exec: reset — exiting (systemd restart)");
         (void)plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
     }
     if (g_teardown) g_teardown();

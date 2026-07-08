@@ -14,6 +14,7 @@
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
+#include "opcd_log.h"
 #include "platform.h"
 #include "snapshot.h"
 #include "store.h"
@@ -1103,15 +1104,24 @@ int opcd_dispatch(opcd_state_t *st,
                   uint8_t *resp, size_t resp_cap, ssize_t *resp_len)
 {
     opc_header_t hdr;
+    char ipb[16];
     if (opc_frame_parse(frame, frame_len, &hdr, NULL, NULL) != 0) {
+        OLOG_WARN("RX malformed frame (%zuB) from=%s:%u — dropped",
+                  frame_len, opcd_ip4str(client_ip, ipb), client_port);
         *resp_len = 0;
         return -1;
     }
     if (hdr.command_type != OPC_CMD_REQUEST) {
+        OLOG_WARN("RX non-request (type=0x%02x id=0x%04x) from=%s:%u — dropped",
+                  hdr.command_type, hdr.req_indication_id,
+                  opcd_ip4str(client_ip, ipb), client_port);
         *resp_len = 0;
         return -1;
     }
     uint16_t seq = hdr.sequence_number;
+    OLOG_INFO("RX %s(0x%04x) seq=%u from=%s:%u len=%zu",
+              opcd_req_name(hdr.req_indication_id), hdr.req_indication_id,
+              seq, opcd_ip4str(client_ip, ipb), client_port, frame_len);
 
     /* Idle auto-logout — check before serving any Login-requiring command. */
     if (st->logged_in && mono_now() >= st->idle_deadline) {
@@ -1125,6 +1135,8 @@ int opcd_dispatch(opcd_state_t *st,
                                              client_port, resp, resp_cap, resp_len, seq);
         }
     }
+    OLOG_WARN("RX unknown request 0x%04x seq=%u from=%s:%u — dropped",
+              hdr.req_indication_id, seq, opcd_ip4str(client_ip, ipb), client_port);
     *resp_len = 0;   /* unknown request id, or a table row with no handler */
     return -1;
 }
@@ -1141,6 +1153,11 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     const opc_ipcfg_entry_t *e = &st->ip_change_armed_entry;
     fprintf(stderr, "opcd: apply pending IP change → slot %u ip=0x%08X essid=%s\n",
             st->ip_change_armed_no, e->ip_address, e->essid);
+    {
+        char ipb[16];
+        OLOG_INFO("exec: apply pending IP change slot=%u ip=%s essid=%s",
+                  st->ip_change_armed_no, opcd_ip4str(e->ip_address, ipb), e->essid);
+    }
 
     /* Hand off to the platform backend to rewrite the active IP (stub no-ops;
      * nxp reconfigures eth0's management IP directly via ip addr). Clear the
@@ -1150,10 +1167,14 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
      * (opcd_platform() can be NULL before register) is needed. */
     const opcd_platform_ops_t *plat = opcd_platform();
     int rc = plat ? plat->apply_ip_change(e) : -1;
-    if (rc != 0)
+    if (rc != 0) {
         fprintf(stderr, "opcd: apply pending IP change: platform apply_ip_change failed\n");
-    else
+        OLOG_ERR("exec: IP change apply failed (slot=%u)", st->ip_change_armed_no);
+    } else {
+        OLOG_INFO("exec: IP change applied (slot=%u) — indication target invalidated",
+                  st->ip_change_armed_no);
         st->indication_enabled = false;   /* IP changed → indication target invalid */
+    }
 
     /* Fully reset the deferred-commit state. The arm gate already prevents a
      * stale snapshot from being reused, but zeroing the snapshot too means a
@@ -1256,9 +1277,12 @@ void opcd_store_async_on_ready(opcd_state_t *st)
 
         uint16_t result = (done[i].result == 0) ? OPC_RESULT_OK : OPC_RESULT_NG;
         uint16_t err    = (done[i].result == 0) ? OPC_ERR_NONE  : OPC_ERR_NVRAM;
-        if (done[i].result != 0)
+        if (done[i].result != 0) {
             fprintf(stderr, "opcd: NVRAM write failed (req 0x%04X): %s\n",
                     pa->req_id, strerror(done[i].saved_errno));
+            OLOG_ERR("exec: NVRAM write failed (%s): %s",
+                     opcd_req_name(pa->req_id), strerror(done[i].saved_errno));
+        }
 
         uint8_t resp[OPC_FRAME_MAX];
         ssize_t rlen = 0;
@@ -1292,6 +1316,11 @@ void opcd_store_async_on_ready(opcd_state_t *st)
             if (w != rlen) {
                 fprintf(stderr, "opcd: deferred ack send failed (req 0x%04X): %s\n",
                         pa->req_id, strerror(errno));
+                char ipb[16];
+                OLOG_ERR("TX %s ack seq=%u to=%s:%u send failed (deferred): %s",
+                         opcd_req_name(pa->req_id), pa->seq,
+                         opcd_ip4str(pa->client_ip, ipb), pa->client_port,
+                         strerror(errno));
             } else {
                 /* T7 (proto-todo): actual service time vs the spec budget
                  * (2 min for NVRAM-persisting commands). */
@@ -1302,6 +1331,12 @@ void opcd_store_async_on_ready(opcd_state_t *st)
                 fprintf(stderr,
                         "opcd: req 0x%04X seq=%u served in %lld.%03lld ms (deferred)\n",
                         pa->req_id, pa->seq, us / 1000, us % 1000);
+                char ipb[16];
+                OLOG_INFO("TX %s ack seq=%u to=%s:%u %s err=0x%04x (%lld.%03lldms, deferred)",
+                          opcd_req_name(pa->req_id), pa->seq,
+                          opcd_ip4str(pa->client_ip, ipb), pa->client_port,
+                          result == OPC_RESULT_OK ? "OK" : "NG", err,
+                          us / 1000, us % 1000);
             }
         }
         pa->in_use = false;
