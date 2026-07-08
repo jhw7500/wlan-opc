@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "indication.h"
+#include "opcd_log.h"
 #include "../protocol/indications.h"
 
 static int send_indication_frame(opcd_state_t *st, const uint8_t *frame, ssize_t frame_len)
@@ -21,6 +22,29 @@ static int send_indication_frame(opcd_state_t *st, const uint8_t *frame, ssize_t
     dst.sin_addr.s_addr = htonl(st->indication_recipient_ip);
     ssize_t n = sendto(st->udp_fd, frame, (size_t)frame_len, 0,
                        (struct sockaddr *)&dst, sizeof dst);
+    /* 감사 로그 — id/seq 는 packed 헤더에서 직접 읽는다(BE, @2/@4). 헤더
+     * prefix 가 온전한 프레임(>=8B)에서만 읽어 오버리드를 배제한다(packed
+     * indication 은 항상 >=64B 지만 방어적으로 가드). KeepAlive 는 주기
+     * 발행이라 DEBUG 로 강등(local0.info 셀렉터가 필터). */
+    if (frame_len >= 8) {
+        uint16_t id  = (uint16_t)((frame[2] << 8) | frame[3]);
+        uint16_t seq = (uint16_t)((frame[4] << 8) | frame[5]);
+        char ipb[16];
+        if (n != frame_len)
+            OLOG_ERR("IND %s(0x%04x) seq=%u to=%s:%u send failed (%zd/%zd)",
+                     opcd_ind_name(id), id, seq,
+                     opcd_ip4str(st->indication_recipient_ip, ipb),
+                     st->indication_recipient_port, n, frame_len);
+        else if (id == OPC_IND_KEEP_ALIVE)
+            OLOG_DEBUG("IND KeepAlive seq=%u to=%s:%u", seq,
+                       opcd_ip4str(st->indication_recipient_ip, ipb),
+                       st->indication_recipient_port);
+        else
+            OLOG_INFO("IND %s(0x%04x) seq=%u to=%s:%u len=%zd",
+                      opcd_ind_name(id), id, seq,
+                      opcd_ip4str(st->indication_recipient_ip, ipb),
+                      st->indication_recipient_port, frame_len);
+    }
     return (n == frame_len) ? 0 : -1;
 }
 
