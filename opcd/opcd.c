@@ -464,8 +464,18 @@ int main(int argc, char **argv)
                 unsigned first_signo = 0;
                 while (read(sig_fd, &si, sizeof si) == (ssize_t)sizeof si)
                     if (first_signo == 0) first_signo = si.ssi_signo;
+                /* A readable sig_fd always means shutdown — set should_exit
+                 * UNCONDITIONALLY. Gating it on first_signo would busy-loop if the
+                 * fd is readable but yields no signal (EAGAIN/error/EOF): epoll is
+                 * level-triggered, so EPOLLIN would re-fire every iteration and
+                 * the loop would never exit nor drain (Gemini review). Only the
+                 * log value is guarded — report the signal number if one was
+                 * actually read, else a generic reason instead of "signal 0". */
                 LOG("signal received — exiting");
-                OLOG_INFO("stop: signal %u received — shutting down", first_signo);
+                if (first_signo != 0)
+                    OLOG_INFO("stop: signal %u received — shutting down", first_signo);
+                else
+                    OLOG_INFO("stop: shutting down (signalfd readable, no signal number)");
                 st.should_exit = true;
             } else if (fd == timer_fd) {
                 uint64_t expirations;
@@ -698,7 +708,6 @@ int main(int argc, char **argv)
 
     if (st.should_reset) {
         LOG("reset requested — exiting (systemd will restart)");
-        OLOG_INFO("exec: reset — exiting (systemd restart)");
         (void)plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
     }
     if (g_teardown) g_teardown();
@@ -707,6 +716,8 @@ int main(int argc, char **argv)
     close(sig_fd);
     close(timer_fd);
     close(ep);
+    /* Single lifecycle stop line for both paths (symmetric): the reason arg
+     * distinguishes a Reset-command restart from a signal shutdown. */
     OLOG_INFO("stop: opcd exited (%s)", st.should_reset ? "reset/restart" : "shutdown");
     return 0;
 }
