@@ -287,10 +287,25 @@ int main(int argc, char **argv)
     ensure_dirs(&st);
     state_load_from_disk(&st);
 
+    /* Bind the VHL control socket BEFORE plat->init(). Per platform.h, init()
+     * is allowed to block during driver probe (the nxp backend does an nl80211
+     * genetlink family resolution — a blocking netlink recv bounded by
+     * SO_RCVTIMEO). Binding *after* init left a startup window where UDP :port
+     * was still unbound: a client's first Login landing in that window hit an
+     * unbound port and was dropped (ICMP port-unreachable, ignored by
+     * connectionless UDP) → the client timed out and only its retry succeeded.
+     * Binding first means a Login arriving during init is buffered by the
+     * kernel receive queue and served once the epoll loop starts, never lost. */
+    int udp_fd = open_udp_socket(st.conf.udp_port);
+    if (udp_fd < 0) return 1;
+    /* udp_fd is published into st.udp_fd only after init succeeds (below), so a
+     * failed init never leaves a dangling descriptor in shared state. */
+
     opcd_platform_register();   /* backend resolved at link time — see Makefile PLATFORM */
     const opcd_platform_ops_t *plat = opcd_platform();
     if (!plat) {
         LOG("platform registration failed");
+        close(udp_fd);
         return 1;
     }
     if (plat->init() != 0) {
@@ -299,25 +314,31 @@ int main(int argc, char **argv)
          * unconditionally so a partially-acquired netlink socket / fd does
          * not leak across a systemd restart loop. */
         plat->teardown();
+        close(udp_fd);
         return 1;
     }
     g_teardown = plat->teardown;
     if (plat->get_wlan_count() < 1) {
         LOG("platform reports zero WLAN interfaces — refusing to start");
         g_teardown();
+        close(udp_fd);
         return 1;
     }
 
-    /* Boot completes synchronously, so BOOTING is never observable from the
-     * wire today — handle_login's "boot in progress" (0x0001) branch is kept
-     * for the spec's boot-window semantics in case init ever becomes
-     * asynchronous (D15). */
-    st.boot_status = OPC_DEVICE_READY;
-    LOG("starting on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
-
-    int udp_fd = open_udp_socket(st.conf.udp_port);
-    if (udp_fd < 0) { g_teardown(); return 1; }
+    /* Publish the control fd into shared state now that all init checks have
+     * passed (Gemini review): a failed init above returns with udp_fd closed
+     * but never stored, so opcd_state never holds a dangling descriptor. */
     st.udp_fd = udp_fd;
+
+    /* BOOTING is never observable on the wire: a Login arriving while
+     * plat->init() blocks is buffered in the kernel receive queue and is not
+     * dequeued until the epoll loop runs — which is after this OPC_DEVICE_READY
+     * transition. handle_login's "boot in progress" (0x0001) branch is kept for
+     * the spec's boot-window semantics (D15); if code is ever inserted between
+     * this point and the epoll_wait loop (e.g. async init), reconsider whether a
+     * buffered Login could observe BOOTING. */
+    st.boot_status = OPC_DEVICE_READY;
+    LOG("listening on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
 
     /* Roam-notify listener on loopback (non-fatal — a bind failure just means
      * no local roam indications; the daemon still serves the VHL protocol).
