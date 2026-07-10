@@ -287,10 +287,24 @@ int main(int argc, char **argv)
     ensure_dirs(&st);
     state_load_from_disk(&st);
 
+    /* Bind the VHL control socket BEFORE plat->init(). Per platform.h, init()
+     * is allowed to block during driver probe (the nxp backend does an nl80211
+     * genetlink family resolution — a blocking netlink recv bounded by
+     * SO_RCVTIMEO). Binding *after* init left a startup window where UDP :port
+     * was still unbound: a client's first Login landing in that window hit an
+     * unbound port and was dropped (ICMP port-unreachable, ignored by
+     * connectionless UDP) → the client timed out and only its retry succeeded.
+     * Binding first means a Login arriving during init is buffered by the
+     * kernel receive queue and served once the epoll loop starts, never lost. */
+    int udp_fd = open_udp_socket(st.conf.udp_port);
+    if (udp_fd < 0) return 1;
+    st.udp_fd = udp_fd;
+
     opcd_platform_register();   /* backend resolved at link time — see Makefile PLATFORM */
     const opcd_platform_ops_t *plat = opcd_platform();
     if (!plat) {
         LOG("platform registration failed");
+        close(udp_fd);
         return 1;
     }
     if (plat->init() != 0) {
@@ -299,12 +313,14 @@ int main(int argc, char **argv)
          * unconditionally so a partially-acquired netlink socket / fd does
          * not leak across a systemd restart loop. */
         plat->teardown();
+        close(udp_fd);
         return 1;
     }
     g_teardown = plat->teardown;
     if (plat->get_wlan_count() < 1) {
         LOG("platform reports zero WLAN interfaces — refusing to start");
         g_teardown();
+        close(udp_fd);
         return 1;
     }
 
@@ -313,11 +329,7 @@ int main(int argc, char **argv)
      * for the spec's boot-window semantics in case init ever becomes
      * asynchronous (D15). */
     st.boot_status = OPC_DEVICE_READY;
-    LOG("starting on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
-
-    int udp_fd = open_udp_socket(st.conf.udp_port);
-    if (udp_fd < 0) { g_teardown(); return 1; }
-    st.udp_fd = udp_fd;
+    LOG("listening on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
 
     /* Roam-notify listener on loopback (non-fatal — a bind failure just means
      * no local roam indications; the daemon still serves the VHL protocol).
