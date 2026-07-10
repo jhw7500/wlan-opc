@@ -298,7 +298,8 @@ int main(int argc, char **argv)
      * kernel receive queue and served once the epoll loop starts, never lost. */
     int udp_fd = open_udp_socket(st.conf.udp_port);
     if (udp_fd < 0) return 1;
-    st.udp_fd = udp_fd;
+    /* udp_fd is published into st.udp_fd only after init succeeds (below), so a
+     * failed init never leaves a dangling descriptor in shared state. */
 
     opcd_platform_register();   /* backend resolved at link time — see Makefile PLATFORM */
     const opcd_platform_ops_t *plat = opcd_platform();
@@ -324,10 +325,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Boot completes synchronously, so BOOTING is never observable from the
-     * wire today — handle_login's "boot in progress" (0x0001) branch is kept
-     * for the spec's boot-window semantics in case init ever becomes
-     * asynchronous (D15). */
+    /* Publish the control fd into shared state now that all init checks have
+     * passed (Gemini review): a failed init above returns with udp_fd closed
+     * but never stored, so opcd_state never holds a dangling descriptor. */
+    st.udp_fd = udp_fd;
+
+    /* BOOTING is never observable on the wire: a Login arriving while
+     * plat->init() blocks is buffered in the kernel receive queue and is not
+     * dequeued until the epoll loop runs — which is after this OPC_DEVICE_READY
+     * transition. handle_login's "boot in progress" (0x0001) branch is kept for
+     * the spec's boot-window semantics (D15); if code is ever inserted between
+     * this point and the epoll_wait loop (e.g. async init), reconsider whether a
+     * buffered Login could observe BOOTING. */
     st.boot_status = OPC_DEVICE_READY;
     LOG("listening on UDP :%u (idle=%us)", st.conf.udp_port, st.conf.login_idle_s);
 
