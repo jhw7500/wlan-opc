@@ -284,6 +284,13 @@ int main(int argc, char **argv)
     st.conf.roam_notify_port =
         opcd_roam_notify_port_parse(st.paths.conf, st.conf.roam_notify_port);
 
+    /* 프로토콜 감사 로그를 가장 먼저 활성화(openlog)해, 이후의 startup 실패
+     * (bind/init/자원)·정상 시작·중지가 모두 logger.log(local0)로 남게 한다. */
+    opcd_log_init();
+    OLOG_INFO("start: opcd starting (udp_port=%u roam_notify_port=%u idle=%us)",
+              (unsigned)st.conf.udp_port, (unsigned)st.conf.roam_notify_port,
+              (unsigned)st.conf.login_idle_s);
+
     ensure_dirs(&st);
     state_load_from_disk(&st);
 
@@ -297,7 +304,10 @@ int main(int argc, char **argv)
      * Binding first means a Login arriving during init is buffered by the
      * kernel receive queue and served once the epoll loop starts, never lost. */
     int udp_fd = open_udp_socket(st.conf.udp_port);
-    if (udp_fd < 0) return 1;
+    if (udp_fd < 0) {
+        OLOG_ERR("start: UDP :%u bind failed — aborting", (unsigned)st.conf.udp_port);
+        return 1;
+    }
     /* udp_fd is published into st.udp_fd only after init succeeds (below), so a
      * failed init never leaves a dangling descriptor in shared state. */
 
@@ -305,11 +315,13 @@ int main(int argc, char **argv)
     const opcd_platform_ops_t *plat = opcd_platform();
     if (!plat) {
         LOG("platform registration failed");
+        OLOG_ERR("start: platform registration failed — aborting");
         close(udp_fd);
         return 1;
     }
     if (plat->init() != 0) {
         LOG("platform init failed");
+        OLOG_ERR("start: platform init failed — aborting");
         /* teardown is idempotent and must tolerate partial init — call it
          * unconditionally so a partially-acquired netlink socket / fd does
          * not leak across a systemd restart loop. */
@@ -320,6 +332,7 @@ int main(int argc, char **argv)
     g_teardown = plat->teardown;
     if (plat->get_wlan_count() < 1) {
         LOG("platform reports zero WLAN interfaces — refusing to start");
+        OLOG_ERR("start: zero WLAN interfaces — refusing to start");
         g_teardown();
         close(udp_fd);
         return 1;
@@ -362,6 +375,7 @@ int main(int argc, char **argv)
     int ep       = epoll_create1(EPOLL_CLOEXEC);
     if (sig_fd < 0 || timer_fd < 0 || ep < 0) {
         LOG("setup failed");
+        OLOG_ERR("start: signalfd/timerfd/epoll setup failed — aborting");
         close(udp_fd);
         if (roam_fd  >= 0) close(roam_fd);
         if (sig_fd   >= 0) close(sig_fd);
@@ -397,11 +411,6 @@ int main(int argc, char **argv)
      * must land on the signalfd, not terminate the process through the
      * worker's default disposition. Creation failure is non-fatal —
      * handlers fall back to the original synchronous write path. */
-    /* 프로토콜 감사 로그 활성화 — 이후의 RX/TX/exec/error 가 logger.log 로 감. */
-    opcd_log_init();
-    OLOG_INFO("start: udp_port=%u roam_notify_port=%u",
-              (unsigned)st.conf.udp_port, (unsigned)st.conf.roam_notify_port);
-
     st.store_async = opc_store_async_create();
     if (!st.store_async)
         LOG("async NVRAM writer unavailable — Set* persists run synchronously");
@@ -434,17 +443,29 @@ int main(int argc, char **argv)
 
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
+    OLOG_INFO("start: ready — serving on UDP :%u", (unsigned)st.conf.udp_port);
     while (!st.should_exit && !st.should_reset) {
         struct epoll_event events[8];
         int n = epoll_wait(ep, events, 8, -1);
-        if (n < 0) { if (errno == EINTR) continue; LOG("epoll_wait: %s", strerror(errno)); break; }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            LOG("epoll_wait: %s", strerror(errno));
+            OLOG_ERR("stop: epoll_wait failed: %s — exiting", strerror(errno));
+            break;
+        }
 
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
             if (fd == sig_fd) {
+                /* Drain all queued signals but record the FIRST one — that is the
+                 * signal that actually initiated shutdown. Logging si after the
+                 * drain would report the last-read signal instead (Gemini review). */
                 struct signalfd_siginfo si;
-                while (read(sig_fd, &si, sizeof si) == (ssize_t)sizeof si) { }
+                unsigned first_signo = 0;
+                while (read(sig_fd, &si, sizeof si) == (ssize_t)sizeof si)
+                    if (first_signo == 0) first_signo = si.ssi_signo;
                 LOG("signal received — exiting");
+                OLOG_INFO("stop: signal %u received — shutting down", first_signo);
                 st.should_exit = true;
             } else if (fd == timer_fd) {
                 uint64_t expirations;
@@ -686,5 +707,6 @@ int main(int argc, char **argv)
     close(sig_fd);
     close(timer_fd);
     close(ep);
+    OLOG_INFO("stop: opcd exited (%s)", st.should_reset ? "reset/restart" : "shutdown");
     return 0;
 }
