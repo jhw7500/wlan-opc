@@ -457,10 +457,15 @@ int main(int argc, char **argv)
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
             if (fd == sig_fd) {
-                struct signalfd_siginfo si = {0};
-                while (read(sig_fd, &si, sizeof si) == (ssize_t)sizeof si) { }
+                /* Drain all queued signals but record the FIRST one — that is the
+                 * signal that actually initiated shutdown. Logging si after the
+                 * drain would report the last-read signal instead (Gemini review). */
+                struct signalfd_siginfo si;
+                unsigned first_signo = 0;
+                while (read(sig_fd, &si, sizeof si) == (ssize_t)sizeof si)
+                    if (first_signo == 0) first_signo = si.ssi_signo;
                 LOG("signal received — exiting");
-                OLOG_INFO("stop: signal %u received — shutting down", (unsigned)si.ssi_signo);
+                OLOG_INFO("stop: signal %u received — shutting down", first_signo);
                 st.should_exit = true;
             } else if (fd == timer_fd) {
                 uint64_t expirations;
