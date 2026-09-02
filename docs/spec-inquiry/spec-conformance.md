@@ -268,6 +268,12 @@
 - Login '기동중'(0x0001) 도달불가(boot 즉시 READY), GetBasicInfo station_type fallback 미도달
 - **종결:** 두 분기 모두 제거 대신 **유지 + 도달 불가 사유 주석** — 기동중 0x0001은 사양 요구 동작이라 init이 비동기화되면 필요하고, station_type fallback은 zeroed config에 대한 방어. 코드 주석으로 의도 고정
 
+**D16 · ChangeIp 반대편 관리 서브넷 겹침 가드 (0x0050)** — `handler.c`(ipcfg_clashes_other_iface·change-ip 분기), `platform_nxp.c`(apply 재검사), `ids.h`(OPC_ERR_IP_CHANGE_CLASH) — ✅ 구현(2026-09-02, #90)
+- **문제(G1/#90):** ChangeIp 대상 서브넷이 **반대편 관리 인터페이스**(device_ip_iface의 타측, #89)의 라이브 서브넷과 겹치면 connected route 경합으로 관리평면(R2)이 **사양 정규 플로우로** 절단 — 커밋이 Logout 이연이라 절단 후 원격 복구 수단이 없을 수 있음. 사양은 이 상황의 에러 코드를 정의하지 않음
+- **구현:** ① change-ip 요청 시점 — 슬롯 엔트리 vs 반대편 라이브 IP/mask(플랫폼 `get_dev_ipv4`) 겹침(`(ipA^ipB)&maskA&maskB==0`) 시 **스테이징 전 NG `OPC_ERR_IP_CHANGE_CLASH=0x0050`**(D9 패턴의 ChangeIp 스코프 별칭 — 발주처 확인 대기 #35) ② nxp apply 시점 재검사(-EADDRNOTAVAIL, 로그) — 요청~Logout 커밋 사이 반대편 변동 레이스 방어
+- **면제 2건(정당 구성 보호):** 반대편 무IP(mlan0 미접속·무IP 토폴로지) = 무제약(#90 원문 유지) · 반대편 **/32**(peer_route/eth_fallback host-scope 미러) = host route는 connected 경합이 아니며 Option B가 의도적으로 동일 IP를 미러
+- **검증:** stub 테스트 27a~d(/24 겹침 NG·미스테이징, 인접 비겹침 OK, /16 superset NG, 선택자 반전 시 반대편 무IP 통과) — 가드 제거 시 3건 적색 확인. nxp 재검사는 `make PLATFORM=nxp` 컴파일 + 실타깃 확인 대상
+
 ### 3.2 ③-B 의도적 / 문서화된 불일치 (알려진 결정)
 
 > 사양과 다르지만 proto-todo / SECURITY.md / 코드 주석에 **결정 또는 알려진 한계로 기록**됨.

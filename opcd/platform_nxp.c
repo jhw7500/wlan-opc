@@ -947,6 +947,25 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
     snprintf(ipbuf, sizeof ipbuf, "%u.%u.%u.%u",
              (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
 
+    /* #90/D16 re-check at commit time: handler.c ran the same guard at
+     * ChangeIp request time, but the commit lands only after Logout — the
+     * OTHER interface's subnet may have changed in between (e.g. wireless
+     * associated). A connected-route clash across eth0/mlan0 severs the
+     * management plane, so refuse rather than apply. Same exemptions as the
+     * request-time guard: other side without IPv4 → no constraint; /32
+     * (peer_route / eth_fallback host-scope mirror) is not a subnet clash. */
+    {
+        uint32_t oip = 0, omask = 0, ogw = 0;
+        if (nxp_get_dev_ipv4((iface == 1) ? 0 : 1, &oip, &omask, &ogw) == 0 &&
+            oip != 0 && omask != 0 && omask != 0xFFFFFFFFu &&
+            ((slot->ip_address ^ oip) & slot->subnet_mask & omask) == 0) {
+            fprintf(stderr, "opcd: nxp_apply_ip_change: refused %s/%d on %s — "
+                    "clashes with other-iface live subnet (management-plane guard, #90)\n",
+                    ipbuf, prefix, dev);
+            return -EADDRNOTAVAIL;
+        }
+    }
+
     /* add BEFORE delete so a failed add leaves the current management IP in
      * place (delete-then-add could strand eth0 with no management address, with
      * no recovery short of reboot). On add success, remove every OTHER

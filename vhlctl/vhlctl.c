@@ -90,10 +90,13 @@ static const char *err_str(uint16_t e)
     case 0x0013:                     return "0x0013 (radio-mode/ipcfg-gw/new-pw-char)";
     case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
     case OPC_ERR_LIST_SEQUENCE:      return "0x0018 (list-sequence)";
-    /* SetRadioConfig apply failure — a runtime fault, distinct from the 0x0011
-     * bad-frequency *input* error (D9, 2026-06-16). Spec defines no apply code;
-     * 0x0050 pending 발주처 confirmation. */
-    case OPC_ERR_RADIO_APPLY:        return "0x0050 (radio-apply: platform refused/failed)";
+    /* 0x0050 is the in-house extension value (spec defines no such code;
+     * pending 발주처 confirmation, #35) and is command-overloaded like
+     * 0x0010..0x0013 — SetRadioConfig: apply runtime fault (D9, 2026-06-16);
+     * ChangeIpAddress: target subnet clashes with the other management
+     * interface's live subnet (D16/#90, 2026-09-02). Interpret by the
+     * issuing command. */
+    case OPC_ERR_RADIO_APPLY:        return "0x0050 (radio-apply refused / ip-change subnet clash)";
     default:     return "other";
     }
 }
