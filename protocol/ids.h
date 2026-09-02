@@ -122,6 +122,13 @@
                                                        * FIXME: wire value unconfirmed — 0x0018 is the
                                                        * vendor-answer proposal; update when the formal
                                                        * confirmation arrives. */
+#define OPC_ERR_IP_CHANGE_CLASH               0x0050  /* ChangeIpAddress: target subnet clashes with the
+                                                       * OTHER management interface's live subnet — the
+                                                       * connected-route conflict would sever the
+                                                       * management plane (#90/G1). Command-scoped alias
+                                                       * of the 0x0050 in-house extension (D9 precedent:
+                                                       * the spec defines no "refused by current network
+                                                       * state" cause; 발주처 confirmation pending, #35). */
 #define OPC_ERR_RADIO_APPLY                   0x0050  /* SetRadioConfig: the platform refused / failed to
                                                        * apply an otherwise-valid request (runtime fault,
                                                        * NOT an input error — the frequency/CH/mode/bw
