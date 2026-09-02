@@ -9,6 +9,7 @@
 #include "../protocol/indications.h"
 #include "fault_probe.h"
 #include "freq_source.h"
+#include "ip_iface.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +27,7 @@ typedef struct opcd_conf {
     uint16_t default_station_type; /* OPC_STATION_SINGLE / DUAL */
     uint32_t login_idle_s;         /* configurable for tests (default OPC_LOGIN_IDLE_S) */
     opcd_freq_source_t device_info_freq_source; /* default OPC_FREQ_SRC_CONFIG */
+    opcd_ip_iface_t    device_ip_iface;         /* default OPC_IP_IFACE_ETH0 */
 } opcd_conf_t;
 
 #define OPC_DEFAULT_UDP_PORT         50607

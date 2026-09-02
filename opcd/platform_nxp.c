@@ -352,37 +352,41 @@ static int nxp_get_eth_mac(uint8_t mac[6])
     return parse_mac_str(buf, mac);
 }
 
-/* Read one IPv4-typed field (ip_address/netmask/gateway) from eth0/link.json
- * as a host-order uint32_t. gateway is JSON null when unconfigured; the
- * string-matcher then returns -ENOENT and *out stays 0 — caller maps that
- * to "no gateway" per best-effort policy. */
-static int nxp_get_eth_ipv4_field(const char *key, uint32_t *out_host)
+/* Parse one IPv4-typed field (ip_address/netmask/gateway) out of an already-
+ * slurped link.json document, host byte order. gateway is JSON null when
+ * unconfigured; the string-matcher then returns -ENOENT and *out stays 0 —
+ * caller maps that to "no gateway" per best-effort policy.
+ * NOTE: opc_json_string is a whole-document first-match scanner (not
+ * top-level-only — json_util.c find_key_quote), which is what makes the same
+ * three keys resolve in BOTH layouts: eth0/link.json nests them under
+ * eth_stats.info, mlan0/link.json under info; each key occurs once. */
+static int nxp_json_ipv4(const char *json, const char *key, uint32_t *out_host)
 {
-    char *json = opc_json_slurp_file(ETH0_LINK_JSON);
-    if (!json) { *out_host = 0; return -errno; }
     char buf[32] = {0};
+    *out_host = 0;
     int rc = opc_json_string(json, key, buf, sizeof buf);
-    free(json);
-    if (rc != 0) { *out_host = 0; return rc; }
+    if (rc != 0) return rc;
     struct in_addr a;
-    if (inet_pton(AF_INET, buf, &a) != 1) { *out_host = 0; return -EINVAL; }
+    if (inet_pton(AF_INET, buf, &a) != 1) return -EINVAL;
     *out_host = ntohl(a.s_addr);
     return 0;
 }
 
-static int nxp_get_eth_ipv4_host(uint32_t *ip_host)
+/* Management IPv4 triple for the selected interface (0=eth0, 1=mlan0),
+ * single slurp so the three values come from one logger snapshot (no tearing
+ * against a concurrent rewrite). Per-field failures leave that field 0. */
+static int nxp_get_dev_ipv4(int iface, uint32_t *ip_host,
+                            uint32_t *netmask_host, uint32_t *gateway_host)
 {
-    return nxp_get_eth_ipv4_field("ip_address", ip_host);
-}
-
-static int nxp_get_eth_netmask_host(uint32_t *netmask_host)
-{
-    return nxp_get_eth_ipv4_field("netmask", netmask_host);
-}
-
-static int nxp_get_eth_gateway_host(uint32_t *gateway_host)
-{
-    return nxp_get_eth_ipv4_field("gateway", gateway_host);
+    const char *path = (iface == 1) ? MLAN0_LINK_JSON : ETH0_LINK_JSON;
+    *ip_host = *netmask_host = *gateway_host = 0;
+    char *json = opc_json_slurp_file(path);
+    if (!json) return -errno;
+    (void)nxp_json_ipv4(json, "ip_address", ip_host);
+    (void)nxp_json_ipv4(json, "netmask",    netmask_host);
+    (void)nxp_json_ipv4(json, "gateway",    gateway_host);  /* null → 0 */
+    free(json);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -896,24 +900,30 @@ static int count_set_bits(uint32_t v)
     return n;
 }
 
-/* Apply a committed IP-config slot to eth0's management IP at runtime.
+/* Apply a committed IP-config slot to the management IP at runtime, on the
+ * interface selected by opc.conf device_ip_iface (0=eth0 default, 1=mlan0 —
+ * the SAME selector the GetDeviceInfo read path uses; see ip_iface.h).
  *
  * eth0 routing on this board is owned by wifi_init.sh (it assigns the mlan0 IP
  * as a host-scope /32 and manages a table-100 policy rule, actively overriding
  * 22-eth0.network). A systemd-networkd override therefore does not stick, but a
  * direct `ip addr` change does (verified on-target: networkd does not revert it
- * and the new address survives). Runtime only, so a reboot restores
- * 22-eth0.network's Address — the spec's "volatile, reverts on power cycle".
+ * and the new address survives). Runtime only, so a reboot restores the
+ * .network Address (22-eth0.network / 20-mlan0.network) — the spec's
+ * "volatile, reverts on power cycle". Both interfaces share these semantics;
+ * on mlan0 the change additionally does not update the wbridge IP filter
+ * (boot-time snapshot) until restart — a known ops constraint (#88 README).
  *
- * We delete every scope-global, non-/32 IPv4 on eth0 (the management address;
- * wifi_init.sh's /32 is intentionally kept) and add the new one, in a single
- * /bin/sh pipeline. gateway/essid/ntp are not applied: gateway is a non-goal
- * — the board operates as a bridge on the control network, so no L3 gateway
- * is needed (user decision 2026-06-12, #27); the stored gateway field is
- * validated (D1: inside the entry's subnet) and echoed but never applied.
- * essid/ntp remain V3 on-target work (wifi_init.sh routing / wpa_supplicant). */
-static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
+ * We delete every scope-global, non-/32 IPv4 on the target iface (the
+ * management address; wifi_init.sh's /32 mirror is intentionally kept) and add
+ * the new one, in a single /bin/sh pipeline. gateway/ntp are not applied:
+ * gateway is a non-goal — the board operates as a bridge on the control
+ * network, so no L3 gateway is needed (user decision 2026-06-12, #27); the
+ * stored gateway field is validated (D1: inside the entry's subnet) and echoed
+ * but never applied. ntp remains V3 on-target work (timesyncd). */
+static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
 {
+    const char *dev = (iface == 1) ? "mlan0" : "eth0";
     /* Reject a non-contiguous or empty netmask — cannot be a /prefix. */
     int prefix = count_set_bits(slot->subnet_mask);
     uint32_t recon = (prefix == 0) ? 0u : (uint32_t)(0xFFFFFFFFu << (32 - prefix));
@@ -942,23 +952,25 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot)
      * no recovery short of reboot). On add success, remove every OTHER
      * scope-global non-/32 address — keep=new and wifi_init.sh's /32 are
      * excluded. ipbuf is digits-and-dots and prefix is 1..32 — injection-safe. */
-    char cmd[320];
+    char cmd[352];
     int n = snprintf(cmd, sizeof cmd,
-        "ip addr add %s/%d dev eth0 && "
-        "ip -4 addr show dev eth0 | "
+        "ip addr add %s/%d dev %s && "
+        "ip -4 addr show dev %s | "
         "awk -v keep=%s/%d '/scope global/&&!/\\/32/&&$2!=keep{print $2}' | "
-        "xargs -r -I{} ip addr del {} dev eth0", ipbuf, prefix, ipbuf, prefix);
+        "xargs -r -I{} ip addr del {} dev %s",
+        ipbuf, prefix, dev, dev, ipbuf, prefix, dev);
     if (n < 0 || (size_t)n >= sizeof cmd) {
         fprintf(stderr, "opcd: nxp_apply_ip_change: command too long\n");
         return -ENAMETOOLONG;
     }
 
     /* const char *[] + cast: execv never writes argv, and cmd/literals must not
-     * be exposed as char* (C11 6.4.5p7). */
+     * be exposed as char* (C11 6.4.5p7). dev comes from a fixed internal table
+     * (never from the wire) — injection-safe like ipbuf/prefix. */
     const char *argv[] = { "sh", "-c", cmd, NULL };
     int ret = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
                                (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
-    fprintf(stderr, "opcd: nxp_apply_ip_change: eth0 → %s/%d%s\n", ipbuf, prefix,
+    fprintf(stderr, "opcd: nxp_apply_ip_change: %s → %s/%d%s\n", dev, ipbuf, prefix,
             ret == 0 ? " (ip addr)" : " (FAILED)");
 
     /* essid is best-effort: a failure is logged but does NOT override the IP result
@@ -1383,9 +1395,7 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .init                  = nxp_init,
     .teardown              = nxp_teardown,
     .get_eth_mac           = nxp_get_eth_mac,
-    .get_eth_ipv4_host     = nxp_get_eth_ipv4_host,
-    .get_eth_netmask_host  = nxp_get_eth_netmask_host,
-    .get_eth_gateway_host  = nxp_get_eth_gateway_host,
+    .get_dev_ipv4          = nxp_get_dev_ipv4,
     .get_wlan_mac          = nxp_get_wlan_mac,
     .get_essid             = nxp_get_essid,
     .get_firmware_version  = nxp_get_firmware_version,

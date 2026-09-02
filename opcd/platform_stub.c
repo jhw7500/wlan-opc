@@ -43,21 +43,21 @@ static int stub_get_eth_mac(uint8_t mac[6])
     return 0;
 }
 
-static int stub_get_eth_ipv4_host(uint32_t *ip_host)
+/* eth0 (iface 0) → all-zero, preserving the legacy expectations of existing
+ * device-info tests. mlan0 (iface 1) → fixed TEST-NET-1 constants so
+ * test_handler can observe the device_ip_iface source switch:
+ *   ip 192.0.2.100 (0xC0000264) / mask 255.255.255.0 / gw 0 ("no gateway",
+ *   mirroring the mlan0 link.json gateway:null reality). */
+static int stub_get_dev_ipv4(int iface, uint32_t *ip_host,
+                             uint32_t *netmask_host, uint32_t *gateway_host)
 {
-    *ip_host = 0;
-    return 0;
-}
-
-static int stub_get_eth_netmask_host(uint32_t *netmask_host)
-{
-    *netmask_host = 0;
-    return 0;
-}
-
-static int stub_get_eth_gateway_host(uint32_t *gateway_host)
-{
-    *gateway_host = 0;
+    if (iface == 1) {
+        *ip_host      = 0xC0000264u;
+        *netmask_host = 0xFFFFFF00u;
+        *gateway_host = 0;
+    } else {
+        *ip_host = *netmask_host = *gateway_host = 0;
+    }
     return 0;
 }
 
@@ -210,10 +210,13 @@ static unsigned s_apply_ip_calls   = 0;
 static uint32_t s_apply_ip_last_ip = 0;
 static char     s_apply_ip_last_essid[OPC_ESSID_FIELD_LEN + 1] = {0};
 static int      s_apply_ip_fail    = 0;
-static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot)
+static int s_apply_ip_last_iface = -1;
+
+static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
 {
     s_apply_ip_calls++;
-    s_apply_ip_last_ip = slot->ip_address;
+    s_apply_ip_last_ip    = slot->ip_address;
+    s_apply_ip_last_iface = iface;
     snprintf(s_apply_ip_last_essid, sizeof s_apply_ip_last_essid,
              "%.*s", (int)sizeof slot->essid, slot->essid);
     return s_apply_ip_fail ? -1 : 0;
@@ -222,8 +225,10 @@ static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot)
 /* Test-only accessors (declared extern in test_handler.c). */
 unsigned    stub_apply_ip_calls(void)           { return s_apply_ip_calls; }
 uint32_t    stub_apply_ip_last_ip(void)         { return s_apply_ip_last_ip; }
+int         stub_apply_ip_last_iface(void)      { return s_apply_ip_last_iface; }
 const char *stub_apply_ip_last_essid(void)      { return s_apply_ip_last_essid; }
 void        stub_apply_ip_reset(void)           { s_apply_ip_calls = 0; s_apply_ip_last_ip = 0;
+                                                  s_apply_ip_last_iface = -1;
                                                   s_apply_ip_last_essid[0] = '\0'; s_apply_ip_fail = 0; }
 void        stub_apply_ip_set_fail(int fail)    { s_apply_ip_fail = fail; }
 
@@ -256,9 +261,7 @@ static const opcd_platform_ops_t g_stub_ops = {
     .init                  = stub_init,
     .teardown              = stub_teardown,
     .get_eth_mac           = stub_get_eth_mac,
-    .get_eth_ipv4_host     = stub_get_eth_ipv4_host,
-    .get_eth_netmask_host  = stub_get_eth_netmask_host,
-    .get_eth_gateway_host  = stub_get_eth_gateway_host,
+    .get_dev_ipv4          = stub_get_dev_ipv4,
     .get_wlan_mac          = stub_get_wlan_mac,
     .get_essid             = stub_get_essid,
     .get_firmware_version  = stub_get_firmware_version,
