@@ -575,9 +575,14 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             (void)plat->get_firmware_version(ack.firmware_version, sizeof ack.firmware_version);
             (void)plat->get_ntp_server(&ack.ntp_server);
             (void)plat->get_eth_mac(ack.ethernet_mac);
-            (void)plat->get_eth_ipv4_host(&ack.ip_address);
-            (void)plat->get_eth_netmask_host(&ack.subnet_mask);
-            (void)plat->get_eth_gateway_host(&ack.default_gateway);
+            /* IP triple follows the management-IP interface selector
+             * (opc.conf device_ip_iface, default eth0) so the §3.3.4 read
+             * stays on the same plane as the §3.3.7 apply target — see
+             * ip_iface.h. ethernet_mac intentionally stays eth0: mlan0's MAC
+             * is the cloned peer MAC and would misreport the device. */
+            (void)plat->get_dev_ipv4(opcd_ip_iface_idx(st->conf.device_ip_iface),
+                                     &ack.ip_address, &ack.subnet_mask,
+                                     &ack.default_gateway);
             (void)plat->get_wlan_mac(0, ack.wlan1.mac);
             /* Ack carries a single essid field — DUAL always reports mlan0 */
             (void)plat->get_essid(0, ack.essid, sizeof ack.essid);
@@ -1178,7 +1183,8 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
      * vtable is fully populated after init(), so only the registration guard
      * (opcd_platform() can be NULL before register) is needed. */
     const opcd_platform_ops_t *plat = opcd_platform();
-    int rc = plat ? plat->apply_ip_change(e) : -1;
+    int rc = plat ? plat->apply_ip_change(
+                        e, opcd_ip_iface_idx(st->conf.device_ip_iface)) : -1;
     if (rc != 0) {
         fprintf(stderr, "opcd: apply pending IP change: platform apply_ip_change failed\n");
         OLOG_ERR("exec: IP change apply failed (slot=%u)", st->ip_change_armed_no);

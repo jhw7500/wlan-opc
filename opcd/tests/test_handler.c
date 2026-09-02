@@ -40,6 +40,7 @@ static int failures = 0;
  * (deferred until logout) from this handler test. */
 extern unsigned     stub_apply_ip_calls(void);
 extern uint32_t     stub_apply_ip_last_ip(void);
+extern int          stub_apply_ip_last_iface(void);
 extern void         stub_apply_ip_reset(void);
 extern void         stub_apply_ip_set_fail(int fail);
 extern const char  *stub_apply_ip_last_essid(void);
@@ -359,6 +360,29 @@ static int do_get_devinfo(opcd_state_t *st, uint32_t cip,
     return 0;
 }
 
+/* Dispatch GetDeviceInfo; return 0 and fill the management IP triple
+ * (ip/netmask/gateway, host order) from the ack — for the device_ip_iface
+ * source-selector tests. */
+static int do_get_devinfo_ip(opcd_state_t *st, uint32_t cip,
+                             uint32_t *ip, uint32_t *mask, uint32_t *gw)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_get_device_info_req_pack(frame, sizeof frame, 1);
+    if (fn <= 0) return -1;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return -1;
+
+    opc_get_device_info_ack_t ack;
+    if (opc_get_device_info_ack_unpack(resp, (size_t)rlen, &ack) != 0) return -1;
+    if (ip)   *ip   = ack.ip_address;
+    if (mask) *mask = ack.subnet_mask;
+    if (gw)   *gw   = ack.default_gateway;
+    return 0;
+}
+
 int main(void)
 {
     const uint32_t CIP = 0x7f000001;   /* 127.0.0.1, host order */
@@ -544,6 +568,7 @@ int main(void)
     opcd_apply_pending_ip_change(&st);   /* main loop applies after logout response */
     ASSERT(stub_apply_ip_calls() == 1, "change-ip: platform apply_ip_change called on logout");
     ASSERT(stub_apply_ip_last_ip() == 0xC0A80165, "change-ip: apply gets committed slot ip");
+    ASSERT(stub_apply_ip_last_iface() == 0, "change-ip: default device_ip_iface applies to eth0");
     ASSERT(strcmp(stub_apply_ip_last_essid(), "cantops-x") == 0,
            "change-ip: apply gets committed slot essid");
 
@@ -1735,6 +1760,39 @@ int main(void)
                    "freq-src auto DUAL + assoc -> wlan1 & wlan2 live values");
             stub_reset_link();
         }
+    }
+
+    /* 26. device-info IP triple source selector (device_ip_iface) + ChangeIp
+     *     apply-target coupling. Stub get_dev_ipv4: eth0 → 0/0/0 (legacy),
+     *     mlan0 → TEST-NET-1 192.0.2.100 / 255.255.255.0 / gw 0. The read
+     *     source and the apply target MUST follow the same selector (#89
+     *     review C1 — a split makes the VHL set→change→re-read loop diverge). */
+    {
+        uint32_t ip = 1, mask = 1, gw = 1;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+
+        /* default (eth0): legacy all-zero stub triple — behavior unchanged */
+        ASSERT(do_get_devinfo_ip(&st, CIP, &ip, &mask, &gw) == 0 &&
+               ip == 0 && mask == 0 && gw == 0,
+               "ip-iface default eth0 -> stub eth zeros");
+
+        /* mlan0: the wireless-side triple, gateway stays 0 (link.json null) */
+        st.conf.device_ip_iface = OPC_IP_IFACE_MLAN0;
+        ASSERT(do_get_devinfo_ip(&st, CIP, &ip, &mask, &gw) == 0 &&
+               ip == 0xC0000264u && mask == 0xFFFFFF00u && gw == 0,
+               "ip-iface mlan0 -> stub mlan triple (192.0.2.100/24, gw 0)");
+
+        /* apply coupling: with the selector on mlan0, the deferred ChangeIp
+         * must reach the platform with iface=1 (same plane as the read). */
+        stub_apply_ip_reset();
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK, "ip-iface mlan0: change-ip accepted");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "ip-iface mlan0: logout ok");
+        opcd_apply_pending_ip_change(&st);
+        ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_iface() == 1,
+               "ip-iface mlan0: apply_ip_change targets iface=1 (mlan0)");
     }
 
     unlink(g_pw_path);

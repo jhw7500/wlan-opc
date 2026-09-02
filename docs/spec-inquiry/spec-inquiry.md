@@ -54,6 +54,7 @@
 | G9 | **§3.4.7** (Keep Alive) | Timestamp 문자열 형식·시각 동기원(NTP 의존?) | "최대 31자 문자열"만 규정 | 하 |
 | G10 | **§2.2** (그림 2-2) | Dual Station 그림 "2124MHz" 표기 — 2.4GHz 유효 주파수 아님(2412~) | 사양 오타 의심 | 하 |
 | G11 | **§3.3.4** (장치 정보, WLAN FREQ/CH) | device-info의 FREQ/Channel을 **설정값(spec)** vs **접속(live)값** 중 무엇으로 반환? | 🔵 사양 :470/745 "**설정** 주파수/CH" 명시 vs 운영상 접속값 유용. 사내 토글(config/live/auto) 신설·출하 기본 config (`docs/implementation/design-device-info-freq-source.md`). 17번(SetRadio Result)과 인접 | 상 |
+| G12 | **§3.3.4/§3.3.6/§3.3.7** (장치 IP 주소) | 2-인터페이스 장치에서 "장치 IP 주소"(단일 필드)는 **어느 인터페이스**의 주소인가? 무선(mlan0)에 관리 IP를 두는 운용에서 ①IP 필드의 귀속 ②Ethernet MAC 필드와 IP 필드가 서로 다른 인터페이스여도 되는지(MAC/IP 쌍 정합) ③선택 인터페이스 미접속 시 0.0.0.0 응답 허용 여부 | 🔵 사내 토글 `device_ip_iface`(eth0/mlan0, 출하 기본 eth0=무변화) 신설, 읽기·change-ip 적용을 동일 선택자로 결속 (`docs/implementation/design-device-ip-iface.md`, #89). G6(GW=0)·G11과 동류의 "사양 단일값 vs 다중 실체" 질문 | 중 |
 
 ---
 
