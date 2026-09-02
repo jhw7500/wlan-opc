@@ -64,7 +64,7 @@ static char g_iplist_path[128];
 static char g_radio_path[128];
 
 /* error_cause of the last ack seen by the matching do_* helper below */
-static uint16_t g_last_ind_err, g_last_iplist_err, g_last_radio_err;
+static uint16_t g_last_ind_err, g_last_iplist_err, g_last_radio_err, g_last_chgip_err;
 static uint16_t g_last_login_err, g_last_pw_err;
 
 /* Bind a loopback UDP socket on an ephemeral port; returns the fd and the
@@ -333,6 +333,7 @@ static uint16_t do_change_ip(opcd_state_t *st, uint32_t cip, uint16_t slot)
 
     opc_change_ip_address_ack_t ack;
     if (opc_change_ip_address_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_chgip_err = ack.error_cause;
     return ack.result;
 }
 
@@ -1760,6 +1761,68 @@ int main(void)
                    "freq-src auto DUAL + assoc -> wlan1 & wlan2 live values");
             stub_reset_link();
         }
+    }
+
+    /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).
+     *     Stub other-iface(mlan0) 라이브 서브넷 = 192.0.2.0/24 (get_dev_ipv4).
+     *     겹치는 슬롯의 change-ip는 스테이징 전 NG, 비겹침·상대-무IP는 통과. */
+    {
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+
+        /* a) /24 겹침 (192.0.2.50/24 vs mlan0 192.0.2.0/24) → NG 0x0050 */
+        opc_ipcfg_entry_t g;
+        memset(&g, 0, sizeof g);
+        g.boundary_flag = OPC_LIST_BOUNDARY_START;
+        g.list_number   = 1;
+        g.ip_address    = 0xC0000232u;  /* 192.0.2.50 */
+        g.subnet_mask   = 0xFFFFFF00u;
+        strncpy(g.essid, "clash-a", sizeof g.essid - 1);
+        (void)do_set_ip_entry(&st, CIP, &g);
+        g.boundary_flag = OPC_LIST_BOUNDARY_END;
+        (void)do_set_ip_entry(&st, CIP, &g);
+        r = do_change_ip(&st, CIP, 1);
+        ASSERT(r == OPC_RESULT_NG && g_last_chgip_err == OPC_ERR_IP_CHANGE_CLASH,
+               "clash-guard: /24 overlap with other-iface subnet -> NG 0x0050");
+        ASSERT(!st.ip_change_pending, "clash-guard: rejected change not staged");
+
+        /* b) 인접 비겹침 (192.0.3.1/24) → OK */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        g.boundary_flag = OPC_LIST_BOUNDARY_START;
+        g.ip_address    = 0xC0000301u;  /* 192.0.3.1 */
+        (void)do_set_ip_entry(&st, CIP, &g);
+        g.boundary_flag = OPC_LIST_BOUNDARY_END;
+        (void)do_set_ip_entry(&st, CIP, &g);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK,
+               "clash-guard: adjacent /24 (no overlap) -> OK");
+
+        /* c) 짧은 prefix 포함 겹침 (192.0.0.0/16 ⊃ 192.0.2.x) → NG */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        g.boundary_flag = OPC_LIST_BOUNDARY_START;
+        g.ip_address    = 0xC0000101u;  /* 192.0.1.1/16 — 상대 /24를 포함 */
+        g.subnet_mask   = 0xFFFF0000u;
+        (void)do_set_ip_entry(&st, CIP, &g);
+        g.boundary_flag = OPC_LIST_BOUNDARY_END;
+        (void)do_set_ip_entry(&st, CIP, &g);
+        r = do_change_ip(&st, CIP, 1);
+        ASSERT(r == OPC_RESULT_NG && g_last_chgip_err == OPC_ERR_IP_CHANGE_CLASH,
+               "clash-guard: /16 superset overlap -> NG 0x0050");
+
+        /* d) 선택자=mlan0 → 반대편(eth0)은 stub에서 무IP(0/0) → 무제약 통과.
+         *    (a)와 같은 값이라도 방향이 바뀌면 정당 — 가드가 '반대편' 기준임을 고정 */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.conf.device_ip_iface = OPC_IP_IFACE_MLAN0;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        g.boundary_flag = OPC_LIST_BOUNDARY_START;
+        g.ip_address    = 0xC0000232u;  /* 192.0.2.50/24 — mlan0 자신 대역 */
+        g.subnet_mask   = 0xFFFFFF00u;
+        (void)do_set_ip_entry(&st, CIP, &g);
+        g.boundary_flag = OPC_LIST_BOUNDARY_END;
+        (void)do_set_ip_entry(&st, CIP, &g);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK,
+               "clash-guard: target=mlan0, other(eth0) has no IP -> no constraint");
     }
 
     /* 26. device-info IP triple source selector (device_ip_iface) + ChangeIp

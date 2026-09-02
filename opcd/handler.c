@@ -809,6 +809,30 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
     return 0;
 }
 
+/* #90 guard: would applying this entry to the selected management interface
+ * clash with the OTHER interface's live subnet? A connected-route overlap
+ * across eth0/mlan0 severs the management plane as a silent spec flow (G1) —
+ * e.g. default device_ip_iface=eth0 + a /17 ChangeIp while mlan0's management
+ * IP lives in that /17. Exemptions keep sanctioned setups working:
+ *   - other iface reports no IPv4 (mlan0 not associated / no-IP topology,
+ *     or the platform cannot read it) → no constraint (issue #90 원문);
+ *   - other side is a /32 — the peer_route / eth_fallback host-scope mirror
+ *     intentionally carries the same IP and a host route is not a
+ *     connected-subnet clash (Option B). */
+static bool ipcfg_clashes_other_iface(const opcd_state_t *st,
+                                      const opc_ipcfg_entry_t *e)
+{
+    const opcd_platform_ops_t *plat = opcd_platform();
+    if (!plat) return false;
+    int other = (opcd_ip_iface_idx(st->conf.device_ip_iface) == 0) ? 1 : 0;
+    uint32_t oip = 0, omask = 0, ogw = 0;
+    if (plat->get_dev_ipv4(other, &oip, &omask, &ogw) != 0) return false;
+    if (oip == 0 || omask == 0 || omask == 0xFFFFFFFFu) return false;
+    /* Subnets overlap iff the addresses agree under the shorter prefix
+     * (= the AND of both masks). */
+    return ((e->ip_address ^ oip) & e->subnet_mask & omask) == 0;
+}
+
 static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                     uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                     ssize_t *rlen, uint16_t seq)
@@ -834,6 +858,12 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
         } else if (!st->ip_list.present[req.list_number - 1]) {
             result = OPC_RESULT_NG; err = OPC_ERR_SLOT_EMPTY;
+        } else if (ipcfg_clashes_other_iface(st, &st->ip_list.slots[req.list_number - 1])) {
+            /* #90/D16: refuse before staging so the VHL gets an explicit NG —
+             * committing would sever the management plane (checked again at
+             * apply time in the platform backend for the Logout-deferred
+             * commit window). */
+            result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CLASH;
         } else {
             /* Reachable only when no commit is armed (rejected above), so this
              * fresh stage never collides with an armed snapshot. It commits when
