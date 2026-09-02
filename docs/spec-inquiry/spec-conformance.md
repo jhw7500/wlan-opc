@@ -157,7 +157,7 @@
 |---|---|---|
 | V1 | **이벤트성 indication 4종 트리거** | ✅ producer 구현(FaultDetect 폴링 2026-06-12 · WlanStatus/Roaming/ApDisconnect nl80211 PR #46) — 실타깃 WlanStatus 검증(2026-06-15), Roaming/ApDisconnect는 트리거 환경 잔여(#47) |
 | V2 | **set-radio mode/bw/channel 실드라이버 반영** | 현재 wifi.sh freq만 적용, 나머지 실HW 반영 범위 |
-| V3 | **ChangeIp ESSID/GW/NTP 전환** | wpa_supplicant 재설정 필요 — 현재 eth0 IP/netmask만 적용 |
+| V3 | **ChangeIp ESSID/GW/NTP 전환** | wpa_supplicant 재설정 필요 — IP/netmask는 `opc.conf::device_ip_iface` 선택 인터페이스(기본 eth0, mlan0 opt-in — #89, 2026-09-02)에 runtime 적용, ESSID는 mlan0 wpa 적용(비휘발), GW/NTP 미적용 유지 |
 | V4 | **스텔스 AP ESSID NULL 처리 / logger info.ssid 갭** | ✅ `nxp_get_essid`가 link.json `info.ssid` 부재 시 nl80211 GET_INTERFACE(`NL80211_ATTR_SSID`) 커널 직접조회 fallback (2026-06-16, #48/#49 채널조회 동형) — 실타깃 검증 `essid='FXE3000_JHW'`(logger가 SSID 미기록인데도 정상 출력). 순수 스텔스(빈 SSID) 처리는 별도 |
 | V5 | **11r/ai/k/v capability 비트** | `device_info.json` 정적값 vs 실 silicon 광고 — 📌 고객사 문의 후 확정(2026-06-12 결정, #35). **[DFK 2026-06-29 PPTX 무선5]** "링크상태 아님, **지원여부**" → 정적 capability 해석 공식 확인. subset(88W9098: r/k/v 지원, ai 미지원)은 실측값 유지 |
 | V6 | **Dual radio WLAN#2/priority_ch 채움** | 실 dual-radio 동작 |

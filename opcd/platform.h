@@ -162,19 +162,19 @@ typedef struct opcd_platform_ops {
      * Strings are written NUL-terminated, truncated to cap (silent — no
      * overflow signal; callers that need overflow detection should size cap
      * larger than the expected maximum).
-     * get_eth_ipv4_host (named with _host suffix to make the byte order
-     * visible at every call site — easy to miss with bare get_eth_ipv4)
-     * writes the IPv4 address in host byte order, matching
-     * opcd_state_t::holder_ip and indication_recipient_ip. Callers
-     * serializing to the wire are responsible for htonl().
      * get_wlan_mac returns -ENODEV for idx outside [0, wlan_count). */
     int  (*get_eth_mac)(uint8_t mac[6]);
-    int  (*get_eth_ipv4_host)(uint32_t *ip_host);
-    /* netmask / gateway: same byte-order convention as get_eth_ipv4_host —
-     * host order; serializer is responsible for htonl(). gateway returns 0
-     * (host order) when unconfigured. */
-    int  (*get_eth_netmask_host)(uint32_t *netmask_host);
-    int  (*get_eth_gateway_host)(uint32_t *gateway_host);
+    /* Management IPv4 triple (ip/netmask/gateway) for one interface, read in
+     * a single snapshot so the three values cannot tear against a concurrent
+     * logger rewrite of the backing file. iface: 0=eth0, 1=mlan0 — encode via
+     * opcd_ip_iface_idx() (ip_iface.h) at call sites. Values are host byte
+     * order, matching opcd_state_t::holder_ip; callers serializing to the
+     * wire are responsible for htonl(). gateway — and any individually
+     * missing/invalid field — is written as 0 ("unconfigured"), matching the
+     * previous per-field best-effort policy. Returns 0 when the backing
+     * source was readable, -errno when not (all outputs zeroed). */
+    int  (*get_dev_ipv4)(int iface, uint32_t *ip_host,
+                         uint32_t *netmask_host, uint32_t *gateway_host);
     int  (*get_wlan_mac)(int idx /*0=mlan0,1=mlan1*/, uint8_t mac[6]);
     /* SSID string for the indexed WLAN interface. NUL-terminated, silently
      * truncated to cap. Empty string when not associated. */
@@ -218,7 +218,10 @@ typedef struct opcd_platform_ops {
      * blows the regulation 1-second response budget. Long-running work must
      * be queued and reported via an event later. */
     int  (*apply_radio_config)(const opc_set_radio_config_req_t *cfg);
-    int  (*apply_ip_change)(const opc_ipcfg_entry_t *slot);
+    /* iface: 0=eth0, 1=mlan0 — MUST be the same device_ip_iface selector the
+     * GetDeviceInfo read path uses (ip_iface.h): a read/apply split across
+     * interfaces makes the VHL §3.3.6→§3.3.7→§3.3.4 loop diverge. */
+    int  (*apply_ip_change)(const opc_ipcfg_entry_t *slot, int iface);
 
     /* Deterministic reset notice → soft reboot ack path.
      * opcd exits cleanly after Ack (main returns 0; systemd Restart=always

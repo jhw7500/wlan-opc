@@ -132,6 +132,7 @@ static void state_set_defaults(opcd_state_t *st)
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
     st->conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
+    st->conf.device_ip_iface         = OPC_IP_IFACE_ETH0;
     st->paths.conf        = OPC_PATH_CONF;
     st->paths.password    = OPC_PATH_PASSWORD;
     st->paths.ip_list     = OPC_PATH_IPLIST;
@@ -281,6 +282,7 @@ int main(int argc, char **argv)
      * thresholds); other settings still come from defaults / CLI options. */
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
     st.conf.device_info_freq_source = opcd_freq_source_parse(st.paths.conf);
+    st.conf.device_ip_iface         = opcd_ip_iface_parse(st.paths.conf);
     st.conf.roam_notify_port =
         opcd_roam_notify_port_parse(st.paths.conf, st.conf.roam_notify_port);
 

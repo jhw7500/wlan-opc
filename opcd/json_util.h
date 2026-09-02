@@ -26,9 +26,13 @@ extern "C" {
  * or synthetic EFBIG for the 1MB cap). */
 char *opc_json_slurp_file(const char *path);
 
-/* Extract a top-level `"key": "VALUE"` quoted string into `out` (NUL-terminated,
+/* Extract a `"key": "VALUE"` quoted string into `out` (NUL-terminated,
  * truncated to cap). Returns 0 on success, -ENOENT if absent, -EINVAL on bad
- * args. */
+ * args. NOTE: this is a whole-document FIRST-MATCH scanner, not top-level-only
+ * — nested keys resolve too (relied on by platform_nxp link.json readers:
+ * eth0 nests the IP fields under eth_stats.info, mlan0 under info). If a
+ * producer ever adds a same-named key earlier in the document, the earlier
+ * one silently wins. */
 int opc_json_string(const char *json, const char *key, char *out, size_t cap);
 
 /* Extract a top-level `"key": NUMBER` signed-decimal integer. Returns 0 on

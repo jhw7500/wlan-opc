@@ -129,7 +129,8 @@ sshpass -p '' ssh root@192.168.0.100        # 빈 비번
 | vendor/product/subcode, hardware, serial, 802.11, 날짜 | `/usr/local/opc/etc/device_info.json` | static | **부팅 시 1회** |
 | firmware | `dpkg-query -W -f='${Version}' wlan-proc` | dynamic | 첫 요청 1회(캐시) |
 | ntp_server | `/etc/systemd/timesyncd.conf` 의 `NTP=` | dynamic | 매 요청 |
-| ethernet_mac, ip/netmask/gateway | `/var/log/cantops/json/eth0/link.json` | live | 매 요청 |
+| ethernet_mac | `/var/log/cantops/json/eth0/link.json` (항상 eth0 — mlan0 MAC은 클론이라 오보고) | live | 매 요청 |
+| ip/netmask/gateway | `opc.conf::device_ip_iface` 토글에 따라 `eth0/link.json`(기본) 또는 `mlan0/link.json` — 읽기와 change-ip 적용 대상이 **같은 선택자**를 따름 | live | 매 요청 |
 | essid, WLAN mac, AP mac, RSSI, SNR, mode, bw | `/var/log/cantops/json/mlan0/link.json` (mlan1=WLAN#2) | live | 매 요청 |
 | WLAN 개수(1/2) | `/var/log/cantops/json/mlan1/link.json` 존재 여부 | live | — |
 | freq/channel, station_type, priority_ch | `/usr/local/opc/etc/radio.conf` (set-radio 캐시). freq/channel은 `opc.conf::device_info_freq_source` 토글에 따라 `config`(기본)=캐시 / `live`·`auto`=접속 시 live | config(기본)/live | set-radio·매 요청 |
@@ -214,7 +215,7 @@ $VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) �
 ## 주의사항
 
 - **세션 = 소스 IP로 식별** → 같은 호스트의 연속 vhlctl 호출은 로그인 유지. **idle(기본 300s)** 초과 시 자동 로그아웃.
-- `device-info`의 `ip_address`는 **eth0 기준**(무선 IP와 별개). eth0 down이면 `0.0.0.0`.
+- `device-info`의 `ip_address`는 기본 **eth0 기준**(무선 IP와 별개), `opc.conf::device_ip_iface = mlan0`이면 **mlan0 기준**(옵션 X/mlan0-IP 토폴로지용 — change-ip 적용 대상도 함께 전환). 선택된 인터페이스가 down/IP 미보유(무선 미접속 포함)이면 `0.0.0.0` — 관리평면의 실상태를 그대로 보고.
 - **상태변경 명령 주의**: `set-password`/`set-ip-list`/`set-radio`는 `/usr/local/opc/etc`에 영구 저장
   (set-radio는 wpa_supplicant conf의 freq를 실제 수정). `change-ip`는 nxp 백엔드에서 eth0 관리 IP를
   `ip addr`로 **실제 변경**(런타임만 — reboot 시 22-eth0.network로 복원되는 휘발성, wifi_init.sh의 mlan /32는 보존).
