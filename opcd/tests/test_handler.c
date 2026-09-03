@@ -1421,43 +1421,65 @@ int main(void)
                disk_radio.wlan1.mode == OPC_WLAN_MODE_11A,
                "async set-radio: NVRAM file written");
 
-        /* 21. A19: a same-command retransmission (new SN) while the previous
-         *     NVRAM write is still in flight supersedes the older response
-         *     duty — exactly one ack comes back, carrying the newest SN. */
+        /* 21. A19 / Rev1.01 그림 4-2: a byte-identical retransmission (new SN)
+         *     arriving while the ORIGINAL request's NVRAM write is still in
+         *     flight is DISCARDED — it is not re-applied and starts no second
+         *     write — and the single ack carries the ORIGINAL request's SN, not
+         *     the retransmission's. (#104 inverts Rev1.00, which answered the
+         *     newest SN.) */
         opc_set_radio_config_req_t a19r;
         memset(&a19r, 0, sizeof a19r);
         a19r.station_type    = OPC_STATION_SINGLE;
         a19r.wlan1.mode      = OPC_WLAN_MODE_11A;
         a19r.wlan1.bandwidth = OPC_BANDWIDTH_20;
-        /* Must differ from test 20's committed config: an identical request with
-         * no ack in flight takes the "nothing to apply" shortcut (#102) and is
-         * answered at once, which is not the deferred path A19 exercises. */
+        /* Must differ from test 20's committed config so the original takes the
+         * deferred (apply+persist) path, not the "nothing to apply" shortcut
+         * (#102). The retransmission below is byte-identical to it. */
         legacy_to_scan(5200, 40, &a19r.wlan1);
+        stub_apply_radio_reset_calls();
         fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 90, &a19r);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
                              resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "A19: first request deferred");
+        ASSERT(drc == 0 && rlen == 0, "A19: original request (SN=90) deferred");
         fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 91, &a19r);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
                              resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "A19: retransmission (new SN) deferred too");
+        ASSERT(drc == 0 && rlen == 0, "A19: retransmission (SN=91) gives no immediate response");
+        ASSERT(stub_apply_radio_calls() == 1,
+               "A19: retransmission is NOT re-applied (apply called once, for the original)");
         ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
                "A19: completion signalled");
         opcd_store_async_on_ready(&st);
         if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
-            opcd_store_async_on_ready(&st);   /* second job may drain separately */
+            opcd_store_async_on_ready(&st);   /* only the original enqueued a write */
         ASSERT(wait_fd_readable(cli, 5000) == 0, "A19: an ack arrived");
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 91 &&
+               ahdr.sequence_number == 90 &&
                opc_set_radio_config_ack_unpack(rx_buf, (size_t)rn, &rack) == 0 &&
                rack.result == OPC_RESULT_OK,
-               "A19: the single ack carries the retransmission SN and OK");
+               "A19: the single ack carries the ORIGINAL SN (90), not the retransmission's");
         ASSERT(wait_fd_readable(cli, 300) != 0,
-               "A19: no second ack for the superseded SN");
+               "A19: no second ack for the discarded retransmission");
+
+        /* 21b. Rev1.01 그림 4-2 엇갈림(cross): a retransmission arriving AFTER
+         *      the original response was already sent is a fresh request,
+         *      answered with its OWN SN. {5200/40} is committed now (21 drained),
+         *      so an identical SN=92 takes the shortcut and is answered at once —
+         *      two acks total across 21+21b, each carrying its own SN. */
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 92, &a19r);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                             resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen > 0, "A19 cross: post-response retransmission answered immediately");
+        ASSERT(opc_frame_parse(resp, (size_t)rlen, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 92 &&
+               opc_set_radio_config_ack_unpack(resp, (size_t)rlen, &rack) == 0 &&
+               rack.result == OPC_RESULT_OK,
+               "A19 cross: crossed retransmission answered with its own SN (92)");
 
         /* 22. D12/D13: a bad-length datagram is NG'd (0x0003) only toward
          *     the logged-in session's IP; any other source stays silent. */
