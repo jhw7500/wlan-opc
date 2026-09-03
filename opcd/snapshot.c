@@ -103,6 +103,9 @@ static const char *json_str(const char *in, char *out, size_t cap)
 static int emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
 {
     char macbuf[18], apbuf[18];
+    char chlist[2 * OPC_SCAN_CHLIST_LEN + 1];   /* wire bytes as hex, MSB first */
+    for (size_t i = 0; i < OPC_SCAN_CHLIST_LEN; i++)
+        snprintf(&chlist[2 * i], 3, "%02x", w->scan_chlist[i]);
     if (fprintf(f,
         "  \"wlan%d\": {\n"
         "    \"mac\":            \"%s\",\n"
@@ -113,7 +116,9 @@ static int emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
         "    \"status\":         %u,\n"
         "    \"snr\":            %d,\n"
         "    \"rssi\":           %d,\n"
-        "    \"connect_ap_mac\": \"%s\"\n"
+        "    \"connect_ap_mac\": \"%s\",\n"
+        "    \"scan_band\":      %u,\n"
+        "    \"scan_chlist\":    \"%s\"\n"
         "  }",
         idx,
         mac_str(w->mac, macbuf),
@@ -121,7 +126,8 @@ static int emit_wlan(FILE *f, int idx, const opc_wlan_radio_state_t *w)
         (unsigned)w->freq_mhz, (unsigned)w->channel,
         (unsigned)w->status,
         (int)w->snr, (int)w->rssi,
-        mac_str(w->connect_ap_mac, apbuf)) < 0) {
+        mac_str(w->connect_ap_mac, apbuf),
+        (unsigned)w->scan_band, chlist) < 0) {
         return -EIO;
     }
     return 0;

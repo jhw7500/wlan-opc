@@ -44,7 +44,15 @@ typedef struct opc_date {
     uint8_t  day;
 } opc_date_t;
 
-/* Per-WLAN radio block as seen in GetDeviceInfo Ack (full + measured state). */
+/* SCAN Frequency Band (Rev1.01 §4.3.4/§4.3.8): 2.4GHz 0x0001 / 5GHz 0x0002 /
+ * 6GHz 0x0006 / unset 0xFFFF. Exactly one band per WLAN. */
+#define OPC_SCAN_BAND_UNSET       0xFFFF
+#define OPC_SCAN_CHLIST_LEN       8      /* 64-bit channel bitmap, wire order */
+
+/* Per-WLAN radio block as seen in GetDeviceInfo Ack (full + measured state).
+ * scan_band / scan_chlist echo the SetRadioConfig scan settings (Rev1.01);
+ * scan_chlist is kept in wire byte order (8 raw bytes) — bit decoding lives
+ * with SetRadioConfig, not here. */
 typedef struct opc_wlan_radio_state {
     uint8_t  mac[6];
     uint8_t  mode;          /* OPC_WLAN_MODE_* */
@@ -55,6 +63,8 @@ typedef struct opc_wlan_radio_state {
     int8_t   snr;
     int8_t   rssi;
     uint8_t  connect_ap_mac[6];
+    uint16_t scan_band;     /* OPC_SCAN_BAND_UNSET when not configured */
+    uint8_t  scan_chlist[OPC_SCAN_CHLIST_LEN];
 } opc_wlan_radio_state_t;
 
 /* Per-WLAN radio block as set in SetRadioConfig Req (config-only). */
@@ -153,18 +163,27 @@ int     opc_get_basic_info_ack_unpack(const uint8_t *frame, size_t frame_len,
  * 172   Device Status(4)
  * 176   Station Type(2) + Priority CH(2)
  * 180   IEEE 802.11r(1) + 11ai(1) + 11k(1) + 11v(1)
- * 184   reserve(36)            ── spec table boundary inconsistent (see T12 in docs/proto-todo.md)
- * 220   WLAN#1 MAC(6) + Mode(1) + BW(1)
- * 228   WLAN#1 FREQ(2) + CH(2)
- * 232   WLAN#1 Status(2) + SNR(1) + RSSI(1)
- * 236   WLAN#1 Connect AP MAC(6) + pad(2)
- * 244   reserve(36)
- * 280   WLAN#2 MAC(6) + Mode(1) + BW(1)
- * 288   WLAN#2 FREQ(2) + CH(2)
- * 292   WLAN#2 Status(2) + SNR(1) + RSSI(1)
- * 296   WLAN#2 Connect AP MAC(6) + pad(2)
- * 304   reserve(48)
- * 352   (end of body — total 352B)
+ * 184   reserve(40)            ── spec rows 248..287
+ * 224   WLAN#1 MAC(6) + Mode(1) + BW(1)        ── spec row 288 (frame = body + 64)
+ * 232   WLAN#1 FREQ(2) + CH(2)
+ * 236   WLAN#1 Status(2) + SNR(1) + RSSI(1)
+ * 240   WLAN#1 Connect AP MAC(6)
+ * 246   WLAN#1 SCAN Frequency Band(2)          ── Rev1.01
+ * 248   WLAN#1 SCAN Channel List(8)            ── Rev1.01
+ * 256   reserve(32)            ── spec rows 320..351
+ * 288   WLAN#2 MAC(6) + Mode(1) + BW(1)        ── spec row 352
+ * 296   WLAN#2 FREQ(2) + CH(2)
+ * 300   WLAN#2 Status(2) + SNR(1) + RSSI(1)
+ * 304   WLAN#2 Connect AP MAC(6)
+ * 310   WLAN#2 SCAN Frequency Band(2)          ── Rev1.01
+ * 312   WLAN#2 SCAN Channel List(8)            ── Rev1.01
+ * 320   reserve(32)            ── spec rows 384..415
+ * 352   (end of body — total 352B; Length 408 unchanged)
+ *
+ * History: until 2026-09 (#101) the radio blocks were packed 4B/8B early
+ * (body 220/280 = frame 284/344) because the reserve at 184 was read as 36B;
+ * the spec figure (Rev1.00 and Rev1.01 alike) puts WLAN#1 at frame 288 and
+ * WLAN#2 at 352. test_codec pins the absolute offsets.
  * ======================================================================== */
 
 #define OPC_GET_DEVICE_INFO_REQ_BODY_LEN  0

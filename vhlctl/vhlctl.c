@@ -180,6 +180,14 @@ static void print_mac(const char *label, const uint8_t mac[6])
            label, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+/* Rev1.01 SCAN Frequency Band / SCAN Channel List (raw wire bytes). */
+static void print_scan(const char *label, const opc_wlan_radio_state_t *w)
+{
+    printf("  %s scan_band=0x%04x scan_chlist=", label, w->scan_band);
+    for (size_t i = 0; i < OPC_SCAN_CHLIST_LEN; i++) printf("%02x", w->scan_chlist[i]);
+    printf("\n");
+}
+
 static void print_ipv4(const char *label, uint32_t host_ip)
 {
     printf("  %s = %u.%u.%u.%u\n", label,
@@ -299,12 +307,14 @@ static int cmd_device_info(int argc, char **argv)
            ack.wlan1.channel, ack.wlan1.status, ack.wlan1.snr, ack.wlan1.rssi);
     print_mac("WLAN#1 mac",            ack.wlan1.mac);
     print_mac("WLAN#1 connect_ap_mac", ack.wlan1.connect_ap_mac);
+    print_scan("WLAN#1", &ack.wlan1);
     if (ack.station_type == OPC_STATION_DUAL) {
         printf("  WLAN#2: mode=%u bw=%u freq=%u ch=0x%04x status=0x%04x SNR=%d RSSI=%d\n",
                ack.wlan2.mode, ack.wlan2.bandwidth, ack.wlan2.freq_mhz,
                ack.wlan2.channel, ack.wlan2.status, ack.wlan2.snr, ack.wlan2.rssi);
         print_mac("WLAN#2 mac",            ack.wlan2.mac);
         print_mac("WLAN#2 connect_ap_mac", ack.wlan2.connect_ap_mac);
+        print_scan("WLAN#2", &ack.wlan2);
     }
     return 0;
 }

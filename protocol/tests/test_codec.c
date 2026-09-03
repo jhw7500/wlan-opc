@@ -229,6 +229,100 @@ static int test_get_device_info(void)
     return 0;
 }
 
+/* Absolute in-frame offsets of the GetDeviceInfo Ack radio blocks, pinned to
+ * the spec figure (Rev1.01 §4.3.4, unchanged since Rev1.00 for these rows):
+ *   248..287  reserve (40B)
+ *   288       WLAN#1 MAC(6) / 294 Mode / 295 BW / 296 FREQ / 298 CH
+ *   300       Status / 302 SNR / 303 RSSI / 304 Connect AP MAC(6)
+ *   320..351  reserve (32B)
+ *   352       WLAN#2 MAC(6) ... (same shape, +64)
+ *   384..415  reserve (32B)
+ * The round-trip test above cannot catch a block placed at the wrong offset
+ * (pack and unpack would drift together), so this one reads raw bytes. */
+static int test_get_device_info_wire_offsets(void)
+{
+    opc_get_device_info_ack_t ai;
+    memset(&ai, 0, sizeof ai);
+    ai.result       = OPC_RESULT_OK;
+    ai.station_type = OPC_STATION_DUAL;
+    fill_mac(ai.wlan1.mac, 0x20);
+    ai.wlan1.mode      = OPC_WLAN_MODE_11AX;
+    ai.wlan1.bandwidth = OPC_BANDWIDTH_80;
+    ai.wlan1.freq_mhz  = 5180;
+    ai.wlan1.channel   = 0x0224;
+    ai.wlan1.status    = 0x0001;
+    ai.wlan1.snr       = 35;
+    ai.wlan1.rssi      = -60;
+    fill_mac(ai.wlan1.connect_ap_mac, 0x30);
+    fill_mac(ai.wlan2.mac, 0x40);
+    ai.wlan2.mode      = OPC_WLAN_MODE_11AC;
+    ai.wlan2.bandwidth = OPC_BANDWIDTH_40;
+    ai.wlan2.freq_mhz  = 2412;
+    ai.wlan2.channel   = 0x0101;
+    ai.wlan2.status    = 0x0001;
+    ai.wlan2.snr       = 28;
+    ai.wlan2.rssi      = -72;
+    fill_mac(ai.wlan2.connect_ap_mac, 0x50);
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t na = opc_get_device_info_ack_pack(frame, sizeof frame, 0x0002, &ai);
+    ASSERT(na == 416, "frame is 416B (Length 408 + 8)");
+
+    for (size_t i = 248; i < 288; i++) ASSERT(frame[i] == 0, "reserve 248..287 zero");
+    ASSERT(macs_equal(&frame[288], ai.wlan1.mac), "w1 mac @288");
+    ASSERT(frame[294] == OPC_WLAN_MODE_11AX, "w1 mode @294");
+    ASSERT(frame[295] == OPC_BANDWIDTH_80, "w1 bw @295");
+    ASSERT(opc_be16_read(&frame[296]) == 5180, "w1 freq @296");
+    ASSERT(opc_be16_read(&frame[298]) == 0x0224, "w1 ch @298");
+    ASSERT(opc_be16_read(&frame[300]) == 0x0001, "w1 status @300");
+    ASSERT(frame[302] == 35, "w1 snr @302");
+    ASSERT((int8_t)frame[303] == -60, "w1 rssi @303");
+    ASSERT(macs_equal(&frame[304], ai.wlan1.connect_ap_mac), "w1 ap mac @304");
+    for (size_t i = 320; i < 352; i++) ASSERT(frame[i] == 0, "reserve 320..351 zero");
+    ASSERT(macs_equal(&frame[352], ai.wlan2.mac), "w2 mac @352");
+    ASSERT(frame[358] == OPC_WLAN_MODE_11AC, "w2 mode @358");
+    ASSERT(frame[359] == OPC_BANDWIDTH_40, "w2 bw @359");
+    ASSERT(opc_be16_read(&frame[360]) == 2412, "w2 freq @360");
+    ASSERT(opc_be16_read(&frame[362]) == 0x0101, "w2 ch @362");
+    ASSERT(opc_be16_read(&frame[364]) == 0x0001, "w2 status @364");
+    ASSERT(frame[366] == 28, "w2 snr @366");
+    ASSERT((int8_t)frame[367] == -72, "w2 rssi @367");
+    ASSERT(macs_equal(&frame[368], ai.wlan2.connect_ap_mac), "w2 ap mac @368");
+    for (size_t i = 384; i < 416; i++) ASSERT(frame[i] == 0, "reserve 384..415 zero");
+    return 0;
+}
+
+/* Rev1.01 §4.3.4 new elements carved out of the reserve after Connect AP MAC:
+ *   310  WLAN#1 SCAN Frequency Band(2)   312..319  WLAN#1 SCAN Channel List(8)
+ *   374  WLAN#2 SCAN Frequency Band(2)   376..383  WLAN#2 SCAN Channel List(8)
+ * Length stays 408. The channel list is carried as 8 raw wire bytes. */
+static int test_get_device_info_scan_fields(void)
+{
+    static const uint8_t list1[OPC_SCAN_CHLIST_LEN] =
+        { 0x00, 0x00, 0x04, 0x21, 0x00, 0x00, 0x00, 0x00 };   /* 2.4GHz ch 1/6/11 */
+    opc_get_device_info_ack_t ai;
+    memset(&ai, 0, sizeof ai);
+    ai.wlan1.scan_band = 0x0001;
+    memcpy(ai.wlan1.scan_chlist, list1, sizeof list1);
+    ai.wlan2.scan_band = OPC_SCAN_BAND_UNSET;             /* single station: unset */
+
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t na = opc_get_device_info_ack_pack(frame, sizeof frame, 0x0002, &ai);
+    ASSERT(na == 416, "frame is 416B");
+    ASSERT(opc_be16_read(&frame[6]) == 408, "Length unchanged at 408");
+    ASSERT(opc_be16_read(&frame[310]) == 0x0001, "w1 scan band @310");
+    ASSERT(memcmp(&frame[312], list1, sizeof list1) == 0, "w1 scan chlist @312");
+    ASSERT(opc_be16_read(&frame[374]) == 0xFFFF, "w2 scan band @374");
+    for (size_t i = 376; i < 384; i++) ASSERT(frame[i] == 0, "w2 scan chlist @376 zero");
+
+    opc_get_device_info_ack_t ao;
+    ASSERT(opc_get_device_info_ack_unpack(frame, na, &ao) == 0, "unpack");
+    ASSERT(ao.wlan1.scan_band == 0x0001, "w1 scan band round trip");
+    ASSERT(memcmp(ao.wlan1.scan_chlist, list1, sizeof list1) == 0, "w1 scan chlist round trip");
+    ASSERT(ao.wlan2.scan_band == OPC_SCAN_BAND_UNSET, "w2 scan band round trip");
+    return 0;
+}
+
 /* ---- 0x1001 SetPassword ---- */
 
 static int test_set_password(void)
@@ -599,6 +693,8 @@ int main(void)
         { "logout",                 test_logout },
         { "get_basic_info",         test_get_basic_info },
         { "get_device_info",        test_get_device_info },
+        { "get_device_info_offsets", test_get_device_info_wire_offsets },
+        { "get_device_info_scan",   test_get_device_info_scan_fields },
         { "set_password",           test_set_password },
         { "set_ip_config_list",     test_set_ip_config_list },
         { "change_ip_address",      test_change_ip_address },
