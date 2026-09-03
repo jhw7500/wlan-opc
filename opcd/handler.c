@@ -1457,10 +1457,13 @@ void opcd_store_async_on_ready(opcd_state_t *st)
              * with a config whose own write is still in flight; this older
              * completion must not vouch for it. Bound by generation, not by
              * drain order — opc_store_async_drain harvests by job-slot index,
-             * not completion order (Claude/Codex, round 4). A failed write
-             * always leaves it uncommitted so the retry re-persists. */
-            st->radio_committed = (done[i].result == 0) &&
-                                  (pa->radio_gen == st->radio_gen);
+             * not completion order (Claude/Codex, round 4). A stale (older
+             * generation) completion is IGNORED rather than assigned: it may
+             * drain after the current generation already committed, and must
+             * not clear that (Codex, round 5). A failed current-generation
+             * write leaves it uncommitted so the retry re-persists. */
+            if (pa->radio_gen == st->radio_gen)
+                st->radio_committed = (done[i].result == 0);
             opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
             emit_ack(&rlen, opc_set_radio_config_ack_pack(resp, sizeof resp, pa->seq, &ack));
             break;

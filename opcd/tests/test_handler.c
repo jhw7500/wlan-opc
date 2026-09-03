@@ -1987,6 +1987,23 @@ int main(void)
         ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: B ack arrived");
         ASSERT(st.radio_committed, "26e: current-generation completion commits");
 
+        /* Stale completion after a current-generation commit: the drain may
+         * hand back an older-generation write AFTER the current one (job-slot
+         * order ≠ completion order). It must be ignored, not clear the commit.
+         * Simulate: queue write C, then pretend a newer write already committed
+         * (gen bump + committed), then let C's completion drain. */
+        legacy_to_scan(5220, 44, &rq.wlan1);
+        fl = opc_set_radio_config_req_pack(fr, sizeof fr, 63, &rq);
+        rl = -1;
+        ASSERT(opcd_dispatch(&st, fr, (size_t)fl, LOOP, cport, rs, sizeof rs, &rl) == 0 && rl == 0,
+               "26e: write C deferred");
+        st.radio_gen++;
+        st.radio_committed = true;            /* the (simulated) current write landed */
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "26e: C completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: C ack arrived");
+        ASSERT(st.radio_committed, "26e: stale completion leaves the commit untouched");
+
         st.store_async = NULL;
         opc_store_async_destroy(sa);
         close(srv);

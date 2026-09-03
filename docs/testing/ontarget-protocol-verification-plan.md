@@ -115,7 +115,7 @@ ID/Length 는 `protocol/ids.h`·`protocol/commands.h`·스펙 §3.3 검증값. E
 | SetPassword | `0x1001` | `set-password --old --new` | 요 | 312 | 60 | OK + restart 후 잔존 | 구비번 오타→0x0010 ; 신비번 문자/NUL→0x0013/0x0014 ; NVRAM→0x0004 | §3.3.5 |
 | SetIpConfigList | `0x1002` | `set-ip-list --slot --flag start\|cont\|end --ip --mask --gw --ntp --essid` | 요 | 56+64·n | 60 | END 수신 시에만 commit | slot→0x0010 ; IP→0x0011 ; netmask→0x0012 ; GW→0x0013 ; NTP→0x0014 ; ESSID 문자/NUL→0x0015/0x0016 ; Len≠56+64n→0x0017 ; seq위반→0x0018 | §3.3.6 |
 | ChangeIpAddress | `0x1003` | `change-ip --slot N` | 요 | 60 | 60 | OK(armed)→logout 후 적용 | slot→0x0010 ; 빈 슬롯→**0x0011** ; 리스트변경 중 경합→**0x0012** | §3.3.7 |
-| SetRadioConfig | `0x1004` | `set-radio --station --w1-freq --w1-ch --w1-mode --w1-bw [--w2-* --priority]` | 요 | 76 | 60 | OK + reboot 잔존(wpa freq 실수정) | station→0x0010 ; freq(6G)→**0x0011** ; CH→0x0012 ; mode→**0x0013** ; bw→**0x0014** ; 적용실패→0x0050 | §3.3.8 |
+| SetRadioConfig | `0x1004` | `set-radio --station --w1-band --w1-chlist --w1-mode --w1-bw [--w2-* --priority]` | 요 | 84 | 60 | OK + reboot 잔존(wpa freq 실수정) | station→0x0010 ; band(6G)→**0x0011** ; chlist/priority→0x0012 ; mode→**0x0013** ; bw→**0x0014** ; 적용실패→0x0050 | §3.3.8 |
 | SetIndicationConfig | `0x1005` | `set-indication --bits HEX --period S --to A.B.C.D:PORT` | 요 | 64 | 60 | unicast OK | 미할당 bit→0x0010 ; 비유니캐스트(0.0.0.0/mcast/bcast)→**0x0012** | §3.3.9 |
 | Reset | `0x2001` | `reset` | 요 | 0 | **60** ¹ | OK → opcd 재시작 | 미로그인→0x0001 ; 타 IP→0x0002 | §3.3.10 |
 
@@ -201,7 +201,7 @@ ApDisconnect 는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때�
 | `set-indication --to <unicast>` | OK | |
 | `change-ip --slot 25` (END 전) | NG **0x0012** conflict | |
 | netmask `0.255.0.0` (비연속) | NG **0x0012** | #36 |
-| `set-radio --w1-mode 99` / `--w1-bw 99` / `--w1-freq 6200`(6G) | NG **0x0013 / 0x0014 / 0x0011** | #36/A21 6G 거부 |
+| `set-radio --w1-mode 99` / `--w1-bw 99` / `--w1-band 6`(6G) | NG **0x0013 / 0x0014 / 0x0011** | #36/A21 6G 거부 |
 | `-i 3` 후 5s 대기 `device-info` | NG **0x0001** | idle auto-logout |
 
 대표 실행:
@@ -209,7 +209,7 @@ ApDisconnect 는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때�
 $VHL login --password '' ; $VHL login --password ThisIsWrong          # 0x0010
 $VHL login --password $PW
 $VHL set-indication --bits 0x80 --period 5 --to 224.0.0.1:9999        # 0x0012
-$VHL set-radio --station single --w1-freq 6200 --w1-ch 0x0224 --w1-mode 11 --w1-bw 2   # 0x0011
+$VHL set-radio --station single --w1-band 6 --w1-chlist 1 --w1-mode 11 --w1-bw 2   # 0x0011
 ```
 **보안 불변식**: P0 전후 비번 파일 sha256 동일(`sha256sum /usr/local/opc/etc/password*`).
 
@@ -279,7 +279,7 @@ chk(){ desc="$1"; exp="$2"; shift 2; out=$("$@" 2>&1)
 chk "L0 basic-info"        "vendor"  $VHL basic-info
 chk "L4 empty-pw 0x0010"   "0x0010"  $VHL login --password ''
 chk "L2 login OK"          "OK"      $VHL login --password $PW
-chk "L4 6G reject 0x0011"  "0x0011"  $VHL set-radio --station single --w1-freq 6200 --w1-ch 0x0224 --w1-mode 11 --w1-bw 2
+chk "L4 6G reject 0x0011"  "0x0011"  $VHL set-radio --station single --w1-band 6 --w1-chlist 1 --w1-mode 11 --w1-bw 2
 echo "== RESULT: $pass PASS / $fail FAIL =="
 ```
 **보관 규약**: `evidence/<date>_<target>/` 하위에 `*.log`(콘솔) + `*.pcap`(와이어) +
