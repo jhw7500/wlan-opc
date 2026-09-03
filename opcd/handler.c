@@ -1061,6 +1061,23 @@ static bool radio_cfg_differs(const opc_set_radio_config_req_t *a,
     return false;
 }
 
+/* True iff two radio requests are the SAME wire frame — every configured field
+ * compared, WLAN#2 and priority_ch INCLUDED regardless of station_type. Used
+ * only for A19 retransmission classification (그림 4-2): a retransmission is a
+ * byte-identical re-send, so a request differing in any field — even one that
+ * radio_cfg_differs() ignores for SINGLE (priority_ch / WLAN#2) — is a DISTINCT
+ * request and must be answered on its own SN, not dropped (Codex, PR #113).
+ * radio_cfg_differs() stays the comparator for the apply-skip / revert
+ * decisions, which legitimately ignore fields SINGLE does not apply. */
+static bool radio_req_identical(const opc_set_radio_config_req_t *a,
+                                const opc_set_radio_config_req_t *b)
+{
+    return a->station_type == b->station_type &&
+           a->priority_ch  == b->priority_ch  &&
+           !wlan_cfg_differs(&a->wlan1, &b->wlan1) &&
+           !wlan_cfg_differs(&a->wlan2, &b->wlan2);
+}
+
 /* True while an ack for `req_id` from this client is still deferred (NVRAM
  * write in flight). An identical request arriving then is a retransmission
  * (§4.1.3 fig 4-2, A19) and must take the normal path, not the "nothing to
@@ -1124,7 +1141,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             /* §4.3.8 0x0012: a SCAN Channel List bit outside the band's table
              * (or a list without a band), or a bad Priority CH (Dual only, A16). */
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_CH;
-        } else if (!radio_cfg_differs(&req, &st->radio) &&
+        } else if (radio_req_identical(&req, &st->radio) &&
                    ack_pending_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
             /* A19 / Rev1.01 그림 4-2: a byte-identical request arriving while the
              * ORIGINAL request's NVRAM write is still in flight is a
@@ -1132,10 +1149,12 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
              * reconfigure would drop the link) and start no second write. The
              * original's deferred ack answers on completion, carrying the
              * ORIGINAL request's SN. This inverts Rev1.00, which answered the
-             * newest (retransmission) SN. A payload that DIFFERS is a distinct
-             * request, not a retransmission, and falls through to normal
-             * handling. VHL accepting an ack whose SN differs from its last
-             * send is inquiry Q6; until answered we follow the spec diagram. */
+             * newest (retransmission) SN. The match is the WHOLE payload
+             * (radio_req_identical, not radio_cfg_differs) so a request differing
+             * only in a SINGLE-ignored field (priority_ch / WLAN#2) is treated as
+             * a distinct request, answered on its own SN, not dropped (Codex,
+             * PR #113). VHL accepting an ack whose SN differs from its last send
+             * is inquiry Q6; until answered we follow the spec diagram. */
             fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (A19)\n");
             session_touch(st);
             *rlen = 0;

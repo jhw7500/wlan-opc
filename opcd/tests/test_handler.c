@@ -1481,6 +1481,41 @@ int main(void)
                rack.result == OPC_RESULT_OK,
                "A19 cross: crossed retransmission answered with its own SN (92)");
 
+        /* 21c. Retry classification must compare the WHOLE payload, not the
+         *      apply-relevant fields. radio_cfg_differs() ignores priority_ch /
+         *      WLAN#2 for SINGLE, but a request that differs there is a DISTINCT
+         *      wire frame, not a retransmission — dropping it would answer the
+         *      original SN and time the client out (Codex, PR #113). Original
+         *      A(SN=93) in flight, then B(SN=94): same WLAN#1, different
+         *      priority_ch → B must be processed and answered with ITS OWN SN. */
+        stub_apply_radio_reset_calls();
+        opc_set_radio_config_req_t rqA = a19r;   /* SINGLE, {5200/40} */
+        legacy_to_scan(5220, 44, &rqA.wlan1);    /* differ from committed → deferred */
+        rqA.priority_ch = 0x0000;
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 93, &rqA);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "A19 payload: original A(SN=93) deferred");
+        opc_set_radio_config_req_t rqB = rqA;    /* same WLAN#1 ... */
+        rqB.priority_ch = 0x1234;                /* ... but a different wire byte */
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 94, &rqB);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "A19 payload: distinct B(SN=94) not answered inline");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "A19 payload: completion signalled");
+        opcd_store_async_on_ready(&st);
+        if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
+            opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 payload: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 94 &&
+               opc_set_radio_config_ack_unpack(rx_buf, (size_t)rn, &rack) == 0 &&
+               rack.result == OPC_RESULT_OK,
+               "A19 payload: distinct request answered with its OWN SN (94), not dropped as a retry");
+        ASSERT(wait_fd_readable(cli, 300) != 0, "A19 payload: exactly one ack");
+
         /* 22. D12/D13: a bad-length datagram is NG'd (0x0003) only toward
          *     the logged-in session's IP; any other source stays silent. */
         uint8_t badf[30];
