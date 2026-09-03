@@ -177,7 +177,12 @@ static void state_load_from_disk(opcd_state_t *st)
         uint8_t rbuf[64];
         ssize_t rn = opc_store_read_all(st->paths.radio, rbuf, sizeof rbuf);
         int rc = rn > 0 ? opcd_radio_conf_decode(rbuf, (size_t)rn, &st->radio) : -1;
-        st->radio_committed = (rc >= 0);   /* on disk = applied + persisted */
+        /* Only an exact-layout file counts as committed. A converted Rev1.00
+         * file (rc == 1) describes what the old semantics applied (e.g. one
+         * frequency), not what the converted band/list would apply now (e.g.
+         * a whole band) — so the next matching request must run apply +
+         * persist instead of being skipped as "already there" (Codex P2). */
+        st->radio_committed = (rc == 0);
         if (rc < 0) {
             if (rn > 0)
                 LOG("radio.conf size mismatch (%zd vs %zu) — discarding", rn, sizeof st->radio);

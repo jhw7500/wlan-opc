@@ -839,6 +839,10 @@ static int run_opc_wlan_apply(const char *iface, const char *freqs,
  * supported band is rendered so that a previous lock is actually cleared —
  * the apply script has no "remove freq_list" form, and leaving the old list
  * while GetDeviceInfo reports "unset" would misstate the device (Codex P2).
+ * Known approximation: the rendered set is the Rev1.01 bitmap universe (5 GHz
+ * ends at ch165), narrower than the device's live channel table (ch169+). A
+ * real "remove freq_list" needs an opc_wlan_apply.sh `freq none` form — tracked
+ * as #111.
  * Returns the number of channels rendered; 0 when the band is unsupported. */
 static size_t scan_freqs_render(const opc_wlan_radio_cfg_t *w, char *buf, size_t cap)
 {
