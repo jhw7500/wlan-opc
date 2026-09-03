@@ -15,7 +15,8 @@
  *   change-ip    --slot N
  *   set-radio    --station single|dual
  *                --w1-band 2.4|5|none --w1-chlist 1,6,11 --w1-mode N --w1-bw N
- *               [--w2-freq F --w2-ch CH --w2-mode N --w2-bw N --priority HEX]
+ *               [--w2-band 2.4|5|none --w2-chlist 1,6,11 --w2-mode N --w2-bw N --priority HEX|auto]
+ *               [--wN-chlist-hex 16HEX]   (raw wire bytes, negative tests)
  *   set-indication --bits HEX --period S --to A.B.C.D:PORT
  *   reset
  *   listen --bind HOST:PORT
