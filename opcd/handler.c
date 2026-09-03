@@ -589,14 +589,19 @@ static void select_devinfo_freq_ch(opcd_freq_source_t src, bool assoc,
                                    uint16_t cfg_freq, uint16_t cfg_ch,
                                    uint16_t *out_freq, uint16_t *out_ch)
 {
-    bool use_live = (src == OPC_FREQ_SRC_LIVE) ||
-                    (src == OPC_FREQ_SRC_AUTO && assoc);
-    if (use_live && assoc) {
+    /* An association whose link readback carries no frequency (link.json
+     * without info.freq/channel) has no live value to report: LIVE then
+     * yields the unset marker, never 0/0 or a bandless raw channel, and AUTO
+     * falls back to the configured value (Codex, PR #112). */
+    const bool live_ok  = assoc && live_freq != 0;
+    const bool use_live = (src == OPC_FREQ_SRC_LIVE) ||
+                          (src == OPC_FREQ_SRC_AUTO && live_ok);
+    if (use_live && live_ok) {
         *out_freq = live_freq;
         *out_ch   = opc_chan_field(live_freq, live_ch);
     } else if (use_live || cfg_freq == 0) {
-        /* LIVE while not associated, or nothing configured to fall back on:
-         * Rev1.01 unset value (§4.2.2), not 0. */
+        /* LIVE without a usable live value, or nothing configured to fall
+         * back on: Rev1.01 unset value (§4.2.2), not 0. */
         *out_freq = OPC_WLAN_FREQ_UNSET;
         *out_ch   = OPC_WLAN_CH_UNSET;
     } else {                          /* CONFIG, or AUTO while not associated */

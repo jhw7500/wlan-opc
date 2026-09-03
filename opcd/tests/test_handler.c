@@ -2054,6 +2054,14 @@ int main(void)
                "28: assoc FREQ/CH = live");
         ASSERT(ack.wlan1.status == 0x0001, "28: assoc Status = 0x0001");
         ASSERT(!(ack.wlan1.snr == -128 && ack.wlan1.rssi == -128), "28: assoc SNR/RSSI from the link, not the -128 marker");
+        /* d) associated but the link carries no frequency (link.json without
+         *    info.freq/channel): the live source must report unset, never 0/0
+         *    or a bandless raw channel (Codex, PR #112). */
+        stub_set_link(0, true, 0, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, no freq)");
+        ASSERT(ack.wlan1.freq_mhz == 0xFFFF && ack.wlan1.channel == 0xFFFF,
+               "28: assoc without live freq → FREQ/CH 0xFFFF");
+        ASSERT(ack.wlan1.status == 0x0001, "28: assoc without live freq still Status 0x0001");
         stub_reset_link();
     }
 
