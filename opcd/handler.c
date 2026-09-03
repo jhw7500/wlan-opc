@@ -597,8 +597,14 @@ static void select_devinfo_freq_ch(opcd_freq_source_t src, bool assoc,
     const bool use_live = (src == OPC_FREQ_SRC_LIVE) ||
                           (src == OPC_FREQ_SRC_AUTO && live_ok);
     if (use_live && live_ok) {
+        /* FREQ is the live value; CH only when it is band-qualified. A link
+         * with a frequency but no channel (or a frequency outside every OPC
+         * band) has no valid Rev1.01 CH — report the unset marker rather than
+         * the bare 0x0000 / bandless field opc_chan_field() yields
+         * (Claude, PR #112). */
+        const uint16_t ch_field = opc_chan_field(live_freq, live_ch);
         *out_freq = live_freq;
-        *out_ch   = opc_chan_field(live_freq, live_ch);
+        *out_ch   = (ch_field >> 8) != 0 ? ch_field : OPC_WLAN_CH_UNSET;
     } else if (use_live || cfg_freq == 0) {
         /* LIVE without a usable live value, or nothing configured to fall
          * back on: Rev1.01 unset value (§4.2.2), not 0. */

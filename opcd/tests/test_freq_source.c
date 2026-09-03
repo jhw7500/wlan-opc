@@ -41,7 +41,7 @@ int main(void)
     unlink(g_path);
 
     ASSERT(opcd_freq_source_parse("/nonexistent_dir/opc.conf") == OPC_FREQ_SRC_LIVE,
-           "missing file -> config");
+           "missing file -> live");
     ASSERT(opcd_freq_source_parse(NULL) == OPC_FREQ_SRC_LIVE, "NULL path -> live");
 
     write_conf("device_info_freq_source = live\n");
@@ -84,7 +84,7 @@ int main(void)
         strcpy(buf + 159, "device_info_freq_source = live\n");
         write_conf(buf);
         ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_LIVE,
-               "over-long line tail not parsed -> config");
+               "over-long line tail not parsed -> live");
     }
 
     unlink(g_path);

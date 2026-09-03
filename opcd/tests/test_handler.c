@@ -2062,6 +2062,19 @@ int main(void)
         ASSERT(ack.wlan1.freq_mhz == 0xFFFF && ack.wlan1.channel == 0xFFFF,
                "28: assoc without live freq → FREQ/CH 0xFFFF");
         ASSERT(ack.wlan1.status == 0x0001, "28: assoc without live freq still Status 0x0001");
+        /* e) associated with a frequency but no channel (link.json with
+         *    info.freq only): FREQ is real, CH must be the unset marker — never
+         *    the ambiguous bare 0x0000 that opc_chan_field() yields for ch 0
+         *    (Claude, PR #112). */
+        stub_set_link(0, true, 5220, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, freq only)");
+        ASSERT(ack.wlan1.freq_mhz == 5220, "28: assoc freq-only → FREQ live");
+        ASSERT(ack.wlan1.channel == 0xFFFF, "28: assoc freq-only → CH 0xFFFF, not 0x0000");
+        /* f) channel present but the frequency maps to no OPC band: a bandless
+         *    (band byte 0) CH is not a valid Rev1.01 value either → unset. */
+        stub_set_link(0, true, 4000, 44);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, bandless)");
+        ASSERT(ack.wlan1.channel == 0xFFFF, "28: assoc bandless freq → CH 0xFFFF, not 0x002C");
         stub_reset_link();
     }
 
