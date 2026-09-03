@@ -1009,17 +1009,19 @@ static bool ack_pending_for(const opcd_state_t *st, uint16_t req_id, uint32_t ip
     return false;
 }
 
-/* True while another (non-discarded) SetRadioConfig ack — i.e. another radio
- * NVRAM write, from any client — is outstanding besides `self`. */
-static bool other_radio_write_pending(const opcd_state_t *st, const opcd_pending_ack_t *self)
+/* The live (non-discarded) pending ack slot for `req_id` from this client —
+ * unique, because persist_blob discards any older same-client same-command
+ * slot (A19) when it queues a new one. NULL if none. */
+static opcd_pending_ack_t *pending_slot_for(opcd_state_t *st, uint16_t req_id,
+                                            uint32_t ip, uint16_t port)
 {
     for (size_t i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
-        const opcd_pending_ack_t *pa = &st->pending_acks[i];
-        if (pa == self) continue;
-        if (pa->in_use && !pa->discarded && pa->req_id == OPC_REQ_SET_RADIO_CONFIG)
-            return true;
+        opcd_pending_ack_t *pa = &st->pending_acks[i];
+        if (pa->in_use && !pa->discarded && pa->req_id == req_id &&
+            pa->client_ip == ip && pa->client_port == port)
+            return pa;
     }
-    return false;
+    return NULL;
 }
 
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
@@ -1097,6 +1099,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
             } else {
                 st->radio = req;
+                st->radio_gen++;               /* this config's generation */
                 st->radio_committed = false;   /* until the NVRAM write lands */
                 bool deferred = false;
                 if (persist_radio(st, ip, port, seq, &deferred) != 0) {
@@ -1104,6 +1107,10 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                      * identical retry re-applies and re-persists (Codex P1). */
                     result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
                 } else if (deferred) {
+                    /* Bind the queued write to this generation: its completion
+                     * may commit only while st->radio still is this config. */
+                    opcd_pending_ack_t *pa = pending_slot_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port);
+                    if (pa) pa->radio_gen = st->radio_gen;
                     session_touch(st);
                     *rlen = 0;   /* ack follows the NVRAM completion */
                     return 0;
@@ -1444,14 +1451,16 @@ void opcd_store_async_on_ready(opcd_state_t *st)
         }
         case OPC_REQ_SET_RADIO_CONFIG: {
             /* The deferred write decides whether st->radio is committed — but
-             * only the LAST outstanding radio write may say so: a later request
-             * (e.g. a retry from another source port, which the A19 same-client
-             * discard does not catch) may have replaced st->radio with a config
-             * whose own write is still in flight, and this older completion
-             * must not vouch for it (Codex P2, round 3). A failed write always
-             * leaves it uncommitted so the retry re-persists. */
+             * only the write of the CURRENT generation may say so. A later
+             * request (e.g. a retry from another source port, which the A19
+             * same-client discard does not catch) may have replaced st->radio
+             * with a config whose own write is still in flight; this older
+             * completion must not vouch for it. Bound by generation, not by
+             * drain order — opc_store_async_drain harvests by job-slot index,
+             * not completion order (Claude/Codex, round 4). A failed write
+             * always leaves it uncommitted so the retry re-persists. */
             st->radio_committed = (done[i].result == 0) &&
-                                  !other_radio_write_pending(st, pa);
+                                  (pa->radio_gen == st->radio_gen);
             opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
             emit_ack(&rlen, opc_set_radio_config_ack_pack(resp, sizeof resp, pa->seq, &ack));
             break;

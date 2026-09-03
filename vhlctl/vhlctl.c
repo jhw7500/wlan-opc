@@ -445,6 +445,26 @@ static int parse_scan_chlist(const char *list_s, const char *hex_s, uint16_t ban
 
 static int cmd_set_radio(int argc, char **argv)
 {
+    /* Rev1.01 removed --wN-freq/--wN-ch. Refuse them (and any other unknown
+     * flag) instead of silently falling back to the defaults — a scripted
+     * caller would otherwise band-lock the device to the 5 GHz default. */
+    static const char *const known[] = {
+        "--station", "--priority",
+        "--w1-band", "--w1-chlist", "--w1-chlist-hex", "--w1-mode", "--w1-bw",
+        "--w2-band", "--w2-chlist", "--w2-chlist-hex", "--w2-mode", "--w2-bw",
+    };
+    for (int i = 0; i < argc; i++) {
+        if (strncmp(argv[i], "--", 2) != 0) continue;
+        bool ok = false;
+        for (size_t k = 0; k < sizeof known / sizeof known[0]; k++)
+            if (strcmp(argv[i], known[k]) == 0) { ok = true; break; }
+        if (!ok) {
+            fprintf(stderr, "set-radio: unknown option %s (Rev1.01: use --wN-band/--wN-chlist; "
+                            "--wN-freq/--wN-ch were removed)\n", argv[i]);
+            return 2;
+        }
+        i++;   /* skip the flag's value */
+    }
     const char *station_s  = opt_value(argc, argv, "--station",  "single");
     const char *w1_band_s  = opt_value(argc, argv, "--w1-band",  "5");
     const char *w1_list_s  = opt_value(argc, argv, "--w1-chlist", "");

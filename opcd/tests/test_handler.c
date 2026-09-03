@@ -1942,6 +1942,57 @@ int main(void)
                disk.wlan1.scan_band == OPC_SCAN_BAND_5GHZ, "retry wrote radio.conf");
     }
 
+    /* 26e(#102, round 4). A deferred radio write commits only if it is still the
+     *     CURRENT generation when it completes. Simulate a newer request having
+     *     replaced st->radio (generation bump) before the older write drains:
+     *     that completion must NOT commit; a current-generation write must. */
+    {
+        uint16_t cport = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cport);
+        opc_store_async_t *sa = opc_store_async_create();
+        ASSERT(srv >= 0 && cli >= 0 && sa != NULL, "26e: rig up");
+        const uint32_t LOOP = 0x7F000001;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd      = srv;
+        st.store_async = sa;
+        (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+
+        opc_set_radio_config_req_t rq;
+        memset(&rq, 0, sizeof rq);
+        rq.station_type    = OPC_STATION_SINGLE;
+        rq.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        rq.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        legacy_to_scan(5180, 36, &rq.wlan1);
+        rq.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        uint8_t fr[OPC_FRAME_MAX], rs[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
+        ssize_t rl = -1;
+        ssize_t fl = opc_set_radio_config_req_pack(fr, sizeof fr, 61, &rq);
+        ASSERT(opcd_dispatch(&st, fr, (size_t)fl, LOOP, cport, rs, sizeof rs, &rl) == 0 && rl == 0,
+               "26e: write A deferred");
+        st.radio_gen++;                       /* a newer request replaced st->radio meanwhile */
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "26e: A completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: A ack arrived");
+        ASSERT(!st.radio_committed, "26e: older-generation completion does not commit");
+
+        /* Control arm: a write of the current generation commits. */
+        legacy_to_scan(5200, 40, &rq.wlan1);
+        fl = opc_set_radio_config_req_pack(fr, sizeof fr, 62, &rq);
+        rl = -1;
+        ASSERT(opcd_dispatch(&st, fr, (size_t)fl, LOOP, cport, rs, sizeof rs, &rl) == 0 && rl == 0,
+               "26e: write B deferred");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "26e: B completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: B ack arrived");
+        ASSERT(st.radio_committed, "26e: current-generation completion commits");
+
+        st.store_async = NULL;
+        opc_store_async_destroy(sa);
+        close(srv);
+        close(cli);
+    }
+
     /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).
      *     Stub other-iface(mlan0) 라이브 서브넷 = 192.0.2.0/24 (get_dev_ipv4).
      *     겹치는 슬롯의 change-ip는 스테이징 전 NG, 비겹침·상대-무IP는 통과. */
