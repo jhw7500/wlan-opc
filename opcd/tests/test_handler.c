@@ -1516,6 +1516,55 @@ int main(void)
                "A19 payload: distinct request answered with its OWN SN (94), not dropped as a retry");
         ASSERT(wait_fd_readable(cli, 300) != 0, "A19 payload: exactly one ack");
 
+        /* 21d. A retry must be matched against THIS port's pending request, not
+         *      the global st->radio. Session ownership is IP-scoped but pending
+         *      slots are (ip,port)-scoped: a DISTINCT request Y from a second
+         *      source port overwrites st->radio while port P1's original X is
+         *      still in flight. Comparing X's retransmission against st->radio(=Y)
+         *      would misjudge it as a new request and answer P1 with the
+         *      retransmission SN — X's ORIGINAL SN must win (Codex, PR #113 r2). */
+        {
+            uint16_t cli2_port = 0;
+            int cli2 = bind_loopback_udp(&cli2_port);
+            ASSERT(cli2 >= 0, "A19 multiport: second client socket");
+            stub_apply_radio_reset_calls();
+            opc_set_radio_config_req_t rqX = a19r;           /* SINGLE */
+            legacy_to_scan(5180, 36, &rqX.wlan1);            /* differ from committed → deferred */
+            rqX.priority_ch = 0x0000;
+            fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 95, &rqX);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "A19 multiport: X(SN=95) from P1 deferred");
+            opc_set_radio_config_req_t rqY = a19r;
+            legacy_to_scan(5745, 149, &rqY.wlan1);           /* distinct payload */
+            rqY.priority_ch = 0x0000;
+            fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 96, &rqY);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "A19 multiport: distinct Y(SN=96) from P2 deferred");
+            /* X retransmission from P1 (new SN, identical payload to X) */
+            fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 97, &rqX);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "A19 multiport: X retransmission(SN=97) from P1 no inline resp");
+            for (int d = 0; d < 4; d++) {
+                if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+                opcd_store_async_on_ready(&st);
+            }
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 multiport: P1 ack arrived");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 95,
+                   "A19 multiport: P1 answered with X's ORIGINAL SN (95), not the retransmission SN");
+            ASSERT(wait_fd_readable(cli, 300) != 0, "A19 multiport: P1 exactly one ack");
+            ASSERT(wait_fd_readable(cli2, 5000) == 0, "A19 multiport: P2 ack arrived");
+            rn = recv(cli2, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 96,
+                   "A19 multiport: P2 answered with Y's SN (96)");
+            close(cli2);
+        }
+
         /* 22. D12/D13: a bad-length datagram is NG'd (0x0003) only toward
          *     the logged-in session's IP; any other source stays silent. */
         uint8_t badf[30];

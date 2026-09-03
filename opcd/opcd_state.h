@@ -75,6 +75,10 @@ typedef struct opcd_pending_ack {
     uint32_t radio_gen;     /* SET_RADIO only: st->radio generation this write
                              * persists — completion commits only if it still
                              * equals st->radio_gen (#102) */
+    opc_set_radio_config_req_t radio_req;  /* SET_RADIO only: the request this
+                             * slot is persisting — an A19 retransmission is
+                             * matched against THIS, not the global st->radio,
+                             * which another port may have overwritten (#104) */
     uint32_t client_ip;     /* host byte order */
     uint16_t client_port;   /* host byte order */
     struct timespec rx_ts;  /* request receipt (CLOCK_MONOTONIC) — T7
