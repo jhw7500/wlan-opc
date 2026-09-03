@@ -10,7 +10,7 @@
  *   basic-info
  *   device-info
  *   set-password --old PW --new PW
- *   set-ip-list  --slot N --flag start|cont|end
+ *   set-ip-list  --slot N --flag start|cont|end|start_end
  *                --ip A.B.C.D --mask A.B.C.D --gw A.B.C.D --ntp A.B.C.D --essid NAME
  *   change-ip    --slot N
  *   set-radio    --station single|dual
@@ -354,8 +354,9 @@ static int cmd_set_ip_list(int argc, char **argv)
     if      (!strcmp(flag_s, "start"))     flag = OPC_LIST_BOUNDARY_START;
     else if (!strcmp(flag_s, "cont"))      flag = OPC_LIST_BOUNDARY_CONTINUE;
     else if (!strcmp(flag_s, "end"))       flag = OPC_LIST_BOUNDARY_END;
+    else if (!strcmp(flag_s, "start_end")) flag = OPC_LIST_BOUNDARY_START_END;
     else {
-        fprintf(stderr, "set-ip-list: --flag must be start|cont|end (got \"%s\")\n", flag_s);
+        fprintf(stderr, "set-ip-list: --flag must be start|cont|end|start_end (got \"%s\")\n", flag_s);
         return 2;
     }
     opc_set_ip_config_list_req_t req; memset(&req, 0, sizeof req);

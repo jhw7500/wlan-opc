@@ -64,7 +64,7 @@
 | #104 | 재송(Retry) 응답 SN: 재송 폐기·원 요구 SN 응답 | **완료** — SET_RADIO 재송(동일 payload + ack 대기 중)을 apply 전에 폐기, 원 요구 SN pending ack 유지(그림 4-2). 재적용·2차 write 없음. 엇갈림(cross) 재송은 응답 후 도착 → 자기 SN으로 즉시 응답. 재송 판정은 전체 payload를 해당 (ip,port) pending 슬롯이 보관한 요청과 비교(전역 st->radio 아님). 테스트 21/21b/21c/21d. password/ip 재송의 원-SN 응답 확장은 Q6 회신 후 후속 |
 | #105 | Indication Period 내 마지막 상태만 통지(coalesce) | 미착수 |
 | #106 | Dual 링크별 통지 — 링크 식별 방식 발주처 문의 선행 | 차단 |
-| #107 | SetIPConfigList Boundary 0x0003(시작 및 완료) 단일 프레임 커밋 | 미착수 |
+| #107 | SetIPConfigList Boundary 0x0003(시작 및 완료) 단일 프레임 커밋 | **완료** — 0x0003 = START(확정 리스트 시드·병합) + END(커밋·iplist.cfg 저장) 단일 프레임. 0x0003 뒤 CONTINUE/END는 START 없는 시퀀스 → 0x0018. 테스트 14d/14e, vhlctl `--flag start_end` |
 
 ## 우선순위 요약
 - **임팩트 순(자율)**: ① SetRadio 실반영(L) > ② ChangeIp essid/ntp(M/S) > ③ Version/EEPROM(M) > ④ AP구분/EHT/스텔스(M/S)

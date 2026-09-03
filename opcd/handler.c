@@ -878,12 +878,15 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                 break;
             }
             uint16_t flag = e->boundary_flag;
-            if (flag == OPC_LIST_BOUNDARY_START) {
+            if (flag == OPC_LIST_BOUNDARY_START ||
+                flag == OPC_LIST_BOUNDARY_START_END) {
                 /* Fresh sequence: seed staging from the committed list so the
                  * END commit only updates the slots named in this cycle (spec
                  * §3.3.6: "指定された番号のリストを更新する" — merge, not
                  * wholesale replace). This also drops any stale staging from
-                 * a prior incomplete cycle. */
+                 * a prior incomplete cycle. 0x0003 (시작 및 완료) opens and
+                 * closes in this one entry — it seeds here and commits below
+                 * (#107, Rev1.01 §4.3.6 그림 4-6 single-frame commit). */
                 st->ip_list_staging = st->ip_list;
                 st->ip_list_staging_active = true;
             } else if (!st->ip_list_staging_active) {
@@ -898,9 +901,13 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             st->ip_list_staging.slots[slot] = *e;
             st->ip_list_staging.present[slot] = 1;
 
-            if (flag == OPC_LIST_BOUNDARY_END) {
+            if (flag == OPC_LIST_BOUNDARY_END ||
+                flag == OPC_LIST_BOUNDARY_START_END) {
                 /* staging is guaranteed active here — a lone CONTINUE/END
-                 * already NG'd out above (A17). Commit atomically (in memory). */
+                 * already NG'd out above (A17), and 0x0003 seeded it just
+                 * above. Commit atomically (in memory); the shared persist
+                 * below writes it to NVRAM. A CONTINUE/END that FOLLOWS this
+                 * 0x0003 finds staging closed → START-less → 0x0018. */
                 st->ip_list = st->ip_list_staging;
                 committed = true;
                 st->ip_list_staging_active = false;

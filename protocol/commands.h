@@ -306,12 +306,16 @@ int     opc_set_password_ack_unpack(const uint8_t *frame, size_t frame_len,
  * START=0x0000 / CONTINUE=0x0001. An earlier *verbal* vendor note had us
  * adopt page-24; DFK's written answer reverted it to page-22.
  *
- * START_END (page-22 body 0x0003) is absent from DFK's answer and stays
- * dropped — atomic single-frame commit is unsupported; callers must send a
- * START frame followed by an END frame. */
+ * START_END (page-22 body 0x0003) = 시작 및 완료: a self-contained
+ * single-frame commit. Rev1.01 §4.3.6 (본문·필드 설명·그림 4-6) formalized it
+ * and the 그림 4-6 note requires "0x0003 수신 시 컨피그 기록 + 비휘발 기록", so
+ * the handler seeds staging (like START) then commits + persists (like END) in
+ * the one entry (#107). A CONTINUE/END that FOLLOWS a 0x0003 has no open cycle
+ * and is a START-less sequence (0x0018), same as a lone CONTINUE/END. */
 #define OPC_LIST_BOUNDARY_START      0x0001
 #define OPC_LIST_BOUNDARY_CONTINUE   0x0000
 #define OPC_LIST_BOUNDARY_END        0x0002
+#define OPC_LIST_BOUNDARY_START_END  0x0003
 
 typedef struct opc_ipcfg_entry {
     uint16_t boundary_flag;

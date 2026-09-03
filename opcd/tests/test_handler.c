@@ -895,6 +895,37 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK && st.ip_list.present[2] == 1,
            "A17: normal START..END cycle unaffected");
 
+    /* 14d. #107 Rev1.01 §4.3.6: List Boundary 0x0003 (시작 및 완료) commits in a
+     *      SINGLE frame — seed from the committed list (merge), apply the entry,
+     *      commit + persist to NVRAM, all in one entry. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*.1.101*/);
+    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    ASSERT(r == OPC_RESULT_OK, "0x0003: baseline slot 1 committed via normal cycle");
+    r = do_set_ip_list(&st, CIP, 5, OPC_LIST_BOUNDARY_START_END, 0xC0A80205 /*.2.5*/);
+    ASSERT(r == OPC_RESULT_OK, "0x0003: single-frame commit OK");
+    ASSERT(!st.ip_list_staging_active, "0x0003: staging closed after single-frame commit");
+    ASSERT(st.ip_list.present[4] == 1 && st.ip_list.slots[4].ip_address == 0xC0A80205,
+           "0x0003: slot 5 committed in one frame");
+    ASSERT(st.ip_list.present[0] == 1 && st.ip_list.slots[0].ip_address == 0xC0A80165,
+           "0x0003: prior slot 1 survives (seed/merge from committed list)");
+    {
+        static opcd_ip_list_t disk_list;
+        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) == (ssize_t)sizeof disk_list &&
+               disk_list.present[4] == 1 && disk_list.slots[4].ip_address == 0xC0A80205 &&
+               disk_list.present[0] == 1,
+               "0x0003: single-frame commit persisted to NVRAM (비휘발 기록)");
+    }
+
+    /* 14e. #107: 0x0003 is self-contained. A CONTINUE/END that FOLLOWS it has no
+     *      open cycle → START-less sequence → NG 0x0018, exactly like a lone one,
+     *      and commits nothing. */
+    r = do_set_ip_list(&st, CIP, 6, OPC_LIST_BOUNDARY_CONTINUE, 0xC0A80206);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LIST_SEQUENCE,
+           "0x0003: a CONTINUE after a completed single-frame commit → NG 0x0018");
+    ASSERT(st.ip_list.present[5] == 0, "0x0003: the stray CONTINUE committed nothing");
+
     /* 14c-2. An open cycle dies with its session: START → logout → login →
      *        END must NG (stale staging cleared on logout, A17 review fix). */
     init_state(&st, OPC_PASSWORD_DEFAULT);
