@@ -926,6 +926,38 @@ int main(void)
            "0x0003: a CONTINUE after a completed single-frame commit → NG 0x0018");
     ASSERT(st.ip_list.present[5] == 0, "0x0003: the stray CONTINUE committed nothing");
 
+    /* 14f. #107 (Claude review): 0x0003 is self-contained even INSIDE a
+     *      multi-entry frame. One request = [START_END(slot 7), CONTINUE(slot 8)]:
+     *      slot 7 commits, then the CONTINUE finds staging closed → NG 0x0018 and
+     *      slot 8 is not committed (same seed/commit/close as the single-entry
+     *      path, verified within one frame). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    {
+        opc_set_ip_config_list_req_t mreq;
+        memset(&mreq, 0, sizeof mreq);
+        mreq.entry_count = 2;
+        mreq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+        mreq.entries[0].list_number   = 7;
+        mreq.entries[0].ip_address    = 0xC0A80207 /*.2.7*/;
+        mreq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        mreq.entries[1].boundary_flag = OPC_LIST_BOUNDARY_CONTINUE;
+        mreq.entries[1].list_number   = 8;
+        mreq.entries[1].ip_address    = 0xC0A80208 /*.2.8*/;
+        mreq.entries[1].subnet_mask   = 0xFFFFFF00u;
+        uint8_t f[OPC_FRAME_MAX]; ssize_t fn = opc_set_ip_config_list_req_pack(f, sizeof f, 9, &mreq);
+        uint8_t rp[OPC_FRAME_MAX]; ssize_t rl = 0;
+        (void)opcd_dispatch(&st, f, (size_t)fn, CIP, 5000, rp, sizeof rp, &rl);
+        opc_set_ip_config_list_ack_t mack; memset(&mack, 0, sizeof mack);
+        (void)opc_set_ip_config_list_ack_unpack(rp, (size_t)rl, &mack);
+        ASSERT(mack.result == OPC_RESULT_NG && mack.error_cause == OPC_ERR_LIST_SEQUENCE,
+               "0x0003 multi-entry: a trailing CONTINUE → NG 0x0018");
+        ASSERT(st.ip_list.present[6] == 1 && st.ip_list.slots[6].ip_address == 0xC0A80207,
+               "0x0003 multi-entry: the START_END entry committed before the bad CONTINUE");
+        ASSERT(st.ip_list.present[7] == 0,
+               "0x0003 multi-entry: the stray CONTINUE committed nothing");
+    }
+
     /* 14c-2. An open cycle dies with its session: START → logout → login →
      *        END must NG (stale staging cleared on logout, A17 review fix). */
     init_state(&st, OPC_PASSWORD_DEFAULT);
