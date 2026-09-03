@@ -171,7 +171,9 @@ int opcd_ind_keep_alive(opcd_state_t *st, const char *timestamp)
     return send_indication_frame(st, frame, n);
 }
 
-void opcd_ind_tick(opcd_state_t *st)
+void opcd_ind_tick(opcd_state_t *st) { opcd_ind_tick_elapsed(st, 1); }
+
+void opcd_ind_tick_elapsed(opcd_state_t *st, uint32_t elapsed_s)
 {
     if (!st->indication_enabled)             return;
     if (st->indication_period_s == 0)        return;   /* spec: 0 disables the stream */
@@ -183,7 +185,12 @@ void opcd_ind_tick(opcd_state_t *st)
            OPC_IND_BIT_WLAN_STATUS_CHANGE | OPC_IND_BIT_ROAMING |
            OPC_IND_BIT_AP_DISCONNECT))) return;
 
-    st->indication_tick_counter++;
+    /* Advance by the elapsed seconds (timerfd expiration count from the main
+     * loop). Clamp to one period so a long stall crosses the boundary exactly
+     * once — flush once, not a burst of KeepAlives/FaultDetects. */
+    if (elapsed_s > (uint32_t)st->indication_period_s)
+        elapsed_s = (uint32_t)st->indication_period_s;
+    st->indication_tick_counter += (int32_t)elapsed_s;
     if (st->indication_tick_counter < (int32_t)st->indication_period_s) return;
     st->indication_tick_counter = 0;
 
@@ -191,18 +198,19 @@ void opcd_ind_tick(opcd_state_t *st)
      * (per link idx). State changes lead, then FaultDetect, then KeepAlive. */
     for (size_t i = 0; i < sizeof st->indication_coalesce / sizeof st->indication_coalesce[0]; i++) {
         struct opcd_ind_coalesce *c = &st->indication_coalesce[i];
-        if (c->wlan_pending) {
-            (void)emit_wlan_status(st, c->wlan_status, c->wlan_ch);
+        /* Clear pending only on a successful emit: a transient send failure
+         * (e.g. ENETUNREACH) keeps the LAST state staged so the next period
+         * retries it, instead of dropping the state change entirely (OpenCode,
+         * PR #116). A newer change before the retry overwrites it — latest
+         * still wins. */
+        if (c->wlan_pending && emit_wlan_status(st, c->wlan_status, c->wlan_ch) == 0)
             c->wlan_pending = false;
-        }
-        if (c->roam_pending) {
-            (void)emit_roaming(st, c->roam_snr, c->roam_rssi, c->roam_mac, c->roam_ch);
+        if (c->roam_pending &&
+            emit_roaming(st, c->roam_snr, c->roam_rssi, c->roam_mac, c->roam_ch) == 0)
             c->roam_pending = false;
-        }
-        if (c->apd_pending) {
-            (void)emit_ap_disconnect(st, c->apd_msg_id, c->apd_reason, c->apd_mac);
+        if (c->apd_pending &&
+            emit_ap_disconnect(st, c->apd_msg_id, c->apd_reason, c->apd_mac) == 0)
             c->apd_pending = false;
-        }
     }
 
     /* T6 interim congestion probe (decision 2026-06-12, inquiry #35): one

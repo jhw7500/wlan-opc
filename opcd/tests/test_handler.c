@@ -1827,6 +1827,70 @@ int main(void)
                    "coalesce p0: immediate frame carries the change");
         }
 
+        /* 23d. A config change drops staged-but-unflushed state (#105, OpenCode
+         *      PR #116): stage a change, reconfigure set-indication, and the
+         *      period boundary must flush nothing (opcd_ind_coalesce_reset). */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 3);
+            ASSERT(r == OPC_RESULT_OK, "reset-on-reconfig: enabled (period 3)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);   /* staged */
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 3);
+            ASSERT(r == OPC_RESULT_OK, "reset-on-reconfig: reconfigured");
+            opcd_ind_tick(&st); opcd_ind_tick(&st); opcd_ind_tick(&st);   /* boundary */
+            ASSERT(wait_fd_readable(cli, 300) != 0,
+                   "reset-on-reconfig: the staged change was dropped, nothing flushed");
+        }
+
+        /* 23e. A multi-second stall advances the period by the elapsed seconds,
+         *      not 1 (#105 Codex PR #116): one opcd_ind_tick_elapsed(period)
+         *      crosses the boundary and flushes the staged state at once. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
+            ASSERT(r == OPC_RESULT_OK, "catch-up: enabled (period 5)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            opcd_ind_tick_elapsed(&st, 5);   /* 5 s elapsed in one wake → cross the boundary now */
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "catch-up: a 5 s stall flushes at the crossed boundary in one tick");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsie;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsie) == 0 &&
+                   wsie.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsie.indication_ch == 0x0230,
+                   "catch-up: flushed frame carries the staged state");
+        }
+
+        /* 23f. A transient emit failure keeps the state staged for the next
+         *      period instead of dropping it (#105 OpenCode PR #116). A closed
+         *      fd forces sendto to fail (EBADF) at the first boundary; after the
+         *      socket is restored the next boundary retries and delivers. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 2);
+            ASSERT(r == OPC_RESULT_OK, "keep-pending: enabled (period 2)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            int badfd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (badfd >= 0) close(badfd);   /* a closed fd → sendto returns -1 (EBADF) */
+            int saved_fd = st.udp_fd;
+            st.udp_fd = badfd;
+            opcd_ind_tick(&st); opcd_ind_tick(&st);   /* boundary → emit fails */
+            ASSERT(wait_fd_readable(cli, 200) != 0, "keep-pending: nothing delivered while send fails");
+            st.udp_fd = saved_fd;
+            opcd_ind_tick(&st); opcd_ind_tick(&st);   /* next boundary → retry the still-staged state */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "keep-pending: staged state retried the next period");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsif;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsif) == 0 &&
+                   wsif.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsif.indication_ch == 0x0230,
+                   "keep-pending: the retried frame carries the staged state");
+        }
+
         st.store_async = NULL;
         opc_store_async_destroy(sa);
         close(srv);

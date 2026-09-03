@@ -24,6 +24,13 @@ int opcd_ind_keep_alive    (opcd_state_t *st, const char *timestamp);
  * configured period has elapsed. */
 void opcd_ind_tick(opcd_state_t *st);
 
+/* Like opcd_ind_tick but advances the reporting-period counter by `elapsed_s`
+ * seconds in one call — the main loop passes the timerfd expiration count so a
+ * multi-second stall does not delay a staged state change by nearly another
+ * full period (Codex, PR #116). elapsed_s is clamped to one period internally,
+ * so a long stall flushes once (not a burst). opcd_ind_tick == elapsed_s 1. */
+void opcd_ind_tick_elapsed(opcd_state_t *st, uint32_t elapsed_s);
+
 /* Drop all staged (not-yet-flushed) period-coalesced state changes (#105).
  * Called when the indication config changes or the session ends so a stale
  * staged event cannot leak into a new recipient/period. */
