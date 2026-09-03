@@ -1891,6 +1891,45 @@ int main(void)
                    "keep-pending: the retried frame carries the staged state");
         }
 
+        /* 23g. Elapsed clamp / no counter overflow (#105 OpenCode PR #116): a
+         *      pathologically large elapsed (e.g. a long suspend → huge timerfd
+         *      count) must still flush the staged state exactly once, not wrap
+         *      the int32 counter negative and lose it. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
+            ASSERT(r == OPC_RESULT_OK, "clamp: enabled (period 5)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            opcd_ind_tick_elapsed(&st, 0xFFFFFFFFu);   /* absurd elapsed → clamp to one period */
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "clamp: a huge elapsed still flushes once (no negative-counter loss)");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsig;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsig) == 0 &&
+                   wsig.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsig.indication_ch == 0x0230,
+                   "clamp: flushed frame carries the staged state");
+            ASSERT(wait_fd_readable(cli, 200) != 0, "clamp: exactly one flush for the huge elapsed");
+        }
+
+        /* 23h. opcd_session_logout also drops staged state — the second
+         *      coalesce_reset call site (#105 OpenCode PR #116). White-box: a
+         *      staged change must be gone after logout (can't flush post-logout
+         *      since indication is disabled, so assert the slot directly). */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
+            ASSERT(r == OPC_RESULT_OK, "logout-reset: enabled (period 5)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            ASSERT(st.indication_coalesce[0].wlan_pending, "logout-reset: change staged before logout");
+            opcd_session_logout(&st);
+            ASSERT(!st.indication_coalesce[0].wlan_pending,
+                   "logout-reset: logout dropped the staged change");
+        }
+
         st.store_async = NULL;
         opc_store_async_destroy(sa);
         close(srv);
