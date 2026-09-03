@@ -55,6 +55,10 @@
 #define OPC_BANDWIDTH_160               3
 #define OPC_BANDWIDTH_80_80             4
 #define OPC_BANDWIDTH_320               12
+/* Rev1.01 §4.2.2 / 표 4-2, 4-3: "미설정값" for the 1-byte radio-standard and
+ * bandwidth fields (GetDeviceInfo never-configured WLAN, Single-station WLAN#2). */
+#define OPC_WLAN_MODE_UNSET             0xFF
+#define OPC_BANDWIDTH_UNSET             0xFF
 
 /* ---- Station type ---- */
 #define OPC_STATION_SINGLE              0x0001
