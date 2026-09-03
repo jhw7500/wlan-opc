@@ -14,8 +14,9 @@
  *                --ip A.B.C.D --mask A.B.C.D --gw A.B.C.D --ntp A.B.C.D --essid NAME
  *   change-ip    --slot N
  *   set-radio    --station single|dual
- *                --w1-freq F --w1-ch CH --w1-mode N --w1-bw N
- *               [--w2-freq F --w2-ch CH --w2-mode N --w2-bw N --priority HEX]
+ *                --w1-band 2.4|5|none --w1-chlist 1,6,11 --w1-mode N --w1-bw N
+ *               [--w2-band 2.4|5|none --w2-chlist 1,6,11 --w2-mode N --w2-bw N --priority HEX|auto]
+ *               [--wN-chlist-hex 16HEX]   (raw wire bytes, negative tests)
  *   set-indication --bits HEX --period S --to A.B.C.D:PORT
  *   reset
  *   listen --bind HOST:PORT
@@ -400,27 +401,100 @@ static int cmd_change_ip(int argc, char **argv)
     return ack.result == OPC_RESULT_OK ? 0 : 1;
 }
 
+/* --wN-band: 2.4 | 5 | 6 | none, or a raw id (0x0003) for negative tests. */
+static uint16_t parse_scan_band(const char *s)
+{
+    if (!strcmp(s, "2.4") || !strcmp(s, "2.4g") || !strcmp(s, "2g")) return OPC_SCAN_BAND_2_4GHZ;
+    if (!strcmp(s, "5")   || !strcmp(s, "5g"))                        return OPC_SCAN_BAND_5GHZ;
+    if (!strcmp(s, "6")   || !strcmp(s, "6g"))                        return OPC_SCAN_BAND_6GHZ;
+    if (!strcmp(s, "none") || !strcmp(s, "unset"))                    return OPC_SCAN_BAND_UNSET;
+    return (uint16_t)strtoul(s, NULL, 0);
+}
+
+/* --wN-chlist "1,6,11" (channel numbers of the band; empty = whole band) or
+ * --wN-chlist-hex "0000042100000000" (raw wire bytes, for negative tests). */
+static int parse_scan_chlist(const char *list_s, const char *hex_s, uint16_t band,
+                             uint8_t list[OPC_SCAN_CHLIST_LEN])
+{
+    memset(list, 0, OPC_SCAN_CHLIST_LEN);
+    if (hex_s && hex_s[0] != '\0') {
+        if (strlen(hex_s) != 2 * OPC_SCAN_CHLIST_LEN) {
+            fprintf(stderr, "set-radio: --chlist-hex needs %d hex digits\n", 2 * OPC_SCAN_CHLIST_LEN);
+            return -1;
+        }
+        for (size_t i = 0; i < OPC_SCAN_CHLIST_LEN; i++) {
+            unsigned v;
+            if (sscanf(&hex_s[2 * i], "%2x", &v) != 1) { fprintf(stderr, "set-radio: bad hex\n"); return -1; }
+            list[i] = (uint8_t)v;
+        }
+        return 0;
+    }
+    if (!list_s || list_s[0] == '\0') return 0;
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s", list_s);
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        unsigned long ch = strtoul(tok, NULL, 0);
+        if (ch == 0 || ch > 255 || !opc_scan_bit_for_channel(band, (uint8_t)ch, NULL, NULL)) {
+            fprintf(stderr, "set-radio: channel %s is not in the band 0x%04x table (use --chlist-hex to force)\n",
+                    tok, band);
+            return -1;
+        }
+        opc_scan_list_set_channel(list, band, (uint8_t)ch);
+    }
+    return 0;
+}
+
 static int cmd_set_radio(int argc, char **argv)
 {
+    /* Rev1.01 removed --wN-freq/--wN-ch. Refuse them (and any other unknown
+     * flag) instead of silently falling back to the defaults — a scripted
+     * caller would otherwise band-lock the device to the 5 GHz default. */
+    static const char *const known[] = {
+        "--station", "--priority",
+        "--w1-band", "--w1-chlist", "--w1-chlist-hex", "--w1-mode", "--w1-bw",
+        "--w2-band", "--w2-chlist", "--w2-chlist-hex", "--w2-mode", "--w2-bw",
+    };
+    for (int i = 0; i < argc; i++) {
+        if (strncmp(argv[i], "--", 2) != 0) continue;
+        bool ok = false;
+        for (size_t k = 0; k < sizeof known / sizeof known[0]; k++)
+            if (strcmp(argv[i], known[k]) == 0) { ok = true; break; }
+        if (!ok) {
+            fprintf(stderr, "set-radio: unknown option %s (Rev1.01: use --wN-band/--wN-chlist; "
+                            "--wN-freq/--wN-ch were removed)\n", argv[i]);
+            return 2;
+        }
+        i++;   /* skip the flag's value */
+    }
     const char *station_s  = opt_value(argc, argv, "--station",  "single");
-    const char *w1_freq_s  = opt_value(argc, argv, "--w1-freq",  "5180");
-    const char *w1_ch_s    = opt_value(argc, argv, "--w1-ch",    "0x0224");
+    const char *w1_band_s  = opt_value(argc, argv, "--w1-band",  "5");
+    const char *w1_list_s  = opt_value(argc, argv, "--w1-chlist", "");
+    const char *w1_hex_s   = opt_value(argc, argv, "--w1-chlist-hex", "");
     const char *w1_mode_s  = opt_value(argc, argv, "--w1-mode",  "11");
     const char *w1_bw_s    = opt_value(argc, argv, "--w1-bw",    "2");
-    const char *w2_freq_s  = opt_value(argc, argv, "--w2-freq",  "0");
-    const char *w2_ch_s    = opt_value(argc, argv, "--w2-ch",    "0");
-    const char *w2_mode_s  = opt_value(argc, argv, "--w2-mode",  "0");
-    const char *w2_bw_s    = opt_value(argc, argv, "--w2-bw",    "0");
-    const char *prio_s     = opt_value(argc, argv, "--priority", "0");
+    const char *w2_band_s  = opt_value(argc, argv, "--w2-band",  "none");
+    const char *w2_list_s  = opt_value(argc, argv, "--w2-chlist", "");
+    const char *w2_hex_s   = opt_value(argc, argv, "--w2-chlist-hex", "");
+    const char *w2_mode_s  = opt_value(argc, argv, "--w2-mode",  "0xff");
+    const char *w2_bw_s    = opt_value(argc, argv, "--w2-bw",    "0xff");
+    const char *prio_s     = opt_value(argc, argv, "--priority", "auto");
     opc_set_radio_config_req_t req; memset(&req, 0, sizeof req);
     req.station_type = !strcmp(station_s, "dual") ? OPC_STATION_DUAL : OPC_STATION_SINGLE;
-    req.priority_ch  = (uint16_t)strtoul(prio_s, NULL, 0);
-    req.wlan1.freq_mhz  = (uint16_t)strtoul(w1_freq_s, NULL, 0);
-    req.wlan1.channel   = (uint16_t)strtoul(w1_ch_s,   NULL, 0);
+    req.wlan1.scan_band = parse_scan_band(w1_band_s);
+    /* --priority auto (default): Single → 0xFFFF (unset, per spec); Dual →
+     * WLAN#1's band, band-only (CH 0xFF) — a Dual request must carry a valid
+     * priority band or the device answers 0x0012. Explicit HEX is taken as is. */
+    if (!strcmp(prio_s, "auto"))
+        req.priority_ch = (req.station_type == OPC_STATION_DUAL)
+                          ? (uint16_t)(((req.wlan1.scan_band & 0xFFu) << 8) | 0xFFu)
+                          : 0xFFFF;
+    else
+        req.priority_ch = (uint16_t)strtoul(prio_s, NULL, 0);
+    if (parse_scan_chlist(w1_list_s, w1_hex_s, req.wlan1.scan_band, req.wlan1.scan_chlist) != 0) return 2;
     req.wlan1.mode      = (uint8_t) strtoul(w1_mode_s, NULL, 0);
     req.wlan1.bandwidth = (uint8_t) strtoul(w1_bw_s,   NULL, 0);
-    req.wlan2.freq_mhz  = (uint16_t)strtoul(w2_freq_s, NULL, 0);
-    req.wlan2.channel   = (uint16_t)strtoul(w2_ch_s,   NULL, 0);
+    req.wlan2.scan_band = parse_scan_band(w2_band_s);
+    if (parse_scan_chlist(w2_list_s, w2_hex_s, req.wlan2.scan_band, req.wlan2.scan_chlist) != 0) return 2;
     req.wlan2.mode      = (uint8_t) strtoul(w2_mode_s, NULL, 0);
     req.wlan2.bandwidth = (uint8_t) strtoul(w2_bw_s,   NULL, 0);
     struct sockaddr_in dst; int fd = open_client_socket(&dst);
@@ -586,8 +660,8 @@ static void usage(void)
           "               --ip A.B.C.D --mask A.B.C.D --gw A.B.C.D --ntp A.B.C.D --essid NAME\n"
           "  change-ip    --slot N\n"
           "  set-radio    --station single|dual\n"
-          "               --w1-freq F --w1-ch CH --w1-mode N --w1-bw N\n"
-          "              [--w2-... --priority HEX]\n"
+          "               --w1-band 2.4|5|none --w1-chlist 1,6,11 --w1-mode N --w1-bw N\n"
+          "              [--w2-band/--w2-chlist/--w2-mode/--w2-bw --priority HEX] [--wN-chlist-hex 16HEX]\n"
           "  set-indication --bits HEX --period S --to A.B.C.D:PORT\n"
           "  reset\n"
           "  listen --bind HOST:PORT\n",

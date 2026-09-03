@@ -255,6 +255,42 @@ static uint16_t do_set_ip_entry(opcd_state_t *st, uint32_t cip,
 
 /* Pack a SetRadioConfig request (SINGLE, 11AX/20MHz, given WLAN#1 freq/ch),
  * dispatch, return ack result; error cause lands in g_last_radio_err. */
+/* Rev1.01 (#102): SetRadioConfig names a SCAN band + channel bitmap instead of
+ * a FREQ/CH pair. The legacy (freq, ch) helper signature is kept for the many
+ * "any valid config" callers: the band comes from the frequency (or, for
+ * freq 0, from the CH field's band byte) and the CH number becomes a bit. */
+static void legacy_to_scan(uint16_t freq, uint16_t ch, opc_wlan_radio_cfg_t *w)
+{
+    uint16_t band = OPC_SCAN_BAND_UNSET;
+    if (freq >= 2400 && freq <= 2484)      band = OPC_SCAN_BAND_2_4GHZ;
+    else if (freq >= 4900 && freq <= 5925) band = OPC_SCAN_BAND_5GHZ;
+    else if (freq >= 5926 && freq <= 7125) band = OPC_SCAN_BAND_6GHZ;
+    else if (freq != 0)                    band = 0x0003;             /* unknown band id */
+    else if ((ch >> 8) != 0)               band = (uint16_t)(ch >> 8);
+    w->scan_band = band;
+    memset(w->scan_chlist, 0, sizeof w->scan_chlist);
+    uint8_t chn = (uint8_t)(ch & 0xFF);
+    if (chn != 0) opc_scan_list_set_channel(w->scan_chlist, band, chn);
+}
+
+/* Dispatch a SetRadioConfig request as-is; returns the Result, error in g_last_radio_err. */
+static uint16_t do_set_radio_req(opcd_state_t *st, uint32_t cip, const opc_set_radio_config_req_t *req)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, req);
+    if (fn <= 0) return 0xFFFF;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFE;
+
+    opc_set_radio_config_ack_t ack;
+    if (opc_set_radio_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
+    g_last_radio_err = ack.error_cause;
+    return ack.result;
+}
+
 static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
                              uint16_t freq, uint16_t ch)
 {
@@ -263,8 +299,9 @@ static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
     req.station_type    = OPC_STATION_SINGLE;
     req.wlan1.mode      = OPC_WLAN_MODE_11AX;
     req.wlan1.bandwidth = OPC_BANDWIDTH_20;
-    req.wlan1.freq_mhz  = freq;
-    req.wlan1.channel   = ch;
+    legacy_to_scan(freq, ch, &req.wlan1);
+    req.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+    req.wlan2.mode = 0xFF; req.wlan2.bandwidth = 0xFF;   /* Single: invalid values */
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
@@ -291,14 +328,13 @@ static uint16_t do_set_radio_dual(opcd_state_t *st, uint32_t cip,
     opc_set_radio_config_req_t req;
     memset(&req, 0, sizeof req);
     req.station_type    = OPC_STATION_DUAL;
+    req.priority_ch     = 0x02FF;                 /* 5 GHz, band only */
     req.wlan1.mode      = OPC_WLAN_MODE_11AX;
     req.wlan1.bandwidth = OPC_BANDWIDTH_20;
-    req.wlan1.freq_mhz  = f1;
-    req.wlan1.channel   = ch1;
+    legacy_to_scan(f1, ch1, &req.wlan1);
     req.wlan2.mode      = OPC_WLAN_MODE_11AX;
     req.wlan2.bandwidth = OPC_BANDWIDTH_20;
-    req.wlan2.freq_mhz  = f2;
-    req.wlan2.channel   = ch2;
+    legacy_to_scan(f2, ch2, &req.wlan2);
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
@@ -911,51 +947,80 @@ int main(void)
     r = do_set_radio(&st, CIP, 0, 0);
     ASSERT(r == OPC_RESULT_OK, "D9: apply ok once fail toggle cleared");
 
-    /* 14g. D8/A21: SetRadio frequency / channel-band validation (§3.3.8). */
-    r = do_set_radio(&st, CIP, 6000, 0);          /* 6 GHz frequency */
+    /* 14g (Rev1.01 §4.3.8, #102): SCAN Frequency Band / Channel List validation. */
+    r = do_set_radio(&st, CIP, 6000, 0);          /* 6 GHz band */
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
-           "D8: unsupported frequency → 0x0011");
-    r = do_set_radio(&st, CIP, 2490, 0);          /* above ch14 (2484 MHz) */
+           "A21: 6 GHz band → 0x0011");
+    r = do_set_radio(&st, CIP, 3000, 0);          /* unknown band id */
     ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
-           "D8: 2.4G frequency above ch14 → 0x0011");
-    r = do_set_radio(&st, CIP, 3000, 0);          /* inter-band gap */
-    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
-           "D8: inter-band gap frequency → 0x0011");
+           "unknown band id → 0x0011");
     r = do_set_radio(&st, CIP, 0, (uint16_t)((OPC_BAND_6GHZ << 8) | 37));
-    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
-           "A21: 6 GHz band channel → 0x0012");
-    r = do_set_radio(&st, CIP, 0, (uint16_t)(OPC_BAND_2_4GHZ << 8));
-    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
-           "D8: band specified with CH 0 → 0x0012");
+    ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
+           "A21: 6 GHz band via CH band byte → 0x0011");
+    {
+        opc_set_radio_config_req_t bad;
+        memset(&bad, 0, sizeof bad);
+        bad.station_type    = OPC_STATION_SINGLE;
+        bad.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        bad.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        bad.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+        bad.wlan1.scan_chlist[0] = 0x02;              /* row A bit25: unassigned in 5 GHz */
+        bad.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        r = do_set_radio_req(&st, CIP, &bad);
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+               "5 GHz list bit25 (unassigned) → 0x0012");
+        bad.wlan1.scan_band = OPC_SCAN_BAND_UNSET;   /* unset band but channels listed */
+        bad.wlan1.scan_chlist[0] = 0;
+        bad.wlan1.scan_chlist[3] = 0x01;
+        r = do_set_radio_req(&st, CIP, &bad);
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+               "unset band with a channel list → 0x0012");
+        memset(bad.wlan1.scan_chlist, 0, sizeof bad.wlan1.scan_chlist);
+        r = do_set_radio_req(&st, CIP, &bad);
+        ASSERT(r == OPC_RESULT_OK, "unset band + empty list (no band lock) → OK");
+        memset(bad.wlan1.scan_chlist, 0, sizeof bad.wlan1.scan_chlist);
+        bad.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;  /* list carried in row B (bytes 4..7) */
+        bad.wlan1.scan_chlist[6] = 0x04;
+        bad.wlan1.scan_chlist[7] = 0x21;
+        r = do_set_radio_req(&st, CIP, &bad);
+        ASSERT(r == OPC_RESULT_OK, "2.4 GHz list in row B tolerated (lenient row order) → OK");
+    }
     r = do_set_radio(&st, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
-    ASSERT(r == OPC_RESULT_OK, "D8: valid 2.4G freq+CH accepted");
+    ASSERT(r == OPC_RESULT_OK, "valid 2.4 GHz band + ch1 accepted");
+    /* An identical re-send must not reconfigure wpa_supplicant (link drop):
+     * OK without an apply call. */
+    stub_apply_radio_reset_calls();
+    r = do_set_radio(&st, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
+    ASSERT(r == OPC_RESULT_OK && stub_apply_radio_calls() == 0,
+           "identical config re-sent → OK, apply skipped");
 
-    /* 14g-2. A21 DUAL: wlan2.channel / priority_ch band validation. */
+    /* 14g-2. A21 DUAL: wlan2 band / priority_ch validation (Rev1.01). */
     {
         opc_set_radio_config_req_t rreq;
         memset(&rreq, 0, sizeof rreq);
         rreq.station_type    = OPC_STATION_DUAL;
+        rreq.priority_ch     = 0x02FF;               /* 5 GHz, band only */
         rreq.wlan1.mode      = OPC_WLAN_MODE_11AX;
         rreq.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        rreq.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
         rreq.wlan2.mode      = OPC_WLAN_MODE_11AX;
         rreq.wlan2.bandwidth = OPC_BANDWIDTH_20;
-        rreq.wlan2.channel   = (uint16_t)((OPC_BAND_6GHZ << 8) | 37);
-        uint8_t rf[OPC_FRAME_MAX], rresp[OPC_FRAME_MAX];
-        ssize_t rfn = opc_set_radio_config_req_pack(rf, sizeof rf, 98, &rreq);
-        ssize_t rrl = 0;
-        (void)opcd_dispatch(&st, rf, (size_t)rfn, CIP, 5000, rresp, sizeof rresp, &rrl);
-        opc_set_radio_config_ack_t rack;
-        ASSERT(opc_set_radio_config_ack_unpack(rresp, (size_t)rrl, &rack) == 0 &&
-               rack.result == OPC_RESULT_NG && rack.error_cause == OPC_ERR_RADIO_CH,
-               "A21: DUAL wlan2 6 GHz channel → 0x0012");
-        rreq.wlan2.channel = 0;
-        rreq.priority_ch   = (uint16_t)((OPC_BAND_6GHZ << 8) | 1);
-        rfn = opc_set_radio_config_req_pack(rf, sizeof rf, 99, &rreq);
-        rrl = 0;
-        (void)opcd_dispatch(&st, rf, (size_t)rfn, CIP, 5000, rresp, sizeof rresp, &rrl);
-        ASSERT(opc_set_radio_config_ack_unpack(rresp, (size_t)rrl, &rack) == 0 &&
-               rack.result == OPC_RESULT_NG && rack.error_cause == OPC_ERR_RADIO_CH,
+        rreq.wlan2.scan_band = OPC_SCAN_BAND_6GHZ;
+        uint16_t rr = do_set_radio_req(&st, CIP, &rreq);
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
+               "A21: DUAL wlan2 6 GHz band → 0x0011");
+        rreq.wlan2.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        rreq.priority_ch     = (uint16_t)((OPC_BAND_6GHZ << 8) | 1);
+        rr = do_set_radio_req(&st, CIP, &rreq);
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
                "A21: DUAL priority_ch 6 GHz → 0x0012");
+        rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 38);   /* not in the 5 GHz table */
+        rr = do_set_radio_req(&st, CIP, &rreq);
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+               "DUAL priority_ch 5 GHz ch38 → 0x0012");
+        rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 36);
+        rr = do_set_radio_req(&st, CIP, &rreq);
+        ASSERT(rr == OPC_RESULT_OK, "DUAL 5 GHz/2.4 GHz bands, priority ch36 → OK");
     }
 
     /* 14h. SetIndication info-bit validation (§3.3.9 0x0010): 0x40 is the
@@ -1316,8 +1381,7 @@ int main(void)
         opc_set_radio_config_req_t rreq;
         memset(&rreq, 0, sizeof rreq);
         rreq.station_type     = OPC_STATION_SINGLE;
-        rreq.wlan1.freq_mhz   = 5180;
-        rreq.wlan1.channel    = 36;
+        legacy_to_scan(5180, 36, &rreq.wlan1);   /* 5 GHz, ch36 bit */
         rreq.wlan1.mode       = OPC_WLAN_MODE_11A;
         rreq.wlan1.bandwidth  = OPC_BANDWIDTH_20;
         fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 82, &rreq);
@@ -1337,6 +1401,7 @@ int main(void)
                "async set-radio: completion signalled");
         opcd_store_async_on_ready(&st);
         ASSERT(wait_fd_readable(cli, 5000) == 0, "async set-radio: ack arrived");
+        ASSERT(st.radio_committed, "async set-radio: committed once the write completed");
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         opc_set_radio_config_ack_t rack;
         ASSERT(rn > 0 &&
@@ -1350,7 +1415,8 @@ int main(void)
         static opc_set_radio_config_req_t disk_radio;
         ASSERT(opc_store_read_all(g_radio_path, &disk_radio, sizeof disk_radio) ==
                    (ssize_t)sizeof disk_radio &&
-               disk_radio.wlan1.channel == 36 &&
+               disk_radio.wlan1.scan_band == OPC_SCAN_BAND_5GHZ &&
+               disk_radio.wlan1.scan_chlist[3] == 0x01 &&
                disk_radio.wlan1.mode == OPC_WLAN_MODE_11A,
                "async set-radio: NVRAM file written");
 
@@ -1362,7 +1428,10 @@ int main(void)
         a19r.station_type    = OPC_STATION_SINGLE;
         a19r.wlan1.mode      = OPC_WLAN_MODE_11A;
         a19r.wlan1.bandwidth = OPC_BANDWIDTH_20;
-        a19r.wlan1.channel   = 36;
+        /* Must differ from test 20's committed config: an identical request with
+         * no ack in flight takes the "nothing to apply" shortcut (#102) and is
+         * answered at once, which is not the deferred path A19 exercises. */
+        legacy_to_scan(5200, 40, &a19r.wlan1);
         fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 90, &a19r);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
@@ -1591,8 +1660,8 @@ int main(void)
 
         /* Prime with a known good config. */
         (void)do_set_radio(&st24c, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
-        uint16_t saved_freq = st24c.radio.wlan1.freq_mhz;
-        uint16_t saved_ch   = st24c.radio.wlan1.channel;
+        opc_wlan_radio_cfg_t saved_w1 = st24c.radio.wlan1;
+        const uint16_t saved_freq = 2412;   /* derived from the primed 2.4 GHz ch1 list */
 
         /* Inject a single apply failure and submit a different config. Reset the
          * counter after priming so it measures only the failing Set-Radio. */
@@ -1600,9 +1669,9 @@ int main(void)
         stub_apply_radio_set_fail_once(1);
         (void)do_set_radio(&st24c, CIP, 5180, 36);
 
-        ASSERT(st24c.radio.wlan1.freq_mhz == saved_freq,
+        ASSERT(st24c.radio.wlan1.scan_band == saved_w1.scan_band,
                "issue#12-24c: apply failure preserves previous freq_mhz");
-        ASSERT(st24c.radio.wlan1.channel == saved_ch,
+        ASSERT(memcmp(st24c.radio.wlan1.scan_chlist, saved_w1.scan_chlist, OPC_SCAN_CHLIST_LEN) == 0,
                "issue#12-24c: apply failure preserves previous channel");
         /* Dispatch did exactly ONE apply (the failing one) — the revert is
          * deferred, so the NG response is never delayed by a second apply. */
@@ -1610,7 +1679,8 @@ int main(void)
                "issue#12-24c: dispatch does a single apply (revert deferred)");
         ASSERT(st24c.radio_revert_pending,
                "issue#12-24c: apply failure arms the deferred last-good revert");
-        ASSERT(st24c.radio_revert_cfg.wlan1.freq_mhz == saved_freq,
+        ASSERT(st24c.radio_revert_cfg.wlan1.scan_band == saved_w1.scan_band &&
+               memcmp(st24c.radio_revert_cfg.wlan1.scan_chlist, saved_w1.scan_chlist, OPC_SCAN_CHLIST_LEN) == 0,
                "issue#12-24c: armed revert carries the previous config (2412)");
 
         /* Main loop drains the revert AFTER the ack: re-applies the last-good
@@ -1634,7 +1704,7 @@ int main(void)
         uint16_t r24d = do_set_radio(&st24d, CIP, 5180, 36);
         ASSERT(r24d == OPC_RESULT_OK,
                "issue#12-24d: no injection → apply succeeds → Result OK");
-        ASSERT(st24d.radio.wlan1.freq_mhz == 5180,
+        ASSERT(st24d.radio.wlan1.scan_band == OPC_SCAN_BAND_5GHZ && st24d.radio.wlan1.scan_chlist[3] == 0x01,
                "issue#12-24d: success updates in-memory radio state");
     }
 
@@ -1649,7 +1719,7 @@ int main(void)
         /* Prime a DUAL good config (both interfaces). */
         uint16_t pr = do_set_radio_dual(&st24e, CIP, 2412, 1, 5180, 36);
         ASSERT(pr == OPC_RESULT_OK, "issue#12-24e: DUAL prime succeeds");
-        uint16_t saved_f1 = st24e.radio.wlan1.freq_mhz;
+        const uint16_t saved_f1 = 2412;   /* derived from the primed 2.4 GHz ch1 list */
 
         /* Inject a single apply failure; the deferred revert then succeeds. */
         stub_apply_radio_reset_calls();
@@ -1696,9 +1766,9 @@ int main(void)
                "issue#12-24f: deferred revert ran (succeeded) and cleared — response stays NG");
     }
 
-    /* 24g. should_revert guard (Gemini review): when the failing request equals
-     *      the committed config there is nothing to undo, so no revert is armed —
-     *      avoids a pointless re-apply and a misleading "revert failed" log. */
+    /* 24g. Identical config re-sent (#102 supersedes the Gemini-review guard):
+     *      nothing to apply, so the platform is not called at all — no link
+     *      drop, no revert to arm, and a still-armed apply failure cannot fire. */
     {
         opcd_state_t st24g;
         init_state(&st24g, OPC_PASSWORD_DEFAULT);
@@ -1706,16 +1776,14 @@ int main(void)
         (void)do_set_radio(&st24g, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
 
         stub_apply_radio_reset_calls();
-        stub_apply_radio_set_fail_once(1);
-        /* Resubmit the identical config; apply fails but nothing changed. */
+        /* Resubmit the identical config. */
         uint16_t r = do_set_radio(&st24g, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
 
-        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
-               "issue#12-24g: identical-config apply failure still → NG 0x0050");
+        ASSERT(r == OPC_RESULT_OK, "issue#12-24g: identical config → OK");
+        ASSERT(stub_apply_radio_calls() == 0,
+               "issue#12-24g: identical config → apply not called");
         ASSERT(!st24g.radio_revert_pending,
                "issue#12-24g: identical config → no revert armed (nothing to undo)");
-        ASSERT(stub_apply_radio_calls() == 1,
-               "issue#12-24g: identical config → no second apply scheduled");
     }
 
     /* 25. device-info FREQ/CH source toggle (device_info_freq_source).
@@ -1778,21 +1846,168 @@ int main(void)
         }
     }
 
-    /* 26(#101). Rev1.01 SCAN Frequency Band / SCAN Channel List elements.
-     *     Until SetRadioConfig carries them (#102) the device reports the
-     *     unset band (0xFFFF) and an all-zero list for both WLANs — never
-     *     0x0000, which would read as a real (2.4GHz-less) band value. */
+    /* 26(#101/#102). Rev1.01 SCAN Frequency Band / SCAN Channel List elements
+     *     echo the committed SetRadioConfig; a never-configured WLAN reads as
+     *     unset (0xFFFF) + empty list, never 0x0000. Single: WLAN#2 unset. */
     {
         opc_get_device_info_ack_t ack;
         static const uint8_t zero8[OPC_SCAN_CHLIST_LEN] = {0};
         init_state(&st, OPC_PASSWORD_DEFAULT);
         (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "devinfo ack before any set-radio");
+        ASSERT(ack.wlan1.scan_band == OPC_SCAN_BAND_UNSET, "unconfigured wlan1 scan band = unset 0xFFFF");
+        ASSERT(memcmp(ack.wlan1.scan_chlist, zero8, sizeof zero8) == 0, "unconfigured wlan1 list = ALL 0");
         (void)do_set_radio(&st, CIP, 5180, (uint16_t)((OPC_BAND_5GHZ << 8) | 36));
-        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "devinfo ack for scan fields");
-        ASSERT(ack.wlan1.scan_band == OPC_SCAN_BAND_UNSET, "wlan1 scan band = unset 0xFFFF");
-        ASSERT(memcmp(ack.wlan1.scan_chlist, zero8, sizeof zero8) == 0, "wlan1 scan chlist = ALL 0");
-        ASSERT(ack.wlan2.scan_band == OPC_SCAN_BAND_UNSET, "wlan2 scan band = unset 0xFFFF");
-        ASSERT(memcmp(ack.wlan2.scan_chlist, zero8, sizeof zero8) == 0, "wlan2 scan chlist = ALL 0");
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "devinfo ack after set-radio");
+        ASSERT(ack.wlan1.scan_band == OPC_SCAN_BAND_5GHZ, "wlan1 scan band echoes 5 GHz");
+        ASSERT(ack.wlan1.scan_chlist[3] == 0x01 && ack.wlan1.scan_chlist[0] == 0 && ack.wlan1.scan_chlist[7] == 0,
+               "wlan1 scan chlist echoes ch36 = row A bit0");
+        ASSERT(ack.wlan2.scan_band == OPC_SCAN_BAND_UNSET, "single: wlan2 scan band = unset 0xFFFF");
+        ASSERT(memcmp(ack.wlan2.scan_chlist, zero8, sizeof zero8) == 0, "single: wlan2 scan chlist = ALL 0");
+    }
+
+    /* 26b(#102). radio.conf decoder: current layout as-is, Rev1.00 16-byte
+     *     layout converted (band from FREQ, channel bit from CH), other → -1. */
+    {
+        opc_set_radio_config_req_t cur, out;
+        memset(&cur, 0, sizeof cur);
+        cur.station_type = OPC_STATION_DUAL;
+        cur.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+        cur.wlan1.scan_chlist[3] = 0x01;
+        ASSERT(opcd_radio_conf_decode(&cur, sizeof cur, &out) == 0 && memcmp(&out, &cur, sizeof cur) == 0,
+               "decode: current layout copied as-is");
+        uint8_t legacy[OPCD_RADIO_CONF_LEGACY_LEN];
+        memset(legacy, 0, sizeof legacy);
+        uint16_t v;
+        v = OPC_STATION_SINGLE; memcpy(&legacy[0], &v, 2);     /* station */
+        v = 5180;               memcpy(&legacy[4], &v, 2);     /* w1 freq */
+        v = 0x0224;             memcpy(&legacy[6], &v, 2);     /* w1 ch (5 GHz, 36) */
+        legacy[8] = OPC_WLAN_MODE_11AX;                        /* w1 mode */
+        legacy[9] = OPC_BANDWIDTH_80;                          /* w1 bw */
+        ASSERT(opcd_radio_conf_decode(legacy, sizeof legacy, &out) == 1, "decode: legacy layout converted");
+        ASSERT(out.station_type == OPC_STATION_SINGLE && out.wlan1.mode == OPC_WLAN_MODE_11AX &&
+               out.wlan1.bandwidth == OPC_BANDWIDTH_80, "decode: legacy scalars kept");
+        ASSERT(out.wlan1.scan_band == OPC_SCAN_BAND_5GHZ && out.wlan1.scan_chlist[3] == 0x01,
+               "decode: legacy 5180/ch36 → 5 GHz, row A bit0");
+        ASSERT(out.wlan2.scan_band == OPC_SCAN_BAND_UNSET && opc_scan_list_empty(out.wlan2.scan_chlist),
+               "decode: legacy wlan2 (freq 0) → unset band, empty list");
+        ASSERT(opcd_radio_conf_decode(legacy, 20, &out) == -1, "decode: unknown size → -1");
+    }
+
+    /* 26c(#102). The identical-request shortcut applies only to a COMMITTED
+     *     config. A matching but uncommitted state (never applied) must still
+     *     reach the platform; once committed, the same request is skipped. */
+    {
+        opc_set_radio_config_req_t req;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        memset(&req, 0, sizeof req);
+        req.station_type    = OPC_STATION_SINGLE;
+        req.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        req.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        req.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+        req.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        req.wlan2.mode = 0xFF; req.wlan2.bandwidth = 0xFF;
+        st.radio = req;                       /* matches, but never applied */
+        st.radio_committed = false;
+        stub_apply_radio_reset_calls();
+        ASSERT(do_set_radio_req(&st, CIP, &req) == OPC_RESULT_OK && stub_apply_radio_calls() == 1,
+               "matching but uncommitted config → applied, not skipped");
+        ASSERT(st.radio_committed, "sync persist → committed");
+        ASSERT(do_set_radio_req(&st, CIP, &req) == OPC_RESULT_OK && stub_apply_radio_calls() == 1,
+               "matching committed config → skipped");
+    }
+
+    /* 26d(#102, Codex P1). A request whose NVRAM write fails is applied but NOT
+     *     committed: the identical retry must run apply + persist again instead
+     *     of taking the shortcut (which would drop the config on reboot). */
+    {
+        char bad_path[160];
+        snprintf(bad_path, sizeof bad_path, "no_such_dir_%d/radio", (int)getpid());
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        st.paths.radio = bad_path;
+        stub_apply_radio_reset_calls();
+        uint16_t r = do_set_radio(&st, CIP, 5180, 36);
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_NVRAM, "persist failure → NG 0x0004");
+        ASSERT(!st.radio_committed && stub_apply_radio_calls() == 1, "applied once, uncommitted");
+        st.paths.radio = g_radio_path;
+        unlink(g_radio_path);
+        r = do_set_radio(&st, CIP, 5180, 36);
+        ASSERT(r == OPC_RESULT_OK && stub_apply_radio_calls() == 2,
+               "identical retry after NVRAM failure → re-applied and persisted");
+        ASSERT(st.radio_committed, "retry → committed");
+        opc_set_radio_config_req_t disk;
+        ASSERT(opc_store_read_all(g_radio_path, &disk, sizeof disk) == (ssize_t)sizeof disk &&
+               disk.wlan1.scan_band == OPC_SCAN_BAND_5GHZ, "retry wrote radio.conf");
+    }
+
+    /* 26e(#102, round 4). A deferred radio write commits only if it is still the
+     *     CURRENT generation when it completes. Simulate a newer request having
+     *     replaced st->radio (generation bump) before the older write drains:
+     *     that completion must NOT commit; a current-generation write must. */
+    {
+        uint16_t cport = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cport);
+        opc_store_async_t *sa = opc_store_async_create();
+        ASSERT(srv >= 0 && cli >= 0 && sa != NULL, "26e: rig up");
+        const uint32_t LOOP = 0x7F000001;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd      = srv;
+        st.store_async = sa;
+        (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+
+        opc_set_radio_config_req_t rq;
+        memset(&rq, 0, sizeof rq);
+        rq.station_type    = OPC_STATION_SINGLE;
+        rq.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        rq.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        legacy_to_scan(5180, 36, &rq.wlan1);
+        rq.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        uint8_t fr[OPC_FRAME_MAX], rs[OPC_FRAME_MAX], rx[OPC_FRAME_MAX];
+        ssize_t rl = -1;
+        ssize_t fl = opc_set_radio_config_req_pack(fr, sizeof fr, 61, &rq);
+        ASSERT(opcd_dispatch(&st, fr, (size_t)fl, LOOP, cport, rs, sizeof rs, &rl) == 0 && rl == 0,
+               "26e: write A deferred");
+        st.radio_gen++;                       /* a newer request replaced st->radio meanwhile */
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "26e: A completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: A ack arrived");
+        ASSERT(!st.radio_committed, "26e: older-generation completion does not commit");
+
+        /* Control arm: a write of the current generation commits. */
+        legacy_to_scan(5200, 40, &rq.wlan1);
+        fl = opc_set_radio_config_req_pack(fr, sizeof fr, 62, &rq);
+        rl = -1;
+        ASSERT(opcd_dispatch(&st, fr, (size_t)fl, LOOP, cport, rs, sizeof rs, &rl) == 0 && rl == 0,
+               "26e: write B deferred");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "26e: B completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: B ack arrived");
+        ASSERT(st.radio_committed, "26e: current-generation completion commits");
+
+        /* Stale completion after a current-generation commit: the drain may
+         * hand back an older-generation write AFTER the current one (job-slot
+         * order ≠ completion order). It must be ignored, not clear the commit.
+         * Simulate: queue write C, then pretend a newer write already committed
+         * (gen bump + committed), then let C's completion drain. */
+        legacy_to_scan(5220, 44, &rq.wlan1);
+        fl = opc_set_radio_config_req_pack(fr, sizeof fr, 63, &rq);
+        rl = -1;
+        ASSERT(opcd_dispatch(&st, fr, (size_t)fl, LOOP, cport, rs, sizeof rs, &rl) == 0 && rl == 0,
+               "26e: write C deferred");
+        st.radio_gen++;
+        st.radio_committed = true;            /* the (simulated) current write landed */
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "26e: C completed");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0 && recv(cli, rx, sizeof rx, 0) > 0, "26e: C ack arrived");
+        ASSERT(st.radio_committed, "26e: stale completion leaves the commit untouched");
+
+        st.store_async = NULL;
+        opc_store_async_destroy(sa);
+        close(srv);
+        close(cli);
     }
 
     /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).

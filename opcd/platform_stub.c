@@ -169,7 +169,11 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
      * and the LAST one carries the previous (reverted-to) config — including its
      * station_type, so a DUAL revert is verifiable from the handler test. */
     s_apply_radio_calls++;
-    s_apply_radio_last_w1_freq  = cfg ? (int)cfg->wlan1.freq_mhz : 0;
+    /* Rev1.01: no FREQ field — derive the configured frequency (lowest selected
+     * channel) so the revert tests keep a scalar to compare. */
+    uint16_t w1_freq = 0, w1_ch = 0;
+    if (cfg) opc_scan_derive_freq_ch(cfg->wlan1.scan_band, cfg->wlan1.scan_chlist, &w1_freq, &w1_ch);
+    s_apply_radio_last_w1_freq  = (int)w1_freq;
     s_apply_radio_last_station  = cfg ? (int)cfg->station_type   : 0;
     /* Fail-once countdown: fail this call, then auto-clear so the NEXT call
      * (the best-effort revert) succeeds — proves a successful revert still

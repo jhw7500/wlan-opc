@@ -140,7 +140,9 @@ static void state_set_defaults(opcd_state_t *st)
     st->paths.device_info = OPC_PATH_DEVICE_INFO;
     st->paths.temp_dir    = OPC_PATH_TEMP;
     strncpy(st->password, OPC_PASSWORD_DEFAULT, sizeof st->password - 1);
-    st->radio.station_type = OPC_STATION_SINGLE;
+    st->radio.station_type    = OPC_STATION_SINGLE;
+    st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;   /* Rev1.01: no band lock */
+    st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
     st->udp_fd     = -1;
     st->boot_status = OPC_DEVICE_BOOTING;
     opcd_fault_probe_init(&st->fault_probe);
@@ -168,8 +170,30 @@ static void state_load_from_disk(opcd_state_t *st)
     } else if (n < 0 && errno != ENOENT) {
         LOG("password load failed: %s", strerror(errno));
     }
-    if (opc_store_read_all(st->paths.radio, &st->radio, sizeof st->radio) <= 0) {
-        st->radio.station_type = st->conf.default_station_type;
+    {
+        /* radio.conf: exact current layout, or the 16-byte Rev1.00 layout which
+         * is converted (#102). Any other size is a mismatch → defaults (the
+         * short-read acceptance of the old `<= 0` check is gone). */
+        uint8_t rbuf[64];
+        ssize_t rn = opc_store_read_all(st->paths.radio, rbuf, sizeof rbuf);
+        int rc = rn > 0 ? opcd_radio_conf_decode(rbuf, (size_t)rn, &st->radio) : -1;
+        /* Only an exact-layout file counts as committed. A converted Rev1.00
+         * file (rc == 1) describes what the old semantics applied (e.g. one
+         * frequency), not what the converted band/list would apply now (e.g.
+         * a whole band) — so the next matching request must run apply +
+         * persist instead of being skipped as "already there" (Codex P2). */
+        st->radio_committed = (rc == 0);
+        if (rc < 0) {
+            if (rn > 0)
+                LOG("radio.conf size mismatch (%zd vs %zu) — discarding", rn, sizeof st->radio);
+            memset(&st->radio, 0, sizeof st->radio);
+            st->radio.station_type    = st->conf.default_station_type;
+            st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+            st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        } else if (rc == 1) {
+            LOG("radio.conf: legacy Rev1.00 layout converted to SCAN band/channel list — "
+                "re-send SetRadioConfig to confirm");
+        }
     }
     n = opc_store_read_all(st->paths.ip_list, &st->ip_list, sizeof st->ip_list);
     if (n > 0 && (size_t)n != sizeof st->ip_list) {

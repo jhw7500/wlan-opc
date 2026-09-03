@@ -9,7 +9,7 @@ CFLAGS  += -I.
 BUILDROOT ?= $(abspath ../build/native)
 OBJDIR    := $(BUILDROOT)/protocol
 
-OBJS := $(addprefix $(OBJDIR)/,codec.o frame.o commands.o indications.o)
+OBJS := $(addprefix $(OBJDIR)/,codec.o frame.o commands.o indications.o scan_chlist.o)
 LIB  := $(OBJDIR)/libopcproto.a
 
 .PHONY: all clean

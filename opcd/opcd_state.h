@@ -72,6 +72,9 @@ typedef struct opcd_pending_ack {
                              * — completion frees the slot without replying */
     uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */
     uint16_t seq;           /* echoed sequence number */
+    uint32_t radio_gen;     /* SET_RADIO only: st->radio generation this write
+                             * persists — completion commits only if it still
+                             * equals st->radio_gen (#102) */
     uint32_t client_ip;     /* host byte order */
     uint16_t client_port;   /* host byte order */
     struct timespec rx_ts;  /* request receipt (CLOCK_MONOTONIC) — T7
@@ -92,6 +95,15 @@ typedef struct opcd_state {
     /* Persistent app state. */
     char     password[128];
     opc_set_radio_config_req_t radio;
+    /* True once `radio` has been applied AND its NVRAM write completed (or it
+     * was loaded from radio.conf). Gates the identical-request shortcut in
+     * handle_set_radio_config: a config whose persist failed must be re-done
+     * on retry, not acknowledged as "already there" (#102). */
+    bool     radio_committed;
+    /* Bumped every time `radio` is assigned from a request; deferred NVRAM
+     * completions carry the generation they wrote and may commit only when it
+     * is still the current one (older writes never vouch for a newer config). */
+    uint32_t radio_gen;
     opcd_ip_list_t ip_list;
 
     /* SetRadioConfig apply-failure revert, DEFERRED past the NG ack (D9): a
