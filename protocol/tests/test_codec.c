@@ -12,6 +12,7 @@
 
 #include "commands.h"
 #include "indications.h"
+#include "scan_chlist.h"
 
 #define ASSERT(cond, msg) do {                                              \
     if (!(cond)) {                                                          \
@@ -423,37 +424,180 @@ static int test_change_ip_address(void)
 
 /* ---- 0x1004 SetRadioConfig ---- */
 
+/* Rev1.01 §4.3.8 request layout, pinned by absolute frame offsets:
+ *   64 Station Type / 66 Priority CH
+ *   68 W1 Mode / 69 W1 BW / 70 W1 SCAN Frequency Band / 72..79 W1 SCAN Channel List
+ *   80 W2 Mode / 81 W2 BW / 82 W2 SCAN Frequency Band / 84..91 W2 SCAN Channel List
+ *   Length = 84 (frame 92B). */
 static int test_set_radio_config(void)
 {
     uint8_t frame[OPC_FRAME_MAX];
-    opc_set_radio_config_req_t ri = {
-        .station_type = OPC_STATION_DUAL,
-        .priority_ch  = 0x0206,
-        .wlan1 = { .freq_mhz = 5180, .channel = 0x0224,
-                   .mode = OPC_WLAN_MODE_11AX, .bandwidth = OPC_BANDWIDTH_80 },
-        .wlan2 = { .freq_mhz = 2412, .channel = 0x0101,
-                   .mode = OPC_WLAN_MODE_11N,  .bandwidth = OPC_BANDWIDTH_40 },
-    };
+    opc_set_radio_config_req_t ri;
+    memset(&ri, 0, sizeof ri);
+    ri.station_type    = OPC_STATION_DUAL;
+    ri.priority_ch     = 0x02FF;                       /* 5 GHz, band-only */
+    ri.wlan1.mode      = OPC_WLAN_MODE_11AX;
+    ri.wlan1.bandwidth = OPC_BANDWIDTH_80;
+    ri.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+    opc_scan_list_set_channel(ri.wlan1.scan_chlist, OPC_SCAN_BAND_5GHZ, 36);    /* bit0 */
+    opc_scan_list_set_channel(ri.wlan1.scan_chlist, OPC_SCAN_BAND_5GHZ, 149);   /* bit20 */
+    ri.wlan2.mode      = OPC_WLAN_MODE_11N;
+    ri.wlan2.bandwidth = OPC_BANDWIDTH_40;
+    ri.wlan2.scan_band = OPC_SCAN_BAND_2_4GHZ;
+    opc_scan_list_set_channel(ri.wlan2.scan_chlist, OPC_SCAN_BAND_2_4GHZ, 1);
+    opc_scan_list_set_channel(ri.wlan2.scan_chlist, OPC_SCAN_BAND_2_4GHZ, 6);
+    opc_scan_list_set_channel(ri.wlan2.scan_chlist, OPC_SCAN_BAND_2_4GHZ, 11);
+
     ssize_t n = opc_set_radio_config_req_pack(frame, sizeof frame, 0x0040, &ri);
-    ASSERT(n > 0, "req pack");
-    ASSERT(opc_be16_read(&frame[6]) == OPC_SET_RADIO_CONFIG_REQ_LENGTH, "req length");
+    ASSERT(n == 92, "req frame is 92B");
+    ASSERT(opc_be16_read(&frame[6]) == 84, "req Length = 84");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_SET_RADIO_CONFIG_REQ_LENGTH, "req length macro");
+    ASSERT(opc_be16_read(&frame[64]) == OPC_STATION_DUAL, "station @64");
+    ASSERT(opc_be16_read(&frame[66]) == 0x02FF, "priority @66");
+    ASSERT(frame[68] == OPC_WLAN_MODE_11AX && frame[69] == OPC_BANDWIDTH_80, "w1 mode/bw @68");
+    ASSERT(opc_be16_read(&frame[70]) == OPC_SCAN_BAND_5GHZ, "w1 scan band @70");
+    ASSERT(opc_be32_read(&frame[72]) == 0x00100001u && opc_be32_read(&frame[76]) == 0, "w1 chlist @72 = bit0|bit20");
+    ASSERT(frame[80] == OPC_WLAN_MODE_11N && frame[81] == OPC_BANDWIDTH_40, "w2 mode/bw @80");
+    ASSERT(opc_be16_read(&frame[82]) == OPC_SCAN_BAND_2_4GHZ, "w2 scan band @82");
+    ASSERT(opc_be32_read(&frame[84]) == 0x00000421u && opc_be32_read(&frame[88]) == 0, "w2 chlist @84 = 0x421");
+
     opc_set_radio_config_req_t ro;
     ASSERT(opc_set_radio_config_req_unpack(frame, n, &ro) == 0, "req unpack");
     ASSERT(ro.station_type == ri.station_type, "station");
     ASSERT(ro.priority_ch == ri.priority_ch, "priority");
-    ASSERT(ro.wlan1.freq_mhz == ri.wlan1.freq_mhz, "w1 freq");
-    ASSERT(ro.wlan1.channel  == ri.wlan1.channel,  "w1 ch");
-    ASSERT(ro.wlan1.mode     == ri.wlan1.mode,     "w1 mode");
-    ASSERT(ro.wlan1.bandwidth == ri.wlan1.bandwidth, "w1 bw");
-    ASSERT(ro.wlan2.freq_mhz == ri.wlan2.freq_mhz, "w2 freq");
-    ASSERT(ro.wlan2.channel  == ri.wlan2.channel,  "w2 ch");
+    ASSERT(ro.wlan1.mode == ri.wlan1.mode && ro.wlan1.bandwidth == ri.wlan1.bandwidth, "w1 mode/bw");
+    ASSERT(ro.wlan1.scan_band == OPC_SCAN_BAND_5GHZ, "w1 scan band");
+    ASSERT(memcmp(ro.wlan1.scan_chlist, ri.wlan1.scan_chlist, OPC_SCAN_CHLIST_LEN) == 0, "w1 chlist");
+    ASSERT(ro.wlan2.scan_band == OPC_SCAN_BAND_2_4GHZ, "w2 scan band");
+    ASSERT(memcmp(ro.wlan2.scan_chlist, ri.wlan2.scan_chlist, OPC_SCAN_CHLIST_LEN) == 0, "w2 chlist");
     ASSERT(ro.wlan2.mode     == ri.wlan2.mode,     "w2 mode");
+    /* A Rev1.00-sized (Length 76) request is refused by the unpacker. */
+    uint8_t old[OPC_FRAME_MAX];
+    memcpy(old, frame, (size_t)n);
+    opc_be16_write(&old[6], 76);
+    ASSERT(opc_set_radio_config_req_unpack(old, 84, &ro) != 0, "Length 76 frame rejected");
 
     opc_set_radio_config_ack_t ai = { .result = OPC_RESULT_OK };
     ssize_t na = opc_set_radio_config_ack_pack(frame, sizeof frame, 0x0040, &ai);
     ASSERT(na > 0, "ack pack");
     opc_set_radio_config_ack_t ao;
     ASSERT(opc_set_radio_config_ack_unpack(frame, na, &ao) == 0, "ack unpack");
+    return 0;
+}
+
+/* ---- Rev1.01 SCAN Channel List helpers (protocol/scan_chlist.h) ---- */
+
+static int test_scan_chlist(void)
+{
+    /* Bit assignment tables. */
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_2_4GHZ, OPC_SCAN_ROW_A, 0)  == 1,  "2.4G bit0 = ch1");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_2_4GHZ, OPC_SCAN_ROW_A, 13) == 14, "2.4G bit13 = ch14");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_2_4GHZ, OPC_SCAN_ROW_A, 14) == 0,  "2.4G bit14 unassigned");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_2_4GHZ, OPC_SCAN_ROW_B, 0)  == 0,  "2.4G row B unassigned");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 0)  == 36,  "5G bit0 = ch36");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 7)  == 64,  "5G bit7 = ch64");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 8)  == 100, "5G bit8 = ch100");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 19) == 144, "5G bit19 = ch144");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 20) == 149, "5G bit20 = ch149");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 24) == 165, "5G bit24 = ch165");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_5GHZ, OPC_SCAN_ROW_A, 25) == 0,   "5G bit25 unassigned");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_6GHZ, OPC_SCAN_ROW_A, 0)  == 1,   "6G A bit0 = ch1");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_6GHZ, OPC_SCAN_ROW_A, 31) == 125, "6G A bit31 = ch125");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_6GHZ, OPC_SCAN_ROW_B, 0)  == 129, "6G B bit0 = ch129");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_6GHZ, OPC_SCAN_ROW_B, 26) == 233, "6G B bit26 = ch233");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_6GHZ, OPC_SCAN_ROW_B, 27) == 0,   "6G B bit27 unassigned");
+    ASSERT(opc_scan_row_channel(OPC_SCAN_BAND_UNSET, OPC_SCAN_ROW_A, 0) == 0,   "unset band unassigned");
+
+    int row = -1, bit = -1;
+    ASSERT(opc_scan_bit_for_channel(OPC_SCAN_BAND_5GHZ, 149, &row, &bit) && row == OPC_SCAN_ROW_A && bit == 20,
+           "ch149 -> row A bit20");
+    ASSERT(opc_scan_bit_for_channel(OPC_SCAN_BAND_6GHZ, 233, &row, &bit) && row == OPC_SCAN_ROW_B && bit == 26,
+           "6G ch233 -> row B bit26");
+    ASSERT(!opc_scan_bit_for_channel(OPC_SCAN_BAND_5GHZ, 38, &row, &bit), "ch38 not in 5G table");
+    ASSERT(!opc_scan_bit_for_channel(OPC_SCAN_BAND_2_4GHZ, 0, &row, &bit), "ch0 not in table");
+
+    ASSERT(opc_scan_channel_mhz(OPC_SCAN_BAND_2_4GHZ, 1)   == 2412, "2.4G ch1 = 2412");
+    ASSERT(opc_scan_channel_mhz(OPC_SCAN_BAND_2_4GHZ, 14)  == 2484, "2.4G ch14 = 2484");
+    ASSERT(opc_scan_channel_mhz(OPC_SCAN_BAND_5GHZ, 36)    == 5180, "5G ch36 = 5180");
+    ASSERT(opc_scan_channel_mhz(OPC_SCAN_BAND_5GHZ, 165)   == 5825, "5G ch165 = 5825");
+    ASSERT(opc_scan_channel_mhz(OPC_SCAN_BAND_5GHZ, 38)    == 0,    "5G ch38 -> 0");
+    ASSERT(opc_scan_band_supported(OPC_SCAN_BAND_5GHZ) && !opc_scan_band_supported(OPC_SCAN_BAND_6GHZ) &&
+           !opc_scan_band_supported(OPC_SCAN_BAND_UNSET), "supported bands = 2.4/5");
+
+    /* Wire placement — spec example: 2.4 GHz ch 1/6/11 -> 0x00000421, 0x00000000. */
+    uint8_t list[OPC_SCAN_CHLIST_LEN];
+    memset(list, 0, sizeof list);
+    ASSERT(opc_scan_list_empty(list), "all-zero list is empty");
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_2_4GHZ, 1);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_2_4GHZ, 6);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_2_4GHZ, 11);
+    static const uint8_t example[OPC_SCAN_CHLIST_LEN] = { 0x00, 0x00, 0x04, 0x21, 0, 0, 0, 0 };
+    ASSERT(memcmp(list, example, sizeof list) == 0, "ch1/6/11 -> 00 00 04 21 00 00 00 00");
+    ASSERT(opc_scan_row_word(list, OPC_SCAN_ROW_A) == 0x00000421 && opc_scan_row_word(list, OPC_SCAN_ROW_B) == 0,
+           "row words");
+    ASSERT(!opc_scan_list_empty(list), "list not empty");
+    ASSERT(opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "example valid for 2.4G");
+    /* The same bits (0/5/10) are assigned in 5 GHz too (ch36/56/108) — validity
+     * is per band, so the list is valid there as well. */
+    ASSERT(opc_scan_list_valid(OPC_SCAN_BAND_5GHZ, list), "bits 0/5/10 also valid for 5G");
+    ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_UNSET, list), "unset band: non-empty list invalid");
+    return 0;
+}
+
+static int test_scan_chlist_validity_and_enumeration(void)
+{
+    uint8_t list[OPC_SCAN_CHLIST_LEN];
+    uint8_t out[64];
+
+    /* A bit outside the band's assignment -> invalid. */
+    memset(list, 0, sizeof list);
+    list[2] = 0x40;                              /* row A bit14: unassigned in 2.4G */
+    ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G bit14 invalid");
+    memset(list, 0, sizeof list);
+    list[0] = 0x02;                              /* row A bit25: unassigned in 5G */
+    ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_5GHZ, list), "5G bit25 invalid");
+
+    /* Lenient row order: a 2.4 GHz list carried in row B (bytes 4..7) is accepted
+     * when row A is empty — and enumerates the same channels. */
+    memset(list, 0, sizeof list);
+    list[6] = 0x04; list[7] = 0x21;
+    ASSERT(opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G list in row B tolerated");
+    size_t n = opc_scan_list_channels(OPC_SCAN_BAND_2_4GHZ, list, out, sizeof out);
+    ASSERT(n == 3 && out[0] == 1 && out[1] == 6 && out[2] == 11, "row-B list enumerates 1/6/11");
+    /* Both rows populated for 2.4 GHz -> invalid (only one row is defined). */
+    list[3] = 0x01;
+    ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G with both rows set invalid");
+
+    /* Enumeration in ascending bit order; empty list = whole band table. */
+    memset(list, 0, sizeof list);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_5GHZ, 149);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_5GHZ, 36);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_5GHZ, 100);
+    n = opc_scan_list_channels(OPC_SCAN_BAND_5GHZ, list, out, sizeof out);
+    ASSERT(n == 3 && out[0] == 36 && out[1] == 100 && out[2] == 149, "5G 36/100/149 ascending");
+    memset(list, 0, sizeof list);
+    n = opc_scan_list_channels(OPC_SCAN_BAND_5GHZ, list, out, sizeof out);
+    ASSERT(n == 25 && out[0] == 36 && out[7] == 64 && out[8] == 100 && out[19] == 144 && out[24] == 165,
+           "empty 5G list = all 25 channels");
+    n = opc_scan_list_channels(OPC_SCAN_BAND_2_4GHZ, list, out, sizeof out);
+    ASSERT(n == 14 && out[0] == 1 && out[13] == 14, "empty 2.4G list = ch1..14");
+    n = opc_scan_list_channels(OPC_SCAN_BAND_5GHZ, list, out, 4);
+    ASSERT(n == 25, "count reported even when max is smaller");
+    n = opc_scan_list_channels(OPC_SCAN_BAND_UNSET, list, out, sizeof out);
+    ASSERT(n == 0, "unset band selects nothing");
+
+    /* Derived configured frequency = lowest selected channel. */
+    uint16_t f = 1, c = 1;
+    memset(list, 0, sizeof list);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_5GHZ, 149);
+    opc_scan_list_set_channel(list, OPC_SCAN_BAND_5GHZ, 36);
+    opc_scan_derive_freq_ch(OPC_SCAN_BAND_5GHZ, list, &f, &c);
+    ASSERT(f == 5180 && c == 0x0224, "derived = ch36 (5180, 0x0224)");
+    memset(list, 0, sizeof list);
+    opc_scan_derive_freq_ch(OPC_SCAN_BAND_5GHZ, list, &f, &c);
+    ASSERT(f == 0 && c == 0, "empty list derives 0/0");
+    opc_scan_derive_freq_ch(OPC_SCAN_BAND_UNSET, list, &f, &c);
+    ASSERT(f == 0 && c == 0, "unset band derives 0/0");
     return 0;
 }
 
@@ -695,6 +839,8 @@ int main(void)
         { "get_device_info",        test_get_device_info },
         { "get_device_info_offsets", test_get_device_info_wire_offsets },
         { "get_device_info_scan",   test_get_device_info_scan_fields },
+        { "scan_chlist",            test_scan_chlist },
+        { "scan_chlist_validity",   test_scan_chlist_validity_and_enumeration },
         { "set_password",           test_set_password },
         { "set_ip_config_list",     test_set_ip_config_list },
         { "change_ip_address",      test_change_ip_address },

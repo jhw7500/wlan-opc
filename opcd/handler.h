@@ -62,6 +62,12 @@ void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
  * readable. No-op when no async store is attached. */
 void opcd_store_async_on_ready(opcd_state_t *st);
 
+/* radio.conf decoder (#102): `n == sizeof *out` → copied as-is (0);
+ * `n == OPCD_RADIO_CONF_LEGACY_LEN` (Rev1.00 FREQ/CH layout) → converted to the
+ * SCAN band / channel-list form (1); any other size → -1 (caller resets). */
+#define OPCD_RADIO_CONF_LEGACY_LEN 16
+int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t *out);
+
 #ifdef __cplusplus
 }
 #endif

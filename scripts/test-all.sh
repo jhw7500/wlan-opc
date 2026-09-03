@@ -93,11 +93,13 @@ chk "change-ip slot1 (armed) → OK"           "OK"           $VHL change-ip --s
 
 # ============ 7. SetRadioConfig ============
 sec "7. SetRadioConfig"
-chk "set-radio mode 99 → NG 0x0013"          "0x0013"       $VHL set-radio --station single --w1-freq 5200 --w1-ch 0x0228 --w1-mode 99 --w1-bw 2
-chk "set-radio bw 99 → NG 0x0014"            "0x0014"       $VHL set-radio --station single --w1-freq 5200 --w1-ch 0x0228 --w1-mode 11 --w1-bw 99
-chk "set-radio 6G freq(6200) → NG 0x0011"    "0x0011"       $VHL set-radio --station single --w1-freq 6200 --w1-ch 0x0224 --w1-mode 11 --w1-bw 2
+chk "set-radio mode 99 → NG 0x0013"          "0x0013"       $VHL set-radio --station single --w1-band 5 --w1-chlist 40 --w1-mode 99 --w1-bw 2
+chk "set-radio bw 99 → NG 0x0014"            "0x0014"       $VHL set-radio --station single --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 99
+chk "set-radio 6G band → NG 0x0011"          "0x0011"       $VHL set-radio --station single --w1-band 6 --w1-chlist 1 --w1-mode 11 --w1-bw 2
+chk "set-radio 5G bit25(표 밖) → NG 0x0012"  "0x0012"       $VHL set-radio --station single --w1-band 5 --w1-chlist-hex 0200000000000000 --w1-mode 11 --w1-bw 2
 if [ "$RADIO_APPLY" = "1" ]; then
-  chk "set-radio OK 실적용(동일 freq5200 재적용)" "OK"       $VHL set-radio --station single --w1-freq 5200 --w1-ch 0x0228 --w1-mode 11 --w1-bw 2
+  # Rev1.01: band + channel list. Same config re-sent → apply skipped (OK), so use ch40+ch36 first.
+  chk "set-radio OK 실적용(5G ch40,36 밴드락)"  "OK"           $VHL set-radio --station single --w1-band 5 --w1-chlist 40,36 --w1-mode 11 --w1-bw 2
   sleep 3; chk "실적용 후 링크 생존 확인"      "vendor_code" $VHL basic-info
 else
   skipn "set-radio OK 실적용" "RADIO_APPLY=1 필요 (mlan0 재결합 위험)"

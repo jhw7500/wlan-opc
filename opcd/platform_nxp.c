@@ -809,20 +809,20 @@ static int run_argv_bounded(const char *label, const char *path,
  * band-lock survives restart); reconfigure reloads the conf and re-associates
  * asynchronously, so the bounded sync call returns within budget. freq_buf lives
  * on this frame for the duration of the call. */
-static int run_opc_wlan_apply(const char *iface, uint16_t freq_mhz,
+/* `freqs` is the space-separated MHz list opc_wlan_apply.sh takes for `freq`
+ * (NULL/empty = no frequency change). */
+static int run_opc_wlan_apply(const char *iface, const char *freqs,
                               const char *ssid, long timeout_ms)
 {
-    if (freq_mhz == 0 && (!ssid || ssid[0] == '\0'))
+    if ((!freqs || freqs[0] == '\0') && (!ssid || ssid[0] == '\0'))
         return -EINVAL;
-    char freq_buf[8];
     const char *argv[8];
     int n = 0;
     argv[n++] = "opc_wlan_apply.sh";
     argv[n++] = iface;
-    if (freq_mhz != 0) {
-        snprintf(freq_buf, sizeof freq_buf, "%u", freq_mhz);
+    if (freqs && freqs[0] != '\0') {
         argv[n++] = "freq";
-        argv[n++] = freq_buf;
+        argv[n++] = freqs;
     }
     if (ssid && ssid[0] != '\0') {
         argv[n++] = "ssid";
@@ -833,50 +833,67 @@ static int run_opc_wlan_apply(const char *iface, uint16_t freq_mhz,
                             (char *const *)argv, timeout_ms);
 }
 
+/* Render one WLAN's SCAN Channel List as the MHz list opc_wlan_apply.sh takes
+ * ("2412 2437 2462"). An empty list selects the whole band table ("band only").
+ * Returns the number of channels selected; 0 when the band is unset or not
+ * supported (nothing to apply). */
+static size_t scan_freqs_render(const opc_wlan_radio_cfg_t *w, char *buf, size_t cap)
+{
+    uint8_t chs[64];
+    buf[0] = '\0';
+    if (w->scan_band == OPC_SCAN_BAND_UNSET || !opc_scan_band_supported(w->scan_band))
+        return 0;
+    size_t n = opc_scan_list_channels(w->scan_band, w->scan_chlist, chs, sizeof chs);
+    if (n > sizeof chs) n = sizeof chs;
+    size_t off = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint16_t mhz = opc_scan_channel_mhz(w->scan_band, chs[i]);
+        if (mhz == 0) continue;
+        int k = snprintf(buf + off, cap - off, "%s%u", off ? " " : "", (unsigned)mhz);
+        if (k < 0 || (size_t)k >= cap - off) break;
+        off += (size_t)k;
+    }
+    return n;
+}
+
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
-    if (cfg->station_type == OPC_STATION_DUAL) {
-        fprintf(stderr,
-                "opcd: nxp_apply_radio_config: station=DUAL priority_ch=%u "
-                "w1(freq=%u ch=0x%04x mode=%u bw=%u) "
-                "w2(freq=%u ch=0x%04x mode=%u bw=%u)\n",
-                cfg->priority_ch,
-                cfg->wlan1.freq_mhz, cfg->wlan1.channel,
-                cfg->wlan1.mode, cfg->wlan1.bandwidth,
-                cfg->wlan2.freq_mhz, cfg->wlan2.channel,
-                cfg->wlan2.mode, cfg->wlan2.bandwidth);
-    } else {
-        fprintf(stderr,
-                "opcd: nxp_apply_radio_config: station=SINGLE priority_ch=%u "
-                "w1(freq=%u ch=0x%04x mode=%u bw=%u)\n",
-                cfg->priority_ch,
-                cfg->wlan1.freq_mhz, cfg->wlan1.channel,
-                cfg->wlan1.mode, cfg->wlan1.bandwidth);
-    }
+    char f1[256], f2[256];
+    const bool dual = cfg->station_type == OPC_STATION_DUAL;
+    size_t n1 = scan_freqs_render(&cfg->wlan1, f1, sizeof f1);
+    size_t n2 = dual ? scan_freqs_render(&cfg->wlan2, f2, sizeof f2) : 0;
+    fprintf(stderr,
+            "opcd: nxp_apply_radio_config: station=%s priority_ch=0x%04x "
+            "w1(band=0x%04x mode=%u bw=%u freqs=[%s])",
+            dual ? "DUAL" : "SINGLE", cfg->priority_ch,
+            cfg->wlan1.scan_band, cfg->wlan1.mode, cfg->wlan1.bandwidth, f1);
+    if (dual)
+        fprintf(stderr, " w2(band=0x%04x mode=%u bw=%u freqs=[%s])",
+                cfg->wlan2.scan_band, cfg->wlan2.mode, cfg->wlan2.bandwidth, f2);
+    fprintf(stderr, "\n");
 
     /* Share the 1s regulation budget across both apply calls in DUAL so the
      * worst-case wall-clock stays within platform.h's contract. */
-    const long per_call_ms = (cfg->station_type == OPC_STATION_DUAL)
-                             ? OPC_WLAN_APPLY_TIMEOUT_MS / 2
-                             : OPC_WLAN_APPLY_TIMEOUT_MS;
+    const long per_call_ms = dual ? OPC_WLAN_APPLY_TIMEOUT_MS / 2
+                                  : OPC_WLAN_APPLY_TIMEOUT_MS;
 
-    /* freq_mhz == 0 means "no association" per OPC spec — skip apply, leave
-     * wpa_supplicant.conf untouched. Mode / bandwidth mapping is deferred to
-     * a follow-up PR; this PR only wires the wpa_supplicant freq list. */
-    if (cfg->wlan1.freq_mhz != 0) {
-        int rc = run_opc_wlan_apply("mlan0", cfg->wlan1.freq_mhz, NULL, per_call_ms);
+    /* An unset band (0xFFFF) means "no band lock" — skip apply, leave
+     * wpa_supplicant.conf untouched (successor of the Rev1.00 freq==0 rule).
+     * Mode / bandwidth mapping is still deferred; only the freq list is wired. */
+    if (n1 > 0) {
+        int rc = run_opc_wlan_apply("mlan0", f1, NULL, per_call_ms);
         if (rc != 0) return rc;
     }
-    if (cfg->station_type == OPC_STATION_DUAL && cfg->wlan2.freq_mhz != 0) {
+    if (dual && n2 > 0) {
         /* Make the partial-apply state visible in the journal so a post-NG
          * triage shows whether mlan0 was already reconfigured.
          * Ternary safe: an mlan0 failure would have early-returned above,
-         * so wlan1.freq_mhz==0 here means an intentional skip, not error. */
+         * so n1==0 here means an intentional skip, not error. */
         fprintf(stderr,
-                "opcd: nxp_apply_radio_config: %s; now applying mlan1 freq=%u\n",
-                cfg->wlan1.freq_mhz != 0 ? "mlan0 freq already applied"
-                                         : "mlan0 skipped (freq=0)",
-                cfg->wlan2.freq_mhz);
+                "opcd: nxp_apply_radio_config: %s; now applying mlan1 freqs=[%s]\n",
+                n1 > 0 ? "mlan0 freqs already applied"
+                       : "mlan0 skipped (band unset)",
+                f2);
         /* DUAL partial-apply: if mlan0 succeeded above, an mlan1 failure here
          * leaves the two wpa_supplicant confs momentarily out of sync. The
          * caller (handler.c) returns NG (0x0050, apply-failure — D9); the main
@@ -885,7 +902,7 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
          * so the confs reconverge to the pre-change state ("apply fails ⇒ no net
          * change") without the failure ack waiting on a second apply. End-to-end
          * idempotency across reconnect remains the reconnect PR's job. */
-        int rc = run_opc_wlan_apply("mlan1", cfg->wlan2.freq_mhz, NULL, per_call_ms);
+        int rc = run_opc_wlan_apply("mlan1", f2, NULL, per_call_ms);
         if (rc != 0) return rc;
     }
     return 0;
@@ -1007,7 +1024,7 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
         char essid_buf[OPC_ESSID_FIELD_LEN + 1];
         snprintf(essid_buf, sizeof essid_buf, "%.*s",
                  (int)sizeof slot->essid, slot->essid);
-        int erc = run_opc_wlan_apply("mlan0", 0, essid_buf, OPC_WLAN_APPLY_TIMEOUT_MS);
+        int erc = run_opc_wlan_apply("mlan0", NULL, essid_buf, OPC_WLAN_APPLY_TIMEOUT_MS);
         fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply%s\n",
                 essid_buf, erc == 0 ? " (wpa_cli)" : " FAILED");
     }

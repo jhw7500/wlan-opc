@@ -371,6 +371,52 @@ static int persist_radio(opcd_state_t *st, uint32_t ip, uint16_t port,
                         OPC_REQ_SET_RADIO_CONFIG, ip, port, seq, deferred);
 }
 
+/* radio.conf is a raw dump of opc_set_radio_config_req_t. Before Rev1.01 (#102)
+ * the per-WLAN block was {freq_mhz(2), channel(2), mode(1), bw(1)} — 16 bytes
+ * in total. Such a file is converted (band from the frequency, the channel
+ * bit from the CH number) instead of being silently accepted as a short read. */
+struct legacy_radio_wlan { uint16_t freq_mhz; uint16_t channel; uint8_t mode; uint8_t bandwidth; };
+struct legacy_radio_conf {
+    uint16_t station_type;
+    uint16_t priority_ch;
+    struct legacy_radio_wlan wlan1, wlan2;
+};
+_Static_assert(sizeof(struct legacy_radio_conf) == OPCD_RADIO_CONF_LEGACY_LEN,
+               "legacy radio.conf layout is 16 bytes");
+
+static void legacy_radio_wlan_convert(const struct legacy_radio_wlan *in, opc_wlan_radio_cfg_t *out)
+{
+    memset(out, 0, sizeof *out);
+    out->mode      = in->mode;
+    out->bandwidth = in->bandwidth;
+    out->scan_band = OPC_SCAN_BAND_UNSET;
+    if (in->freq_mhz >= 2400 && in->freq_mhz <= 2484)      out->scan_band = OPC_SCAN_BAND_2_4GHZ;
+    else if (in->freq_mhz >= 4900 && in->freq_mhz <= 5925) out->scan_band = OPC_SCAN_BAND_5GHZ;
+    uint8_t ch = (uint8_t)(in->channel & 0xFF);
+    if (out->scan_band != OPC_SCAN_BAND_UNSET && ch != 0)
+        opc_scan_list_set_channel(out->scan_chlist, out->scan_band, ch);   /* no-op if unknown */
+}
+
+int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t *out)
+{
+    if (!buf || !out) return -1;
+    if (n == sizeof *out) {
+        memcpy(out, buf, n);
+        return 0;
+    }
+    if (n == OPCD_RADIO_CONF_LEGACY_LEN) {
+        struct legacy_radio_conf l;
+        memcpy(&l, buf, sizeof l);
+        memset(out, 0, sizeof *out);
+        out->station_type = l.station_type;
+        out->priority_ch  = l.priority_ch;
+        legacy_radio_wlan_convert(&l.wlan1, &out->wlan1);
+        legacy_radio_wlan_convert(&l.wlan2, &out->wlan2);
+        return 1;
+    }
+    return -1;
+}
+
 static int persist_ip_list(opcd_state_t *st, uint32_t ip, uint16_t port,
                            uint16_t seq, bool *deferred)
 {
@@ -645,21 +691,28 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             ack.device_status = st->boot_status;
             ack.station_type  = effective_station_type(st);
             ack.priority_ch   = st->radio.priority_ch;
-            /* Rev1.01 SCAN Frequency Band / SCAN Channel List: SetRadioConfig
-             * does not carry them yet (#102), so report the unset band and an
-             * all-zero list (ack is memset 0 above) for both WLANs. */
-            ack.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
-            ack.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+            /* Rev1.01 SCAN Frequency Band / SCAN Channel List echo the committed
+             * SetRadioConfig (a never-configured band reads as unset). The
+             * "configured frequency" source of the FREQ/CH toggle is derived from
+             * them (lowest selected channel) — SetRadioConfig carries no single
+             * FREQ/CH any more. Single station: WLAN#2 = unset band + empty list. */
+            uint16_t w1_cfreq = 0, w1_cch = 0;
+            ack.wlan1.scan_band = opc_scan_band_or_unset(st->radio.wlan1.scan_band);
+            memcpy(ack.wlan1.scan_chlist, st->radio.wlan1.scan_chlist, OPC_SCAN_CHLIST_LEN);
+            opc_scan_derive_freq_ch(ack.wlan1.scan_band, ack.wlan1.scan_chlist, &w1_cfreq, &w1_cch);
             select_devinfo_freq_ch(st->conf.device_info_freq_source, w1_assoc,
-                                   w1_lfreq, w1_lch,
-                                   st->radio.wlan1.freq_mhz, st->radio.wlan1.channel,
+                                   w1_lfreq, w1_lch, w1_cfreq, w1_cch,
                                    &ack.wlan1.freq_mhz, &ack.wlan1.channel);
             if (!w1_mode_live) ack.wlan1.mode      = st->radio.wlan1.mode;
             if (!w1_bw_live)   ack.wlan1.bandwidth = st->radio.wlan1.bandwidth;
+            ack.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
             if (ack.station_type == OPC_STATION_DUAL) {
+                uint16_t w2_cfreq = 0, w2_cch = 0;
+                ack.wlan2.scan_band = opc_scan_band_or_unset(st->radio.wlan2.scan_band);
+                memcpy(ack.wlan2.scan_chlist, st->radio.wlan2.scan_chlist, OPC_SCAN_CHLIST_LEN);
+                opc_scan_derive_freq_ch(ack.wlan2.scan_band, ack.wlan2.scan_chlist, &w2_cfreq, &w2_cch);
                 select_devinfo_freq_ch(st->conf.device_info_freq_source, w2_assoc,
-                                       w2_lfreq, w2_lch,
-                                       st->radio.wlan2.freq_mhz, st->radio.wlan2.channel,
+                                       w2_lfreq, w2_lch, w2_cfreq, w2_cch,
                                        &ack.wlan2.freq_mhz, &ack.wlan2.channel);
                 if (!w2_mode_live) ack.wlan2.mode      = st->radio.wlan2.mode;
                 if (!w2_bw_live)   ack.wlan2.bandwidth = st->radio.wlan2.bandwidth;
@@ -897,52 +950,62 @@ static bool valid_wlan_bw(uint8_t b)
            b == OPC_BANDWIDTH_80_80 || b == OPC_BANDWIDTH_320;
 }
 
-/* §3.3.8 (D8): supported bands are 2.4/5 GHz — 6 GHz rejected (A21). 0 means
- * "not specified". Exact per-band channel lists need device confirmation (V2),
- * so only band-level validation is done here. */
-static bool valid_radio_freq(uint16_t mhz)
+/* Rev1.01 §4.3.8: a WLAN names one SCAN Frequency Band. Supported bands are
+ * 2.4/5 GHz; 0xFFFF (unset) is accepted and means "no band lock" — the apply
+ * step skips that WLAN. 6 GHz and unknown ids → 0x0011 (A21). */
+static bool valid_scan_band(uint16_t band)
 {
-    /* 2.4 GHz tops out at ch14 = 2484 MHz; 5 GHz from the Japanese 4.9 GHz
-     * public-safety band up to the 5/6 GHz boundary.
-     * TODO(#35): tighten to the device's confirmed channel set (V2) — e.g.
-     * 2412 lower bound, 5850 UNII-3 upper bound — once the vendor answers. */
-    return mhz == 0 || (mhz >= 2400 && mhz <= 2484) ||
-           (mhz >= 4900 && mhz <= 5925);
+    return band == OPC_SCAN_BAND_UNSET || opc_scan_band_supported(band);
 }
 
-static bool valid_radio_channel(uint16_t ch)
+/* Priority CH (Dual only, A16): upper byte band — OPC_BAND_2_4GHZ/OPC_BAND_5GHZ
+ * share their ids with the scan band's low byte — lower byte CH number, or
+ * 0xFF for "band only". A CH must exist in that band's table; 6 GHz / unknown
+ * bands → 0x0012. */
+static bool valid_priority_ch(uint16_t prio)
 {
-    uint8_t band = (uint8_t)(ch >> 8);   /* upper byte band, lower byte CH */
-    /* Reject only a present-but-unsupported band (A21: 6 GHz refused; unknown
-     * band ids likewise). band 0x00 — a bare CH number — is tolerated: the
-     * exact CH-list / encoding enforcement is pending device confirmation
-     * (V2/V12), and the legacy encoding is in operational use. A specified
-     * band with CH 0 is meaningless and rejected. */
-    if (band != 0 && (uint8_t)(ch & 0xFF) == 0) return false;
-    return band == 0 || band == OPC_BAND_2_4GHZ || band == OPC_BAND_5GHZ;
+    uint16_t band = (uint16_t)(prio >> 8);
+    uint8_t  ch   = (uint8_t)(prio & 0xFF);
+    if (!opc_scan_band_supported(band)) return false;
+    if (ch == 0xFF) return true;
+    return opc_scan_bit_for_channel(band, ch, NULL, NULL);
 }
 
-/* True iff two radio requests would apply differently. Used to decide whether an
- * apply failure leaves anything to revert (D9): if the request equals the
- * committed config, the failed apply changed nothing, so no revert is armed.
- * WLAN#2 / priority_ch are compared only for DUAL — SINGLE ignores them and the
- * wire may carry don't-care bytes there. */
+static bool wlan_cfg_differs(const opc_wlan_radio_cfg_t *a, const opc_wlan_radio_cfg_t *b)
+{
+    return a->mode != b->mode || a->bandwidth != b->bandwidth ||
+           a->scan_band != b->scan_band ||
+           memcmp(a->scan_chlist, b->scan_chlist, OPC_SCAN_CHLIST_LEN) != 0;
+}
+
+/* True iff two radio requests would apply differently. Used (1) to skip the
+ * apply when a request equals the committed config — a re-send must not cost a
+ * wpa_supplicant reconfigure (link drop) — and (2) to decide whether an apply
+ * failure leaves anything to revert (D9). WLAN#2 / priority_ch are compared
+ * only for DUAL — SINGLE ignores them and the wire carries invalid values. */
 static bool radio_cfg_differs(const opc_set_radio_config_req_t *a,
                               const opc_set_radio_config_req_t *b)
 {
-    if (a->station_type    != b->station_type    ||
-        a->wlan1.freq_mhz  != b->wlan1.freq_mhz  ||
-        a->wlan1.channel   != b->wlan1.channel   ||
-        a->wlan1.mode      != b->wlan1.mode      ||
-        a->wlan1.bandwidth != b->wlan1.bandwidth)
+    if (a->station_type != b->station_type || wlan_cfg_differs(&a->wlan1, &b->wlan1))
         return true;
     if (a->station_type == OPC_STATION_DUAL &&
-        (a->priority_ch     != b->priority_ch     ||
-         a->wlan2.freq_mhz  != b->wlan2.freq_mhz  ||
-         a->wlan2.channel   != b->wlan2.channel   ||
-         a->wlan2.mode      != b->wlan2.mode      ||
-         a->wlan2.bandwidth != b->wlan2.bandwidth))
+        (a->priority_ch != b->priority_ch || wlan_cfg_differs(&a->wlan2, &b->wlan2)))
         return true;
+    return false;
+}
+
+/* True while an ack for `req_id` from this client is still deferred (NVRAM
+ * write in flight). An identical request arriving then is a retransmission
+ * (§4.1.3 fig 4-2, A19) and must take the normal path, not the "nothing to
+ * apply" shortcut. */
+static bool ack_pending_for(const opcd_state_t *st, uint16_t req_id, uint32_t ip, uint16_t port)
+{
+    for (size_t i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
+        const opcd_pending_ack_t *pa = &st->pending_acks[i];
+        if (pa->in_use && !pa->discarded && pa->req_id == req_id &&
+            pa->client_ip == ip && pa->client_port == port)
+            return true;
+    }
     return false;
 }
 
@@ -967,18 +1030,27 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_MODE;
         } else if (req.station_type == OPC_STATION_DUAL && !valid_wlan_bw(req.wlan2.bandwidth)) {
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_BW;
-        } else if (!valid_radio_freq(req.wlan1.freq_mhz) ||
+        } else if (!valid_scan_band(req.wlan1.scan_band) ||
                    (req.station_type == OPC_STATION_DUAL &&
-                    !valid_radio_freq(req.wlan2.freq_mhz))) {
-            /* §3.3.8 0x0011: unsupported frequency (D8) */
+                    !valid_scan_band(req.wlan2.scan_band))) {
+            /* §4.3.8 0x0011: unsupported SCAN Frequency Band (6 GHz / unknown, A21) */
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_FREQ;
-        } else if (!valid_radio_channel(req.wlan1.channel) ||
+        } else if (!opc_scan_list_valid(req.wlan1.scan_band, req.wlan1.scan_chlist) ||
                    (req.station_type == OPC_STATION_DUAL &&
-                    (!valid_radio_channel(req.wlan2.channel) ||
-                     !valid_radio_channel(req.priority_ch)))) {
-            /* §3.3.8 0x0012: unsupported CH/band — includes 6 GHz (A21).
-             * priority_ch is Dual-only (A16) and checked only there. */
+                    (!opc_scan_list_valid(req.wlan2.scan_band, req.wlan2.scan_chlist) ||
+                     !valid_priority_ch(req.priority_ch)))) {
+            /* §4.3.8 0x0012: a SCAN Channel List bit outside the band's table
+             * (or a list without a band), or a bad Priority CH (Dual only, A16). */
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_CH;
+        } else if (!radio_cfg_differs(&req, &st->radio) &&
+                   !ack_pending_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
+            /* Identical to the committed config and no ack in flight: nothing
+             * to apply or persist. Skipping the apply spares a wpa_supplicant
+             * reconfigure (link drop) on a VHL re-send; the requested state
+             * already holds. (With an ack in flight it is an A19 retransmission
+             * and goes through persist_radio's discard logic instead.) */
+            fprintf(stderr, "opcd: set_radio: request equals committed config — apply skipped\n");
+            session_touch(st);
         } else {
             const opcd_platform_ops_t *plat = opcd_platform();
             if (!plat) {

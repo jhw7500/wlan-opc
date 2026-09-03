@@ -59,7 +59,7 @@
 | 이슈 | 항목 | 상태 |
 |---|---|---|
 | #101 | GetDeviceInfo 응답 WLAN#1/#2 블록 오프셋 정정(프레임 284/344 → 288/352) + SCAN Frequency Band·SCAN Channel List 필드 추가(미설정값 0xFFFF / ALL 0 에코) | **완료** — `test_codec` 절대 오프셋 단언, `fielddump`·스냅샷·vhlctl 동기 |
-| #102 | SetRadioConfig 요구 레이아웃 재정의(Length 76→84, SCAN Band + 64bit Channel List) | 미착수 |
+| #102 | SetRadioConfig 요구 레이아웃 재정의(Length 76→84, SCAN Band + 64bit Channel List) | **완료** — `protocol/scan_chlist.{c,h}` 비트맵 헬퍼(워드 순서 가정 1곳 격리·관용 디코드), 검증 0x0011/0x0012 재정의, 비트맵→MHz 목록 적용, 동일 설정 재전송 시 apply 생략, radio.conf 옛 16B 포맷 변환, vhlctl `--w1-band/--w1-chlist` |
 | #103 | 미설정·미접속·무효값 규약(0xFFFF/0xFF/-128/ALL 0) + `device_info_freq_source` 기본값 | 미착수 (#101·#102 의존) |
 | #104 | 재송(Retry) 응답 SN: 재송 폐기·원 요구 SN 응답 | 미착수 |
 | #105 | Indication Period 내 마지막 상태만 통지(coalesce) | 미착수 |

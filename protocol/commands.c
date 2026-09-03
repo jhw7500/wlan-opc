@@ -551,18 +551,16 @@ ssize_t opc_set_radio_config_req_pack(uint8_t *frame, size_t cap, uint16_t seq_n
     memset(body, 0, sizeof body);
     opc_be16_write(&body[0],  in->station_type);
     opc_be16_write(&body[2],  in->priority_ch);
-    /* WLAN#1: FREQ then CH (per spec line "68 WLAN#1 FREQ | WLAN#1 CH") */
-    opc_be16_write(&body[4],  in->wlan1.freq_mhz);
-    opc_be16_write(&body[6],  in->wlan1.channel);
-    body[8]  = in->wlan1.mode;
-    body[9]  = in->wlan1.bandwidth;
-    /* body[10..11] reserve */
-    /* WLAN#2: symmetric with WLAN#1 (FREQ then CH) per vendor clarification. */
-    opc_be16_write(&body[12], in->wlan2.freq_mhz);
-    opc_be16_write(&body[14], in->wlan2.channel);
+    /* WLAN#1 (Rev1.01): Mode, BW, SCAN Frequency Band, SCAN Channel List */
+    body[4] = in->wlan1.mode;
+    body[5] = in->wlan1.bandwidth;
+    opc_be16_write(&body[6],  in->wlan1.scan_band);
+    memcpy(&body[8], in->wlan1.scan_chlist, OPC_SCAN_CHLIST_LEN);
+    /* WLAN#2: same shape at +12 (Dual-only; Single carries invalid values) */
     body[16] = in->wlan2.mode;
     body[17] = in->wlan2.bandwidth;
-    /* body[18..19] reserve */
+    opc_be16_write(&body[18], in->wlan2.scan_band);
+    memcpy(&body[20], in->wlan2.scan_chlist, OPC_SCAN_CHLIST_LEN);
     return opc_frame_build(frame, cap, OPC_CMD_REQUEST, OPC_REQ_SET_RADIO_CONFIG, seq_no,
                            OPC_SET_RADIO_CONFIG_REQ_LENGTH, body, sizeof body);
 }
@@ -580,14 +578,14 @@ int opc_set_radio_config_req_unpack(const uint8_t *frame, size_t frame_len,
     if (body_len < OPC_SET_RADIO_CONFIG_REQ_BODY_LEN)            return -1;
     out->station_type     = opc_be16_read(&body[0]);
     out->priority_ch      = opc_be16_read(&body[2]);
-    out->wlan1.freq_mhz   = opc_be16_read(&body[4]);
-    out->wlan1.channel    = opc_be16_read(&body[6]);
-    out->wlan1.mode       = body[8];
-    out->wlan1.bandwidth  = body[9];
-    out->wlan2.freq_mhz   = opc_be16_read(&body[12]);
-    out->wlan2.channel    = opc_be16_read(&body[14]);
+    out->wlan1.mode       = body[4];
+    out->wlan1.bandwidth  = body[5];
+    out->wlan1.scan_band  = opc_be16_read(&body[6]);
+    memcpy(out->wlan1.scan_chlist, &body[8], OPC_SCAN_CHLIST_LEN);
     out->wlan2.mode       = body[16];
     out->wlan2.bandwidth  = body[17];
+    out->wlan2.scan_band  = opc_be16_read(&body[18]);
+    memcpy(out->wlan2.scan_chlist, &body[20], OPC_SCAN_CHLIST_LEN);
     return 0;
 }
 

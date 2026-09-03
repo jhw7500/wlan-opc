@@ -9,6 +9,7 @@
 #include "codec.h"
 #include "frame.h"
 #include "ids.h"
+#include "scan_chlist.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,15 +45,13 @@ typedef struct opc_date {
     uint8_t  day;
 } opc_date_t;
 
-/* SCAN Frequency Band (Rev1.01 §4.3.4/§4.3.8): 2.4GHz 0x0001 / 5GHz 0x0002 /
- * 6GHz 0x0006 / unset 0xFFFF. Exactly one band per WLAN. */
-#define OPC_SCAN_BAND_UNSET       0xFFFF
-#define OPC_SCAN_CHLIST_LEN       8      /* 64-bit channel bitmap, wire order */
+/* SCAN Frequency Band / SCAN Channel List constants and helpers (Rev1.01
+ * §4.3.4/§4.3.8) live in scan_chlist.h: OPC_SCAN_BAND_*, OPC_SCAN_BAND_UNSET,
+ * OPC_SCAN_CHLIST_LEN. */
 
 /* Per-WLAN radio block as seen in GetDeviceInfo Ack (full + measured state).
  * scan_band / scan_chlist echo the SetRadioConfig scan settings (Rev1.01);
- * scan_chlist is kept in wire byte order (8 raw bytes) — bit decoding lives
- * with SetRadioConfig, not here. */
+ * scan_chlist is kept in wire byte order (8 raw bytes). */
 typedef struct opc_wlan_radio_state {
     uint8_t  mac[6];
     uint8_t  mode;          /* OPC_WLAN_MODE_* */
@@ -67,12 +66,15 @@ typedef struct opc_wlan_radio_state {
     uint8_t  scan_chlist[OPC_SCAN_CHLIST_LEN];
 } opc_wlan_radio_state_t;
 
-/* Per-WLAN radio block as set in SetRadioConfig Req (config-only). */
+/* Per-WLAN radio block as set in SetRadioConfig Req (config-only, Rev1.01):
+ * no single FREQ/CH any more — the VHL names a band and a channel bitmap.
+ * A "configured frequency" (GetDeviceInfo config source, logs) is derived
+ * from these via opc_scan_derive_freq_ch(). */
 typedef struct opc_wlan_radio_cfg {
-    uint16_t freq_mhz;
-    uint16_t channel;       /* upper byte band, lower byte CH number */
-    uint8_t  mode;
-    uint8_t  bandwidth;
+    uint8_t  mode;          /* OPC_WLAN_MODE_*; 0xFF = invalid (Single WLAN#2) */
+    uint8_t  bandwidth;     /* OPC_BANDWIDTH_*; 0xFF = invalid (Single WLAN#2) */
+    uint16_t scan_band;     /* OPC_SCAN_BAND_* / OPC_SCAN_BAND_UNSET */
+    uint8_t  scan_chlist[OPC_SCAN_CHLIST_LEN];   /* wire byte order */
 } opc_wlan_radio_cfg_t;
 
 /* ========================================================================
@@ -374,19 +376,19 @@ int     opc_change_ip_address_ack_unpack(const uint8_t *frame, size_t frame_len,
                                          opc_change_ip_address_ack_t *out);
 
 /* ========================================================================
- * 0x1004 — SetRadioConfig
+ * 0x1004 — SetRadioConfig (Rev1.01 layout, Length 84)
  *
- * Body offset layout (20 B). WLAN#1 and WLAN#2 are now symmetric
- * (FREQ first, CH second) per vendor clarification of the spec.
- *    0   Station Type(2) + Priority CH(2)
- *    4   WLAN#1 FREQ(2) + WLAN#1 CH(2)
- *    8   WLAN#1 Mode(1) + WLAN#1 BW(1) + reserve(2)
- *   12   WLAN#2 FREQ(2) + WLAN#2 CH(2)
- *   16   WLAN#2 Mode(1) + WLAN#2 BW(1) + reserve(2)
+ * Body offset layout (28 B; frame = body + 64):
+ *    0   Station Type(2) + Priority CH(2)              (frame 64)
+ *    4   WLAN#1 Mode(1) + BW(1) + SCAN Frequency Band(2)   (frame 68)
+ *    8   WLAN#1 SCAN Channel List(8)                   (frame 72..79)
+ *   16   WLAN#2 Mode(1) + BW(1) + SCAN Frequency Band(2)   (frame 80)
+ *   20   WLAN#2 SCAN Channel List(8)                   (frame 84..91)
+ * Rev1.00 carried FREQ(2)/CH(2) per WLAN instead (Length 76) — removed.
  * ======================================================================== */
 
-#define OPC_SET_RADIO_CONFIG_REQ_BODY_LEN   20
-#define OPC_SET_RADIO_CONFIG_REQ_LENGTH     76   /* spec */
+#define OPC_SET_RADIO_CONFIG_REQ_BODY_LEN   28
+#define OPC_SET_RADIO_CONFIG_REQ_LENGTH     84   /* spec Rev1.01 */
 
 typedef struct opc_set_radio_config_req {
     uint16_t station_type;
