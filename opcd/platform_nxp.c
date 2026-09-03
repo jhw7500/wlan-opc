@@ -894,8 +894,9 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
                                   : OPC_WLAN_APPLY_TIMEOUT_MS;
 
     /* n == 0 only for an unsupported band (rejected upstream). An unset band
-     * renders the full supported channel set (no lock). Mode / bandwidth
-     * mapping is still deferred; only the freq list is wired. */
+     * renders the "none" sentinel (n==1) so opc_wlan_apply.sh clears freq_list
+     * entirely — no band lock (#111). Mode / bandwidth mapping is still
+     * deferred; only the freq list is wired. */
     if (n1 > 0) {
         int rc = run_opc_wlan_apply("mlan0", f1, NULL, per_call_ms);
         if (rc != 0) return rc;
