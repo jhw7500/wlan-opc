@@ -52,6 +52,7 @@ extern int      stub_apply_radio_last_w1_freq(void);
 extern int      stub_apply_radio_last_station(void);
 /* device-info live-link injection (freq-source toggle test) */
 extern void     stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch);
+extern void     stub_set_link_signal(int idx, bool rssi_valid, int8_t rssi, bool snr_valid, int8_t snr);
 extern void     stub_reset_link(void);
 
 #define ASSERT(cond, label) do {                                              \
@@ -1813,8 +1814,8 @@ int main(void)
         ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == LIVE_FREQ && c == LIVE_CH_ENC,
                "freq-src live + assoc -> live value (band-encoded)");
         stub_reset_link();
-        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == 0 && c == 0,
-               "freq-src live + not-assoc -> 0/0");
+        ASSERT(do_get_devinfo(&st, CIP, &f, &c, NULL, NULL) == 0 && f == 0xFFFF && c == 0xFFFF,
+               "freq-src live + not-assoc -> 0xFFFF/0xFFFF (Rev1.01 unset)");
 
         /* auto: associated -> live, not-assoc -> config */
         st.conf.device_info_freq_source = OPC_FREQ_SRC_AUTO;
@@ -2008,6 +2009,88 @@ int main(void)
         opc_store_async_destroy(sa);
         close(srv);
         close(cli);
+    }
+
+    /* 28(#103). Rev1.01 unset / invalid value conventions in GetDeviceInfo:
+     *     not associated → FREQ/CH 0xFFFF (live is the default source),
+     *     SNR/RSSI -128, Status 0x0000, AP MAC all-zero; never-configured
+     *     Mode/BW → 0xFF; Single station → Priority CH 0xFFFF and the whole
+     *     WLAN#2 block invalid (Mode/BW 0xFF, FREQ/CH 0xFFFF, Status 0xFFFF,
+     *     SNR/RSSI -128, MACs all-zero, SCAN band 0xFFFF, list all-zero). */
+    {
+        opc_get_device_info_ack_t ack;
+        static const uint8_t zero6[6] = {0};
+        static const uint8_t zero8[OPC_SCAN_CHLIST_LEN] = {0};
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_reset_link();
+        /* a) never configured, not associated */
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (unconfigured, not assoc)");
+        ASSERT(ack.wlan1.freq_mhz == 0xFFFF && ack.wlan1.channel == 0xFFFF, "28: not-assoc FREQ/CH = 0xFFFF");
+        ASSERT(ack.wlan1.snr == -128 && ack.wlan1.rssi == -128, "28: not-assoc SNR/RSSI = -128");
+        ASSERT(ack.wlan1.status == 0x0000, "28: not-assoc Status = 0x0000 (SCAN)");
+        ASSERT(memcmp(ack.wlan1.connect_ap_mac, zero6, 6) == 0, "28: not-assoc AP MAC = all-zero");
+        ASSERT(ack.wlan1.mode == 0xFF && ack.wlan1.bandwidth == 0xFF, "28: unconfigured Mode/BW = 0xFF");
+        ASSERT(ack.priority_ch == 0xFFFF, "28: single station Priority CH = 0xFFFF");
+        ASSERT(ack.wlan2.mode == 0xFF && ack.wlan2.bandwidth == 0xFF, "28: single WLAN#2 Mode/BW = 0xFF");
+        ASSERT(ack.wlan2.freq_mhz == 0xFFFF && ack.wlan2.channel == 0xFFFF, "28: single WLAN#2 FREQ/CH = 0xFFFF");
+        ASSERT(ack.wlan2.status == 0xFFFF, "28: single WLAN#2 Status = 0xFFFF");
+        ASSERT(ack.wlan2.snr == -128 && ack.wlan2.rssi == -128, "28: single WLAN#2 SNR/RSSI = -128");
+        ASSERT(memcmp(ack.wlan2.mac, zero6, 6) == 0 && memcmp(ack.wlan2.connect_ap_mac, zero6, 6) == 0,
+               "28: single WLAN#2 MACs = all-zero");
+        ASSERT(ack.wlan2.scan_band == OPC_SCAN_BAND_UNSET && memcmp(ack.wlan2.scan_chlist, zero8, sizeof zero8) == 0,
+               "28: single WLAN#2 SCAN = unset band, empty list");
+        /* b) configured (5 GHz ch36, 11AX/20MHz) but still not associated:
+         *    Mode/BW come from the config, FREQ/CH stay 0xFFFF (live default) */
+        (void)do_set_radio(&st, CIP, 5180, (uint16_t)((OPC_BAND_5GHZ << 8) | 36));
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (configured, not assoc)");
+        ASSERT(ack.wlan1.mode == OPC_WLAN_MODE_11AX && ack.wlan1.bandwidth == OPC_BANDWIDTH_20,
+               "28: configured Mode/BW reported");
+        ASSERT(ack.wlan1.freq_mhz == 0xFFFF && ack.wlan1.channel == 0xFFFF,
+               "28: configured but not assoc → FREQ/CH 0xFFFF (live default)");
+        /* c) associated → live FREQ/CH and Status, signal from the link */
+        stub_set_link(0, true, 5240, 48);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc)");
+        ASSERT(ack.wlan1.freq_mhz == 5240 && ack.wlan1.channel == (uint16_t)((OPC_BAND_5GHZ << 8) | 48),
+               "28: assoc FREQ/CH = live");
+        ASSERT(ack.wlan1.status == 0x0001, "28: assoc Status = 0x0001");
+        ASSERT(ack.wlan1.rssi == -55 && ack.wlan1.snr == 40, "28: assoc SNR/RSSI copied from the link, not the -128 marker");
+        /* d) associated but the link carries no frequency (link.json without
+         *    info.freq/channel): the live source must report unset, never 0/0
+         *    or a bandless raw channel (Codex, PR #112). */
+        stub_set_link(0, true, 0, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, no freq)");
+        ASSERT(ack.wlan1.freq_mhz == 0xFFFF && ack.wlan1.channel == 0xFFFF,
+               "28: assoc without live freq → FREQ/CH 0xFFFF");
+        ASSERT(ack.wlan1.status == 0x0001, "28: assoc without live freq still Status 0x0001");
+        /* e) associated with a frequency but no channel (link.json with
+         *    info.freq only): FREQ is real, CH must be the unset marker — never
+         *    the ambiguous bare 0x0000 that opc_chan_field() yields for ch 0
+         *    (Claude, PR #112). */
+        stub_set_link(0, true, 5220, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, freq only)");
+        ASSERT(ack.wlan1.freq_mhz == 5220, "28: assoc freq-only → FREQ live");
+        ASSERT(ack.wlan1.channel == 0xFFFF, "28: assoc freq-only → CH 0xFFFF, not 0x0000");
+        /* f) channel present but the frequency maps to no OPC band: a bandless
+         *    (band byte 0) CH is not a valid Rev1.01 value either → unset. */
+        stub_set_link(0, true, 4000, 44);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, bandless)");
+        ASSERT(ack.wlan1.channel == 0xFFFF, "28: assoc bandless freq → CH 0xFFFF, not 0x002C");
+        /* g) associated, RSSI read but channel_info noise absent: SNR keeps
+         *    the -128 invalid marker while RSSI is real (Codex, PR #112). */
+        stub_set_link(0, true, 5240, 48);
+        stub_set_link_signal(0, true, -61, false, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, no noise)");
+        ASSERT(ack.wlan1.rssi == -61, "28: assoc RSSI read → real value");
+        ASSERT(ack.wlan1.snr == -128, "28: assoc without noise → SNR -128, not 0");
+        /* h) associated but link.signal_avg absent/malformed: neither metric
+         *    was measured → both markers stay, Status still associated. */
+        stub_set_link(0, true, 5240, 48);
+        stub_set_link_signal(0, false, 0, false, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, no signal)");
+        ASSERT(ack.wlan1.snr == -128 && ack.wlan1.rssi == -128, "28: assoc without signal → SNR/RSSI -128, not 0/0");
+        ASSERT(ack.wlan1.status == 0x0001, "28: assoc without signal still Status 0x0001");
+        stub_reset_link();
     }
 
     /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).

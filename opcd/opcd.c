@@ -131,7 +131,7 @@ static void state_set_defaults(opcd_state_t *st)
     st->conf.roam_notify_port     = OPC_DEFAULT_ROAM_NOTIFY_PORT;
     st->conf.default_station_type = OPC_STATION_SINGLE;
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
-    st->conf.device_info_freq_source = OPC_FREQ_SRC_CONFIG;
+    st->conf.device_info_freq_source = OPC_FREQ_SRC_LIVE;   /* Rev1.01 §4.3.4 (#103) */
     st->conf.device_ip_iface         = OPC_IP_IFACE_ETH0;
     st->paths.conf        = OPC_PATH_CONF;
     st->paths.password    = OPC_PATH_PASSWORD;

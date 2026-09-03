@@ -1,5 +1,7 @@
 # 설계: device-info FREQ/CH 출처 토글 (`device_info_freq_source`)
 
+> **2026-09-04 갱신 (#103, Rev1.01):** 사양 Rev1.01 §4.3.4가 WLAN#1/2 FREQ/CH를 "액세스 포인트 접속 시의 주파수"(접속값), 미접속 시 0xFFFF로 확정했다(G11 회신 대체). 따라서 **출하 기본은 `live`**(enum 값 0, 미접속 0xFFFF/0xFFFF)이고, `auto`(접속값, 미접속 시 설정 파생값·없으면 0xFFFF)와 `config`(Rev1.00 해석: SetRadioConfig 대역+채널목록에서 파생한 최저 채널, 없으면 0xFFFF)는 옵션으로 남는다. 아래 본문의 "출하 기본 = config" 서술은 Rev1.00 시점 기록이다.
+
 > 작성일: 2026-06-19 · 작성: wlan-opc 팀
 > 상태: **설계 승인 → 구현 계획 대기**
 > 관련: `docs/spec/opc_vhl_protocol_Rev1.00_KO.md` §3.3.4(:470/:745), `docs/spec-inquiry/spec-inquiry.md` G11,

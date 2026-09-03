@@ -10,9 +10,11 @@
 |---|---|---|---|
 | 설정(radio.conf) | 5180 | `0x0224` | 5GHz ch36 → `0x02<<8 \| 0x24` |
 | 접속(live, AP FXE3000_JHW) | 5240 | `0x0230` | `opc_chan_field(5240,48)` = `0x02<<8 \| 48` |
-| 미접속(live) | 0 | `0x0000` | associated=false → 0/0 |
+| 미접속(live) | 0xFFFF | `0xFFFF` | associated=false → 미설정값(Rev1.01 §4.2.2, #103) |
 
-동작(`handler.c` `select_devinfo_freq_ch`): CONFIG → radio.conf 캐시(5180/0x0224) / LIVE·AUTO+접속 → `freq=live` + `ch=opc_chan_field()`(0x0230) / LIVE+미접속 → 0/0 / AUTO+미접속 → 설정값.
+동작(`handler.c` `select_devinfo_freq_ch`): CONFIG → 설정 파생값(SetRadioConfig 대역+채널 목록의 최저 채널, 5180/0x0224) / LIVE·AUTO+접속 → `freq=live` + `ch=opc_chan_field()`(0x0230) / LIVE+미접속(또는 접속이나 링크에 주파수 없음) → 0xFFFF/0xFFFF / AUTO+미접속 → 설정 파생값(없으면 0xFFFF).
+
+> **2026-09-04 (#103, Rev1.01):** 출하 기본이 `config` → **`live`**로 바뀌었다. 아래 절차의 "기본(config)" 서술과 7a의 0/0 기대값은 Rev1.00 시점 기록이며, 현재 기대값은 이 표와 §기대결과 요약을 따른다.
 
 ## 1. 베이스라인 (VHL 호스트=pim-camera)
 ```bash
@@ -75,7 +77,7 @@ wlan1.channel    @294 ( 2B): 02 30  = 0x0230   (band 0x02=5GHz | ch 0x30=48)
 ssh wlan-target "wpa_cli -i mlan0 disconnect; wpa_cli -i mlan0 status | grep wpa_state"   # DISCONNECTED/SCANNING
 
 # 7a. live + 미접속 (모드는 §4에서 live 유지)
-vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout   # 기대 freq=0 ch=0x0000
+vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout   # 기대 freq=65535 ch=0xffff (SNR/RSSI -128, status 0)
 
 # 7b. auto + 미접속
 ssh wlan-target "sed -i '/^[[:space:]]*device_info_freq_source[[:space:]]*=/d' /usr/local/opc/etc/opc.conf; printf 'device_info_freq_source = auto\n' >> /usr/local/opc/etc/opc.conf; systemctl restart opcd"
@@ -98,7 +100,7 @@ vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout 
 | 4 | live | 접속 | 5240 | `0x0230` |
 | 5 | auto | 접속 | 5240 | `0x0230` |
 | 6 | live `--hex` | 접속 | `14 78` | `02 30` |
-| 7a | live | 미접속 | 0 | `0x0000` |
+| 7a | live | 미접속 | 65535 (0xFFFF) | `0xFFFF` |
 | 7b | auto | 미접속 | 5180 | `0x0224` |
 | 8 | 백업복원 | 접속 | §1과 동일 | — |
 
@@ -109,4 +111,4 @@ vhl login --password MyPassword; vhl device-info | grep -i "WLAN#1"; vhl logout 
 4. **AP 절단은 `wpa_cli -i mlan0 disconnect`만** — `iw … disconnect`는 wpa_supplicant SME 소유라 "Operation not permitted". 종료 시 `reconnect` 복구 필수.
 5. **판독** — ch는 항상 `band<<8|ch`(0x0224=5GHz/ch36, 0x0230=5GHz/ch48), freq는 raw MHz. DUAL wlan2 예: 5745/ch149 → `0x0295`.
 6. **이 토글은 freq/ch만 좌우** — mode/bw/essid/RSSI는 무관(항상 live 우선).
-7. **원복 후 §1 재확인 필수** — 출하 기본(config) 동작 무변화 입증.
+7. **원복 후 §1 재확인 필수** — 출하 기본(Rev1.01 이후 `live`; 키 제거 = live) 동작 확인.

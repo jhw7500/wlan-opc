@@ -5,15 +5,15 @@
 
 opcd_freq_source_t opcd_freq_source_from_token(const char *val)
 {
-    if (!val) return OPC_FREQ_SRC_CONFIG;
-    if (strcmp(val, "live") == 0) return OPC_FREQ_SRC_LIVE;
-    if (strcmp(val, "auto") == 0) return OPC_FREQ_SRC_AUTO;
-    return OPC_FREQ_SRC_CONFIG;   /* "config" and anything unrecognized */
+    if (!val) return OPC_FREQ_SRC_LIVE;
+    if (strcmp(val, "config") == 0) return OPC_FREQ_SRC_CONFIG;   /* legacy Rev1.00 */
+    if (strcmp(val, "auto") == 0)   return OPC_FREQ_SRC_AUTO;
+    return OPC_FREQ_SRC_LIVE;     /* "live" and anything unrecognized (Rev1.01 default) */
 }
 
 opcd_freq_source_t opcd_freq_source_parse(const char *conf_path)
 {
-    opcd_freq_source_t src = OPC_FREQ_SRC_CONFIG;
+    opcd_freq_source_t src = OPC_FREQ_SRC_LIVE;
     if (!conf_path) return src;
     FILE *f = fopen(conf_path, "r");
     if (!f) return src;                        /* no conf file → default */

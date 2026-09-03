@@ -127,7 +127,21 @@ void stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch)
     s_link[idx].associated = assoc;
     s_link[idx].freq_mhz   = freq;
     s_link[idx].channel    = ch;
+    /* An associated stub link carries a fully measured signal by default;
+     * stub_set_link_signal() overrides it to model partial readbacks. */
+    if (assoc) {
+        s_link[idx].rssi = -55; s_link[idx].rssi_valid = true;
+        s_link[idx].snr  =  40; s_link[idx].snr_valid  = true;
+    }
     s_link_set[idx] = true;
+}
+
+void stub_set_link_signal(int idx, bool rssi_valid, int8_t rssi,
+                          bool snr_valid, int8_t snr)
+{
+    if (idx < 0 || idx > 1) return;
+    s_link[idx].rssi_valid = rssi_valid; s_link[idx].rssi = rssi;
+    s_link[idx].snr_valid  = snr_valid;  s_link[idx].snr  = snr;
 }
 
 void stub_reset_link(void) { s_link_set[0] = s_link_set[1] = false; }

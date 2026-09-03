@@ -557,19 +557,59 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
  * value (0/0 when not associated); AUTO → live when associated, else config.
  * Live channel arrives as a raw channel number (no band byte) and is encoded to
  * the OPC band<<8|ch wire form via opc_chan_field(). */
+/* Rev1.01 §4.2.2 / §4.3.4 fill for a WLAN that is not associated: FREQ/CH
+ * unset, signal invalid (-128), no AP, Status = scanning. Mode/BW and the SCAN
+ * fields are set by the caller from the configuration. */
+static void devinfo_wlan_unassociated(opc_wlan_radio_state_t *w)
+{
+    w->freq_mhz = OPC_WLAN_FREQ_UNSET;
+    w->channel  = OPC_WLAN_CH_UNSET;
+    w->status   = 0x0000;
+    w->snr      = OPC_WLAN_SIGNAL_INVALID;
+    w->rssi     = OPC_WLAN_SIGNAL_INVALID;
+    memset(w->connect_ap_mac, 0, sizeof w->connect_ap_mac);
+}
+
+/* Single station: the whole WLAN#2 block carries invalid values. */
+static void devinfo_wlan_invalid(opc_wlan_radio_state_t *w)
+{
+    memset(w, 0, sizeof *w);
+    w->mode      = OPC_WLAN_MODE_UNSET;
+    w->bandwidth = OPC_BANDWIDTH_UNSET;
+    w->freq_mhz  = OPC_WLAN_FREQ_UNSET;
+    w->channel   = OPC_WLAN_CH_UNSET;
+    w->status    = OPC_WLAN_STATUS_INVALID;
+    w->snr       = OPC_WLAN_SIGNAL_INVALID;
+    w->rssi      = OPC_WLAN_SIGNAL_INVALID;
+    w->scan_band = OPC_SCAN_BAND_UNSET;
+}
+
 static void select_devinfo_freq_ch(opcd_freq_source_t src, bool assoc,
                                    uint16_t live_freq, uint16_t live_ch,
                                    uint16_t cfg_freq, uint16_t cfg_ch,
                                    uint16_t *out_freq, uint16_t *out_ch)
 {
-    bool use_live = (src == OPC_FREQ_SRC_LIVE) ||
-                    (src == OPC_FREQ_SRC_AUTO && assoc);
-    if (use_live && assoc) {
+    /* An association whose link readback carries no frequency (link.json
+     * without info.freq/channel) has no live value to report: LIVE then
+     * yields the unset marker, never 0/0 or a bandless raw channel, and AUTO
+     * falls back to the configured value (Codex, PR #112). */
+    const bool live_ok  = assoc && live_freq != 0;
+    const bool use_live = (src == OPC_FREQ_SRC_LIVE) ||
+                          (src == OPC_FREQ_SRC_AUTO && live_ok);
+    if (use_live && live_ok) {
+        /* FREQ is the live value; CH only when it is band-qualified. A link
+         * with a frequency but no channel (or a frequency outside every OPC
+         * band) has no valid Rev1.01 CH — report the unset marker rather than
+         * the bare 0x0000 / bandless field opc_chan_field() yields
+         * (Claude, PR #112). */
+        const uint16_t ch_field = opc_chan_field(live_freq, live_ch);
         *out_freq = live_freq;
-        *out_ch   = opc_chan_field(live_freq, live_ch);
-    } else if (use_live) {            /* LIVE + not associated → no association */
-        *out_freq = 0;
-        *out_ch   = 0;
+        *out_ch   = (ch_field >> 8) != 0 ? ch_field : OPC_WLAN_CH_UNSET;
+    } else if (use_live || cfg_freq == 0) {
+        /* LIVE without a usable live value, or nothing configured to fall
+         * back on: Rev1.01 unset value (§4.2.2), not 0. */
+        *out_freq = OPC_WLAN_FREQ_UNSET;
+        *out_ch   = OPC_WLAN_CH_UNSET;
     } else {                          /* CONFIG, or AUTO while not associated */
         *out_freq = cfg_freq;
         *out_ch   = cfg_ch;
@@ -646,38 +686,47 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
              * reused for wlan2 below, so the values must be saved here). */
             bool w1_assoc = false, w2_assoc = false;
             uint16_t w1_lfreq = 0, w1_lch = 0, w2_lfreq = 0, w2_lch = 0;
-            if (plat->get_link(0, &link) == 0) {
+            /* Rev1.01: until the link proves associated, the measured fields
+             * carry the unset/invalid markers (FREQ/CH 0xFFFF, SNR/RSSI -128,
+             * AP MAC all-zero, Status = scanning). A link that cannot be read
+             * is reported the same way. */
+            devinfo_wlan_unassociated(&ack.wlan1);
+            if (plat->get_link(0, &link) == 0 && link.associated) {
                 memcpy(ack.wlan1.connect_ap_mac, link.bssid, 6);
-                ack.wlan1.snr    = link.snr;
-                ack.wlan1.rssi   = link.rssi;
-                ack.wlan1.status = link.associated ? 0x0001 : 0x0000;
-                w1_assoc = link.associated;
+                /* A metric the platform could not read keeps the -128
+                 * invalid marker; 0 would look like a measurement
+                 * (Codex, PR #112). */
+                if (link.snr_valid)  ack.wlan1.snr  = link.snr;
+                if (link.rssi_valid) ack.wlan1.rssi = link.rssi;
+                ack.wlan1.status = 0x0001;
+                w1_assoc = true;
                 w1_lfreq = link.freq_mhz;
                 w1_lch   = link.channel;
-                if (link.associated && link.mode != 0) {
+                if (link.mode != 0) {
                     ack.wlan1.mode = link.mode;
                     w1_mode_live = true;
                 }
-                if (link.associated && link.bandwidth_valid) {
+                if (link.bandwidth_valid) {
                     ack.wlan1.bandwidth = link.bandwidth;
                     w1_bw_live = true;
                 }
             }
             if (st->radio.station_type == OPC_STATION_DUAL) {
                 (void)plat->get_wlan_mac(1, ack.wlan2.mac);
-                if (plat->get_link(1, &link) == 0) {
+                devinfo_wlan_unassociated(&ack.wlan2);
+                if (plat->get_link(1, &link) == 0 && link.associated) {
                     memcpy(ack.wlan2.connect_ap_mac, link.bssid, 6);
-                    ack.wlan2.snr    = link.snr;
-                    ack.wlan2.rssi   = link.rssi;
-                    ack.wlan2.status = link.associated ? 0x0001 : 0x0000;
-                    w2_assoc = link.associated;
+                    if (link.snr_valid)  ack.wlan2.snr  = link.snr;
+                    if (link.rssi_valid) ack.wlan2.rssi = link.rssi;
+                    ack.wlan2.status = 0x0001;
+                    w2_assoc = true;
                     w2_lfreq = link.freq_mhz;
                     w2_lch   = link.channel;
-                    if (link.associated && link.mode != 0) {
+                    if (link.mode != 0) {
                         ack.wlan2.mode = link.mode;
                         w2_mode_live = true;
                     }
-                    if (link.associated && link.bandwidth_valid) {
+                    if (link.bandwidth_valid) {
                         ack.wlan2.bandwidth = link.bandwidth;
                         w2_bw_live = true;
                     }
@@ -690,7 +739,10 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             session_touch(st);
             ack.device_status = st->boot_status;
             ack.station_type  = effective_station_type(st);
-            ack.priority_ch   = st->radio.priority_ch;
+            /* Priority CH is Dual-only; Single (and a never-configured Dual)
+             * reports the unset value (Rev1.01 §4.3.4). */
+            ack.priority_ch   = (ack.station_type == OPC_STATION_DUAL && st->radio.priority_ch != 0)
+                                ? st->radio.priority_ch : OPC_PRIORITY_CH_UNSET;
             /* Rev1.01 SCAN Frequency Band / SCAN Channel List echo the committed
              * SetRadioConfig (a never-configured band reads as unset). The
              * "configured frequency" source of the FREQ/CH toggle is derived from
@@ -703,9 +755,16 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             select_devinfo_freq_ch(st->conf.device_info_freq_source, w1_assoc,
                                    w1_lfreq, w1_lch, w1_cfreq, w1_cch,
                                    &ack.wlan1.freq_mhz, &ack.wlan1.channel);
-            if (!w1_mode_live) ack.wlan1.mode      = st->radio.wlan1.mode;
-            if (!w1_bw_live)   ack.wlan1.bandwidth = st->radio.wlan1.bandwidth;
-            ack.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+            /* Mode/BW: live when associated, else the SetRadioConfig value; a
+             * never-configured WLAN (mode 0 — every valid request sets a mode,
+             * and BANDWIDTH_20 == 0 is a real value) reports the unset marker. */
+            const bool w1_cfg = st->radio.wlan1.mode != 0;
+            if (!w1_mode_live) ack.wlan1.mode      = w1_cfg ? st->radio.wlan1.mode      : OPC_WLAN_MODE_UNSET;
+            if (!w1_bw_live)   ack.wlan1.bandwidth = w1_cfg ? st->radio.wlan1.bandwidth : OPC_BANDWIDTH_UNSET;
+            if (ack.station_type != OPC_STATION_DUAL) {
+                /* Single station: the whole WLAN#2 block is invalid. */
+                devinfo_wlan_invalid(&ack.wlan2);
+            }
             if (ack.station_type == OPC_STATION_DUAL) {
                 uint16_t w2_cfreq = 0, w2_cch = 0;
                 ack.wlan2.scan_band = opc_scan_band_or_unset(st->radio.wlan2.scan_band);
@@ -714,8 +773,9 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                 select_devinfo_freq_ch(st->conf.device_info_freq_source, w2_assoc,
                                        w2_lfreq, w2_lch, w2_cfreq, w2_cch,
                                        &ack.wlan2.freq_mhz, &ack.wlan2.channel);
-                if (!w2_mode_live) ack.wlan2.mode      = st->radio.wlan2.mode;
-                if (!w2_bw_live)   ack.wlan2.bandwidth = st->radio.wlan2.bandwidth;
+                const bool w2_cfg = st->radio.wlan2.mode != 0 && st->radio.wlan2.mode != OPC_WLAN_MODE_UNSET;
+                if (!w2_mode_live) ack.wlan2.mode      = w2_cfg ? st->radio.wlan2.mode      : OPC_WLAN_MODE_UNSET;
+                if (!w2_bw_live)   ack.wlan2.bandwidth = w2_cfg ? st->radio.wlan2.bandwidth : OPC_BANDWIDTH_UNSET;
             }
         }
     }

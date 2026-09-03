@@ -57,8 +57,12 @@ typedef struct opcd_platform_link {
                                * collides with the zero-init default) */
     bool     bandwidth_valid; /* bandwidth holds a real driver value   */
     uint8_t  bssid[6];        /* zeros when not associated */
-    int8_t   snr;             /* dB                 */
-    int8_t   rssi;            /* dBm                */
+    int8_t   snr;             /* dB;  only valid if snr_valid  */
+    int8_t   rssi;            /* dBm; only valid if rssi_valid */
+    bool     snr_valid;       /* snr was measured (rssi and noise both read);
+                               * 0 dB is a plausible figure, so absence needs
+                               * a flag, not a sentinel                     */
+    bool     rssi_valid;      /* rssi was read from the driver              */
     bool     associated;
 } opcd_platform_link_t;
 

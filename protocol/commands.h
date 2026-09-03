@@ -49,6 +49,17 @@ typedef struct opc_date {
  * §4.3.4/§4.3.8) live in scan_chlist.h: OPC_SCAN_BAND_*, OPC_SCAN_BAND_UNSET,
  * OPC_SCAN_CHLIST_LEN. */
 
+/* Rev1.01 §4.2.2 / §4.3.4 unset ("미설정값") and invalid markers for the
+ * GetDeviceInfo radio block: not associated → FREQ/CH 0xFFFF, SNR/RSSI -128,
+ * Connect AP MAC all-zero, Status 0x0000; Single-station WLAN#2 → the whole
+ * block invalid (Mode/BW 0xFF, FREQ/CH 0xFFFF, Status 0xFFFF, SNR/RSSI -128,
+ * MACs all-zero, SCAN band 0xFFFF, list all-zero); Priority CH 0xFFFF. */
+#define OPC_WLAN_FREQ_UNSET        0xFFFF
+#define OPC_WLAN_CH_UNSET          0xFFFF
+#define OPC_WLAN_STATUS_INVALID    0xFFFF
+#define OPC_WLAN_SIGNAL_INVALID    (-128)
+#define OPC_PRIORITY_CH_UNSET      0xFFFF
+
 /* Per-WLAN radio block as seen in GetDeviceInfo Ack (full + measured state).
  * scan_band / scan_chlist echo the SetRadioConfig scan settings (Rev1.01);
  * scan_chlist is kept in wire byte order (8 raw bytes). */

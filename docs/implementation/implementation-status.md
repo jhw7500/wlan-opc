@@ -42,7 +42,7 @@
 | Memory(0x0002) | swapless 타깃이라 사양 정의(페이징) 성립 불가 → **의도적 미발행**(Disk I/O로 일원화) | 확정(코드 변경 불요) | `fault_probe.c` |
 | capability 비트 | `device_info.json` 정적값(전부 1=추정) vs silicon 실광고 미검증 | #35 — 고객사 문의 | `inventory.c` |
 | 0x0018 / gateway | 0x0018(비정상 boundary NG) 벤더 확정 대기 / gateway는 #27로 **의도적 미적용**(브릿지) | #35(A17) / #27(확정) | `handler.c`, `platform_nxp.c:886-889` |
-| **G11** device-info FREQ/CH | §3.3.4 "설정 주파수"(설정값) vs 운영상 접속값 — `device_info_freq_source` 토글(config/live/auto) 구현·**출하 기본 config**(동작 무변화). 표준 의미(설정/접속) 확정 대기 | spec-inquiry G11/letter Q20 — 발주처 회신(회신 시 기본값만 전환, 코드 무변경) | `freq_source.{c,h}`, `handler.c`(select_devinfo_freq_ch) |
+| ~~**G11** device-info FREQ/CH~~ | **Rev1.01 §4.3.4로 확정(2026-08-06): 접속 시 주파수(접속값), 미접속 0xFFFF** → #103에서 출하 기본 `live`로 전환, `config`(Rev1.00 해석)·`auto`는 옵션 유지 | 종결 (#103, 2026-09-04) | `freq_source.{c,h}`, `handler.c`(select_devinfo_freq_ch) |
 
 ---
 
@@ -60,7 +60,7 @@
 |---|---|---|
 | #101 | GetDeviceInfo 응답 WLAN#1/#2 블록 오프셋 정정(프레임 284/344 → 288/352) + SCAN Frequency Band·SCAN Channel List 필드 추가(미설정값 0xFFFF / ALL 0 에코) | **완료** — `test_codec` 절대 오프셋 단언, `fielddump`·스냅샷·vhlctl 동기 |
 | #102 | SetRadioConfig 요구 레이아웃 재정의(Length 76→84, SCAN Band + 64bit Channel List) | **완료** — `protocol/scan_chlist.{c,h}` 비트맵 헬퍼(워드 순서 가정 1곳 격리·관용 디코드), 검증 0x0011/0x0012 재정의, 비트맵→MHz 목록 적용, 동일 설정 재전송 시 apply 생략, radio.conf 옛 16B 포맷 변환, vhlctl `--w1-band/--w1-chlist` |
-| #103 | 미설정·미접속·무효값 규약(0xFFFF/0xFF/-128/ALL 0) + `device_info_freq_source` 기본값 | 미착수 (#101·#102 의존) |
+| #103 | 미설정·미접속·무효값 규약(0xFFFF/0xFF/-128/ALL 0) + `device_info_freq_source` 기본값 | **완료** — 미접속 FREQ/CH 0xFFFF·SNR/RSSI -128·AP MAC 0·Status 0, 미설정 Mode/BW 0xFF, Single Priority CH 0xFFFF + WLAN#2 블록 전체 무효값; `device_info_freq_source` 기본 **live**(enum 0), `config`는 레거시 옵션. 테스트 25/28, `test_freq_source` |
 | #104 | 재송(Retry) 응답 SN: 재송 폐기·원 요구 SN 응답 | 미착수 |
 | #105 | Indication Period 내 마지막 상태만 통지(coalesce) | 미착수 |
 | #106 | Dual 링크별 통지 — 링크 식별 방식 발주처 문의 선행 | 차단 |

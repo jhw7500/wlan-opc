@@ -1,7 +1,7 @@
 /* Host unit test for the pure opc.conf device_info_freq_source parser
  * (opcd/freq_source.{c,h}). Extracted from opcd.c so it links without main().
- * Covers the gap flagged in PR #60 review: unknown token → CONFIG, duplicate
- * key → last wins, missing file → CONFIG. */
+ * Covers the gap flagged in PR #60 review: unknown token → LIVE (Rev1.01
+ * default, #103), duplicate key → last wins, missing file → LIVE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,18 +31,18 @@ int main(void)
     ASSERT(opcd_freq_source_from_token("config") == OPC_FREQ_SRC_CONFIG, "token config");
     ASSERT(opcd_freq_source_from_token("live")   == OPC_FREQ_SRC_LIVE,   "token live");
     ASSERT(opcd_freq_source_from_token("auto")   == OPC_FREQ_SRC_AUTO,   "token auto");
-    ASSERT(opcd_freq_source_from_token("bogus")  == OPC_FREQ_SRC_CONFIG, "token unknown -> config");
-    ASSERT(opcd_freq_source_from_token("")       == OPC_FREQ_SRC_CONFIG, "token empty -> config");
-    ASSERT(opcd_freq_source_from_token(NULL)     == OPC_FREQ_SRC_CONFIG, "token NULL -> config");
-    ASSERT(opcd_freq_source_from_token("AUTO")   == OPC_FREQ_SRC_CONFIG, "token case-sensitive -> config");
+    ASSERT(opcd_freq_source_from_token("bogus")  == OPC_FREQ_SRC_LIVE, "token unknown -> live");
+    ASSERT(opcd_freq_source_from_token("")       == OPC_FREQ_SRC_LIVE, "token empty -> live");
+    ASSERT(opcd_freq_source_from_token(NULL)     == OPC_FREQ_SRC_LIVE, "token NULL -> live");
+    ASSERT(opcd_freq_source_from_token("AUTO")   == OPC_FREQ_SRC_LIVE, "token case-sensitive -> live");
 
     /* ---- file parser ---- */
     snprintf(g_path, sizeof g_path, "test_freq_source_%d.tmp", (int)getpid());
     unlink(g_path);
 
-    ASSERT(opcd_freq_source_parse("/nonexistent_dir/opc.conf") == OPC_FREQ_SRC_CONFIG,
-           "missing file -> config");
-    ASSERT(opcd_freq_source_parse(NULL) == OPC_FREQ_SRC_CONFIG, "NULL path -> config");
+    ASSERT(opcd_freq_source_parse("/nonexistent_dir/opc.conf") == OPC_FREQ_SRC_LIVE,
+           "missing file -> live");
+    ASSERT(opcd_freq_source_parse(NULL) == OPC_FREQ_SRC_LIVE, "NULL path -> live");
 
     write_conf("device_info_freq_source = live\n");
     ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_LIVE, "file live");
@@ -58,7 +58,7 @@ int main(void)
 
     /* unrelated key + commented line ignored -> default config */
     write_conf("congestion_threshold_pct = 80\n# device_info_freq_source = live\n");
-    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG, "other-key/comment ignored -> config");
+    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_LIVE, "other-key/comment ignored -> live");
 
     /* duplicate key -> last wins */
     write_conf("device_info_freq_source = live\ndevice_info_freq_source = auto\n");
@@ -66,12 +66,12 @@ int main(void)
 
     /* unknown value -> config fallback */
     write_conf("device_info_freq_source = bogus\n");
-    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG, "unknown value -> config");
+    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_LIVE, "unknown value -> live");
 
     /* '#' inline comment with NO space: %63s takes "auto#x" as the token →
      * unknown → config (documented edge; a space before '#' avoids it). */
     write_conf("device_info_freq_source = auto#nospace\n");
-    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG, "value#comment no-space -> config");
+    ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_LIVE, "value#comment no-space -> live");
     write_conf("device_info_freq_source = auto # spaced comment\n");
     ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_AUTO, "value + spaced #comment -> auto");
 
@@ -83,8 +83,8 @@ int main(void)
         memset(buf, '#', 159);
         strcpy(buf + 159, "device_info_freq_source = live\n");
         write_conf(buf);
-        ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_CONFIG,
-               "over-long line tail not parsed -> config");
+        ASSERT(opcd_freq_source_parse(g_path) == OPC_FREQ_SRC_LIVE,
+               "over-long line tail not parsed -> live");
     }
 
     unlink(g_path);
