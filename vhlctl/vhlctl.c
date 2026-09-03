@@ -456,11 +456,19 @@ static int cmd_set_radio(int argc, char **argv)
     const char *w2_hex_s   = opt_value(argc, argv, "--w2-chlist-hex", "");
     const char *w2_mode_s  = opt_value(argc, argv, "--w2-mode",  "0xff");
     const char *w2_bw_s    = opt_value(argc, argv, "--w2-bw",    "0xff");
-    const char *prio_s     = opt_value(argc, argv, "--priority", "0xffff");
+    const char *prio_s     = opt_value(argc, argv, "--priority", "auto");
     opc_set_radio_config_req_t req; memset(&req, 0, sizeof req);
     req.station_type = !strcmp(station_s, "dual") ? OPC_STATION_DUAL : OPC_STATION_SINGLE;
-    req.priority_ch  = (uint16_t)strtoul(prio_s, NULL, 0);
     req.wlan1.scan_band = parse_scan_band(w1_band_s);
+    /* --priority auto (default): Single → 0xFFFF (unset, per spec); Dual →
+     * WLAN#1's band, band-only (CH 0xFF) — a Dual request must carry a valid
+     * priority band or the device answers 0x0012. Explicit HEX is taken as is. */
+    if (!strcmp(prio_s, "auto"))
+        req.priority_ch = (req.station_type == OPC_STATION_DUAL)
+                          ? (uint16_t)(((req.wlan1.scan_band & 0xFFu) << 8) | 0xFFu)
+                          : 0xFFFF;
+    else
+        req.priority_ch = (uint16_t)strtoul(prio_s, NULL, 0);
     if (parse_scan_chlist(w1_list_s, w1_hex_s, req.wlan1.scan_band, req.wlan1.scan_chlist) != 0) return 2;
     req.wlan1.mode      = (uint8_t) strtoul(w1_mode_s, NULL, 0);
     req.wlan1.bandwidth = (uint8_t) strtoul(w1_bw_s,   NULL, 0);

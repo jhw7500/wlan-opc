@@ -1042,13 +1042,15 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             /* §4.3.8 0x0012: a SCAN Channel List bit outside the band's table
              * (or a list without a band), or a bad Priority CH (Dual only, A16). */
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_CH;
-        } else if (!radio_cfg_differs(&req, &st->radio) &&
+        } else if (st->radio_committed && !radio_cfg_differs(&req, &st->radio) &&
                    !ack_pending_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
-            /* Identical to the committed config and no ack in flight: nothing
-             * to apply or persist. Skipping the apply spares a wpa_supplicant
-             * reconfigure (link drop) on a VHL re-send; the requested state
-             * already holds. (With an ack in flight it is an A19 retransmission
-             * and goes through persist_radio's discard logic instead.) */
+            /* Identical to a COMMITTED (applied + persisted) config and no ack
+             * in flight: nothing to apply or persist. Skipping the apply spares
+             * a wpa_supplicant reconfigure (link drop) on a VHL re-send; the
+             * requested state already holds. An uncommitted match (NVRAM write
+             * failed, or a boot default never applied) takes the normal path.
+             * (With an ack in flight it is an A19 retransmission and goes
+             * through persist_radio's discard logic instead.) */
             fprintf(stderr, "opcd: set_radio: request equals committed config — apply skipped\n");
             session_touch(st);
         } else {
@@ -1082,13 +1084,18 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
             } else {
                 st->radio = req;
+                st->radio_committed = false;   /* until the NVRAM write lands */
                 bool deferred = false;
                 if (persist_radio(st, ip, port, seq, &deferred) != 0) {
+                    /* Applied but not persisted: stays uncommitted so an
+                     * identical retry re-applies and re-persists (Codex P1). */
                     result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
                 } else if (deferred) {
                     session_touch(st);
                     *rlen = 0;   /* ack follows the NVRAM completion */
                     return 0;
+                } else {
+                    st->radio_committed = true;
                 }
             }
             session_touch(st);
@@ -1423,6 +1430,9 @@ void opcd_store_async_on_ready(opcd_state_t *st)
             break;
         }
         case OPC_REQ_SET_RADIO_CONFIG: {
+            /* The deferred write decides whether st->radio is committed; a
+             * failed write leaves it uncommitted so the retry re-persists. */
+            st->radio_committed = (done[i].result == 0);
             opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
             emit_ack(&rlen, opc_set_radio_config_ack_pack(resp, sizeof resp, pa->seq, &ack));
             break;

@@ -92,6 +92,11 @@ typedef struct opcd_state {
     /* Persistent app state. */
     char     password[128];
     opc_set_radio_config_req_t radio;
+    /* True once `radio` has been applied AND its NVRAM write completed (or it
+     * was loaded from radio.conf). Gates the identical-request shortcut in
+     * handle_set_radio_config: a config whose persist failed must be re-done
+     * on retry, not acknowledged as "already there" (#102). */
+    bool     radio_committed;
     opcd_ip_list_t ip_list;
 
     /* SetRadioConfig apply-failure revert, DEFERRED past the NG ack (D9): a

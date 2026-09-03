@@ -1401,6 +1401,7 @@ int main(void)
                "async set-radio: completion signalled");
         opcd_store_async_on_ready(&st);
         ASSERT(wait_fd_readable(cli, 5000) == 0, "async set-radio: ack arrived");
+        ASSERT(st.radio_committed, "async set-radio: committed once the write completed");
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         opc_set_radio_config_ack_t rack;
         ASSERT(rn > 0 &&
@@ -1891,6 +1892,54 @@ int main(void)
         ASSERT(out.wlan2.scan_band == OPC_SCAN_BAND_UNSET && opc_scan_list_empty(out.wlan2.scan_chlist),
                "decode: legacy wlan2 (freq 0) → unset band, empty list");
         ASSERT(opcd_radio_conf_decode(legacy, 20, &out) == -1, "decode: unknown size → -1");
+    }
+
+    /* 26c(#102). The identical-request shortcut applies only to a COMMITTED
+     *     config. A matching but uncommitted state (never applied) must still
+     *     reach the platform; once committed, the same request is skipped. */
+    {
+        opc_set_radio_config_req_t req;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        memset(&req, 0, sizeof req);
+        req.station_type    = OPC_STATION_SINGLE;
+        req.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        req.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        req.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+        req.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        req.wlan2.mode = 0xFF; req.wlan2.bandwidth = 0xFF;
+        st.radio = req;                       /* matches, but never applied */
+        st.radio_committed = false;
+        stub_apply_radio_reset_calls();
+        ASSERT(do_set_radio_req(&st, CIP, &req) == OPC_RESULT_OK && stub_apply_radio_calls() == 1,
+               "matching but uncommitted config → applied, not skipped");
+        ASSERT(st.radio_committed, "sync persist → committed");
+        ASSERT(do_set_radio_req(&st, CIP, &req) == OPC_RESULT_OK && stub_apply_radio_calls() == 1,
+               "matching committed config → skipped");
+    }
+
+    /* 26d(#102, Codex P1). A request whose NVRAM write fails is applied but NOT
+     *     committed: the identical retry must run apply + persist again instead
+     *     of taking the shortcut (which would drop the config on reboot). */
+    {
+        char bad_path[160];
+        snprintf(bad_path, sizeof bad_path, "no_such_dir_%d/radio", (int)getpid());
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        st.paths.radio = bad_path;
+        stub_apply_radio_reset_calls();
+        uint16_t r = do_set_radio(&st, CIP, 5180, 36);
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_NVRAM, "persist failure → NG 0x0004");
+        ASSERT(!st.radio_committed && stub_apply_radio_calls() == 1, "applied once, uncommitted");
+        st.paths.radio = g_radio_path;
+        unlink(g_radio_path);
+        r = do_set_radio(&st, CIP, 5180, 36);
+        ASSERT(r == OPC_RESULT_OK && stub_apply_radio_calls() == 2,
+               "identical retry after NVRAM failure → re-applied and persisted");
+        ASSERT(st.radio_committed, "retry → committed");
+        opc_set_radio_config_req_t disk;
+        ASSERT(opc_store_read_all(g_radio_path, &disk, sizeof disk) == (ssize_t)sizeof disk &&
+               disk.wlan1.scan_band == OPC_SCAN_BAND_5GHZ, "retry wrote radio.conf");
     }
 
     /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).

@@ -177,6 +177,7 @@ static void state_load_from_disk(opcd_state_t *st)
         uint8_t rbuf[64];
         ssize_t rn = opc_store_read_all(st->paths.radio, rbuf, sizeof rbuf);
         int rc = rn > 0 ? opcd_radio_conf_decode(rbuf, (size_t)rn, &st->radio) : -1;
+        st->radio_committed = (rc >= 0);   /* on disk = applied + persisted */
         if (rc < 0) {
             if (rn > 0)
                 LOG("radio.conf size mismatch (%zd vs %zu) — discarding", rn, sizeof st->radio);

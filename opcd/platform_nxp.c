@@ -835,30 +835,40 @@ static int run_opc_wlan_apply(const char *iface, const char *freqs,
 
 /* Render one WLAN's SCAN Channel List as the MHz list opc_wlan_apply.sh takes
  * ("2412 2437 2462"). An empty list selects the whole band table ("band only").
- * Returns the number of channels selected; 0 when the band is unset or not
- * supported (nothing to apply). */
+ * An unset band (0xFFFF) means "no band lock": every channel of every
+ * supported band is rendered so that a previous lock is actually cleared —
+ * the apply script has no "remove freq_list" form, and leaving the old list
+ * while GetDeviceInfo reports "unset" would misstate the device (Codex P2).
+ * Returns the number of channels rendered; 0 when the band is unsupported. */
 static size_t scan_freqs_render(const opc_wlan_radio_cfg_t *w, char *buf, size_t cap)
 {
+    static const uint16_t all_bands[] = { OPC_SCAN_BAND_2_4GHZ, OPC_SCAN_BAND_5GHZ };
+    static const uint8_t  none[OPC_SCAN_CHLIST_LEN] = {0};
+    const bool unset = (w->scan_band == OPC_SCAN_BAND_UNSET);
     uint8_t chs[64];
+    size_t total = 0, off = 0;
     buf[0] = '\0';
-    if (w->scan_band == OPC_SCAN_BAND_UNSET || !opc_scan_band_supported(w->scan_band))
-        return 0;
-    size_t n = opc_scan_list_channels(w->scan_band, w->scan_chlist, chs, sizeof chs);
-    if (n > sizeof chs) n = sizeof chs;
-    size_t off = 0;
-    for (size_t i = 0; i < n; i++) {
-        uint16_t mhz = opc_scan_channel_mhz(w->scan_band, chs[i]);
-        if (mhz == 0) continue;
-        int k = snprintf(buf + off, cap - off, "%s%u", off ? " " : "", (unsigned)mhz);
-        if (k < 0 || (size_t)k >= cap - off) break;
-        off += (size_t)k;
+    if (!unset && !opc_scan_band_supported(w->scan_band)) return 0;
+    for (size_t b = 0; b < (unset ? 2u : 1u); b++) {
+        uint16_t band = unset ? all_bands[b] : w->scan_band;
+        const uint8_t *list = unset ? none : w->scan_chlist;
+        size_t n = opc_scan_list_channels(band, list, chs, sizeof chs);
+        if (n > sizeof chs) n = sizeof chs;
+        for (size_t i = 0; i < n; i++) {
+            uint16_t mhz = opc_scan_channel_mhz(band, chs[i]);
+            if (mhz == 0) continue;
+            int k = snprintf(buf + off, cap - off, "%s%u", off ? " " : "", (unsigned)mhz);
+            if (k < 0 || (size_t)k >= cap - off) return total;
+            off += (size_t)k;
+            total++;
+        }
     }
-    return n;
+    return total;
 }
 
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
-    char f1[256], f2[256];
+    char f1[320], f2[320];
     const bool dual = cfg->station_type == OPC_STATION_DUAL;
     size_t n1 = scan_freqs_render(&cfg->wlan1, f1, sizeof f1);
     size_t n2 = dual ? scan_freqs_render(&cfg->wlan2, f2, sizeof f2) : 0;
@@ -877,9 +887,9 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
     const long per_call_ms = dual ? OPC_WLAN_APPLY_TIMEOUT_MS / 2
                                   : OPC_WLAN_APPLY_TIMEOUT_MS;
 
-    /* An unset band (0xFFFF) means "no band lock" — skip apply, leave
-     * wpa_supplicant.conf untouched (successor of the Rev1.00 freq==0 rule).
-     * Mode / bandwidth mapping is still deferred; only the freq list is wired. */
+    /* n == 0 only for an unsupported band (rejected upstream). An unset band
+     * renders the full supported channel set (no lock). Mode / bandwidth
+     * mapping is still deferred; only the freq list is wired. */
     if (n1 > 0) {
         int rc = run_opc_wlan_apply("mlan0", f1, NULL, per_call_ms);
         if (rc != 0) return rc;
@@ -892,7 +902,7 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
         fprintf(stderr,
                 "opcd: nxp_apply_radio_config: %s; now applying mlan1 freqs=[%s]\n",
                 n1 > 0 ? "mlan0 freqs already applied"
-                       : "mlan0 skipped (band unset)",
+                       : "mlan0 skipped (band unsupported)",
                 f2);
         /* DUAL partial-apply: if mlan0 succeeded above, an mlan1 failure here
          * leaves the two wpa_supplicant confs momentarily out of sync. The
