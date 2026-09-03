@@ -1774,6 +1774,59 @@ int main(void)
             rmdir(fpd);
         }
 
+        /* 23b. §4.3.9 period coalescing (#105): within one reporting period only
+         *      the LAST state change is notified, AT the period tick — not on
+         *      arrival. WlanStatusChange, period 3: three changes staged, first
+         *      two ticks silent, the third tick emits ONE frame with the LAST
+         *      status/channel; a following change-free period emits nothing. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_WLAN_STATUS_CHANGE, 3);
+            ASSERT(r == OPC_RESULT_OK, "coalesce: WlanStatus indication (period 3) enabled");
+
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: 1st change not sent on arrival");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_DISCONNECTED, 0x0000);
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: later changes not sent on arrival");
+
+            opcd_ind_tick(&st);   /* 1/3 */
+            opcd_ind_tick(&st);   /* 2/3 */
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: nothing before the period boundary");
+            opcd_ind_tick(&st);   /* 3/3 → flush */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "coalesce: period boundary emits the coalesced change");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsi;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsi) == 0 &&
+                   wsi.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsi.indication_ch == 0x0230,
+                   "coalesce: the emitted frame carries the LAST status/channel");
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: exactly one frame per period");
+            opcd_ind_tick(&st); opcd_ind_tick(&st); opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: a change-free period emits nothing");
+        }
+
+        /* 23c. period = 0 preserves immediate send (spec branch pending 발주처
+         *      Q on period-0 semantics, #105): a WlanStatus change with period 0
+         *      is notified at once. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_WLAN_STATUS_CHANGE, 0);
+            ASSERT(r == OPC_RESULT_OK, "coalesce p0: enabled with period 0");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "coalesce p0: change sent immediately (period 0)");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsi0;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsi0) == 0 &&
+                   wsi0.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsi0.indication_ch == 0x0224,
+                   "coalesce p0: immediate frame carries the change");
+        }
+
         st.store_async = NULL;
         opc_store_async_destroy(sa);
         close(srv);

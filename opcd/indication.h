@@ -24,6 +24,11 @@ int opcd_ind_keep_alive    (opcd_state_t *st, const char *timestamp);
  * configured period has elapsed. */
 void opcd_ind_tick(opcd_state_t *st);
 
+/* Drop all staged (not-yet-flushed) period-coalesced state changes (#105).
+ * Called when the indication config changes or the session ends so a stale
+ * staged event cannot leak into a new recipient/period. */
+void opcd_ind_coalesce_reset(opcd_state_t *st);
+
 #ifdef __cplusplus
 }
 #endif

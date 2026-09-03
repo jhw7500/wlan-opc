@@ -148,6 +148,22 @@ typedef struct opcd_state {
     uint8_t  indication_period_s;
     uint16_t indication_seq;
     int32_t  indication_tick_counter;   /* seconds since last KeepAlive */
+    /* §4.3.9 period coalescing (#105): within one reporting period only the
+     * LAST state change of each kind is notified, flushed by opcd_ind_tick at
+     * the period boundary. Edge events stage here on arrival (opcd_ind_* when
+     * period>0). Keyed by link idx for forward-compat with per-link notify
+     * (#106); only idx 0 is populated under the mlan0-only policy. */
+    struct opcd_ind_coalesce {
+        bool     wlan_pending;
+        uint16_t wlan_status, wlan_ch;
+        bool     roam_pending;
+        int8_t   roam_snr, roam_rssi;
+        uint8_t  roam_mac[6];
+        uint16_t roam_ch;
+        bool     apd_pending;
+        uint16_t apd_msg_id, apd_reason;
+        uint8_t  apd_mac[6];
+    } indication_coalesce[2];
 
     /* Device status as visible to GetBasicInfo (boot → ready → logged_in). */
     uint32_t boot_status;
