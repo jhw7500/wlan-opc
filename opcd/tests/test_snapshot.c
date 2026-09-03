@@ -119,6 +119,9 @@ int main(void)
     ack.wlan1.connect_ap_mac[0] = 0x04; ack.wlan1.connect_ap_mac[1] = 0xba;
     ack.wlan1.connect_ap_mac[2] = 0xd6; ack.wlan1.connect_ap_mac[3] = 0xec;
     ack.wlan1.connect_ap_mac[4] = 0x0b; ack.wlan1.connect_ap_mac[5] = 0x08;
+    ack.wlan1.scan_band = 0x0002;
+    ack.wlan1.scan_chlist[3] = 0x21;           /* wire bytes 00 00 00 21 00 00 00 00 */
+    ack.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
 
     char out_path[128];
     snprintf(out_path, sizeof out_path, "%s/device_info.json", tmp_dir);
@@ -173,6 +176,11 @@ int main(void)
            "wlan1 mac");
     ASSERT(has_field(body, "\"connect_ap_mac\":", "\"04:ba:d6:ec:0b:08\""),
            "wlan1 ap mac");
+    ASSERT(has_field(body, "\"scan_band\":", "2"), "wlan1 scan band (Rev1.01)");
+    ASSERT(has_field(body, "\"scan_chlist\":", "\"0000002100000000\""),
+           "wlan1 scan chlist hex (Rev1.01)");
+    const char *w2 = strstr(body, "\"wlan2\"");
+    ASSERT(w2 != NULL && has_field(w2, "\"scan_band\":", "65535"), "wlan2 scan band unset");
 
     /* fetched_at present — value-content matters less, just that it is a
      * non-negative integer. */

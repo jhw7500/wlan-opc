@@ -54,6 +54,18 @@
 
 ---
 
+## ④ 사양 Rev1.01(2026-08-06) 정합 — 이슈 #101~#107 (2026-09-03 등록)
+
+| 이슈 | 항목 | 상태 |
+|---|---|---|
+| #101 | GetDeviceInfo 응답 WLAN#1/#2 블록 오프셋 정정(프레임 284/344 → 288/352) + SCAN Frequency Band·SCAN Channel List 필드 추가(미설정값 0xFFFF / ALL 0 에코) | **완료** — `test_codec` 절대 오프셋 단언, `fielddump`·스냅샷·vhlctl 동기 |
+| #102 | SetRadioConfig 요구 레이아웃 재정의(Length 76→84, SCAN Band + 64bit Channel List) | 미착수 |
+| #103 | 미설정·미접속·무효값 규약(0xFFFF/0xFF/-128/ALL 0) + `device_info_freq_source` 기본값 | 미착수 (#101·#102 의존) |
+| #104 | 재송(Retry) 응답 SN: 재송 폐기·원 요구 SN 응답 | 미착수 |
+| #105 | Indication Period 내 마지막 상태만 통지(coalesce) | 미착수 |
+| #106 | Dual 링크별 통지 — 링크 식별 방식 발주처 문의 선행 | 차단 |
+| #107 | SetIPConfigList Boundary 0x0003(시작 및 완료) 단일 프레임 커밋 | 미착수 |
+
 ## 우선순위 요약
 - **임팩트 순(자율)**: ① SetRadio 실반영(L) > ② ChangeIp essid/ntp(M/S) > ③ Version/EEPROM(M) > ④ AP구분/EHT/스텔스(M/S)
 - **②는 #35 발주처 답변** 의존 — 답변 수신 시 T9 producer·A5 검증·wlan_id는 배관 완비라 소규모 추가로 마무리 가능

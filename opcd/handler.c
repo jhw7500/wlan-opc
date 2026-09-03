@@ -645,6 +645,11 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             ack.device_status = st->boot_status;
             ack.station_type  = effective_station_type(st);
             ack.priority_ch   = st->radio.priority_ch;
+            /* Rev1.01 SCAN Frequency Band / SCAN Channel List: SetRadioConfig
+             * does not carry them yet (#102), so report the unset band and an
+             * all-zero list (ack is memset 0 above) for both WLANs. */
+            ack.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+            ack.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
             select_devinfo_freq_ch(st->conf.device_info_freq_source, w1_assoc,
                                    w1_lfreq, w1_lch,
                                    st->radio.wlan1.freq_mhz, st->radio.wlan1.channel,

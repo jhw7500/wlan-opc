@@ -361,6 +361,21 @@ static int do_get_devinfo(opcd_state_t *st, uint32_t cip,
     return 0;
 }
 
+/* Dispatch GetDeviceInfo; return 0 and hand back the whole unpacked ack. */
+static int do_get_devinfo_ack(opcd_state_t *st, uint32_t cip,
+                              opc_get_device_info_ack_t *ack)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_get_device_info_req_pack(frame, sizeof frame, 1);
+    if (fn <= 0) return -1;
+
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return -1;
+    return opc_get_device_info_ack_unpack(resp, (size_t)rlen, ack);
+}
+
 /* Dispatch GetDeviceInfo; return 0 and fill the management IP triple
  * (ip/netmask/gateway, host order) from the ack — for the device_ip_iface
  * source-selector tests. */
@@ -1761,6 +1776,23 @@ int main(void)
                    "freq-src auto DUAL + assoc -> wlan1 & wlan2 live values");
             stub_reset_link();
         }
+    }
+
+    /* 26(#101). Rev1.01 SCAN Frequency Band / SCAN Channel List elements.
+     *     Until SetRadioConfig carries them (#102) the device reports the
+     *     unset band (0xFFFF) and an all-zero list for both WLANs — never
+     *     0x0000, which would read as a real (2.4GHz-less) band value. */
+    {
+        opc_get_device_info_ack_t ack;
+        static const uint8_t zero8[OPC_SCAN_CHLIST_LEN] = {0};
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_radio(&st, CIP, 5180, (uint16_t)((OPC_BAND_5GHZ << 8) | 36));
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "devinfo ack for scan fields");
+        ASSERT(ack.wlan1.scan_band == OPC_SCAN_BAND_UNSET, "wlan1 scan band = unset 0xFFFF");
+        ASSERT(memcmp(ack.wlan1.scan_chlist, zero8, sizeof zero8) == 0, "wlan1 scan chlist = ALL 0");
+        ASSERT(ack.wlan2.scan_band == OPC_SCAN_BAND_UNSET, "wlan2 scan band = unset 0xFFFF");
+        ASSERT(memcmp(ack.wlan2.scan_chlist, zero8, sizeof zero8) == 0, "wlan2 scan chlist = ALL 0");
     }
 
     /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).

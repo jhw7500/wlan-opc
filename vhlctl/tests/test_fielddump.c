@@ -129,6 +129,9 @@ static void test_dump_device_info(void)
     ack.wlan1.rssi = -71;
     uint8_t apmac[6] = {0x04,0xba,0xd6,0xec,0x0b,0x08};
     memcpy(ack.wlan1.connect_ap_mac, apmac, 6);
+    ack.wlan1.scan_band = 0x0002;
+    ack.wlan1.scan_chlist[3] = 0x21;          /* raw wire bytes, dumped as hex */
+    ack.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
 
     uint8_t frame[OPC_FRAME_MAX];
     ssize_t n = opc_get_device_info_ack_pack(frame, sizeof frame, 1, &ack);
@@ -149,6 +152,9 @@ static void test_dump_device_info(void)
     ASSERT(strstr(buf, "0x0224")         != NULL, "dump devinfo: wlan1 channel");
     ASSERT(strstr(buf, "-71")            != NULL, "dump devinfo: wlan1 rssi @offset");
     ASSERT(strstr(buf, "04:ba:d6:ec:0b:08") != NULL, "dump devinfo: wlan1 ap mac");
+    ASSERT(line_has(buf, "wlan1.scan_band", "0x0002"), "dump devinfo: wlan1 scan band @310");
+    ASSERT(line_has(buf, "wlan1.scan_chlist", "21"),   "dump devinfo: wlan1 scan chlist @312");
+    ASSERT(line_has(buf, "wlan2.scan_band", "0xffff"), "dump devinfo: wlan2 scan band @374");
     /* header common fields */
     ASSERT(strstr(buf, "command_type")   != NULL, "dump devinfo: header command_type");
     free(buf);

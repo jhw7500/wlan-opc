@@ -155,8 +155,8 @@ static const fd_field_t DEVINFO[] = {
     {"ieee_11ai",        1, FD_U8},
     {"ieee_11k",         1, FD_U8},
     {"ieee_11v",         1, FD_U8},
-    {"(reserve)",       36, FD_HEX},
-    {"wlan1.mac",        6, FD_MAC},
+    {"(reserve)",       40, FD_HEX},     /* frame 248..287 */
+    {"wlan1.mac",        6, FD_MAC},     /* frame 288 */
     {"wlan1.mode",       1, FD_U8},
     {"wlan1.bandwidth",  1, FD_U8},
     {"wlan1.freq_mhz",   2, FD_U16BE},
@@ -165,9 +165,10 @@ static const fd_field_t DEVINFO[] = {
     {"wlan1.snr",        1, FD_I8},
     {"wlan1.rssi",       1, FD_I8},
     {"wlan1.ap_mac",     6, FD_MAC},
-    {"(pad)",            2, FD_HEX},
-    {"(reserve)",       36, FD_HEX},
-    {"wlan2.mac",        6, FD_MAC},
+    {"wlan1.scan_band",  2, FD_U16BE},   /* frame 310 (Rev1.01) */
+    {"wlan1.scan_chlist",8, FD_HEX},     /* frame 312 (Rev1.01) */
+    {"(reserve)",       32, FD_HEX},     /* frame 320..351 */
+    {"wlan2.mac",        6, FD_MAC},     /* frame 352 */
     {"wlan2.mode",       1, FD_U8},
     {"wlan2.bandwidth",  1, FD_U8},
     {"wlan2.freq_mhz",   2, FD_U16BE},
@@ -176,8 +177,9 @@ static const fd_field_t DEVINFO[] = {
     {"wlan2.snr",        1, FD_I8},
     {"wlan2.rssi",       1, FD_I8},
     {"wlan2.ap_mac",     6, FD_MAC},
-    {"(pad)",            2, FD_HEX},
-    {"(reserve)",       48, FD_HEX},
+    {"wlan2.scan_band",  2, FD_U16BE},   /* frame 374 (Rev1.01) */
+    {"wlan2.scan_chlist",8, FD_HEX},     /* frame 376 (Rev1.01) */
+    {"(reserve)",       32, FD_HEX},     /* frame 384..415 */
 };
 
 /* Indication bodies (indications.c). */

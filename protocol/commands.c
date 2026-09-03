@@ -233,7 +233,8 @@ static void pack_radio_state(uint8_t *p, const opc_wlan_radio_state_t *r)
 {
     /* p[0..5] MAC, p[6] Mode, p[7] BW, p[8..9] FREQ, p[10..11] CH,
      * p[12..13] Status, p[14] SNR, p[15] RSSI, p[16..21] connect AP MAC,
-     * p[22..23] pad — 24B per radio block. */
+     * p[22..23] SCAN Frequency Band, p[24..31] SCAN Channel List (Rev1.01)
+     * — 32B per radio block, no pad. */
     memcpy(&p[0], r->mac, 6);
     p[6] = r->mode;
     p[7] = r->bandwidth;
@@ -243,8 +244,8 @@ static void pack_radio_state(uint8_t *p, const opc_wlan_radio_state_t *r)
     p[14] = (uint8_t)r->snr;
     p[15] = (uint8_t)r->rssi;
     memcpy(&p[16], r->connect_ap_mac, 6);
-    p[22] = 0;
-    p[23] = 0;
+    opc_be16_write(&p[22], r->scan_band);
+    memcpy(&p[24], r->scan_chlist, OPC_SCAN_CHLIST_LEN);
 }
 
 static void unpack_radio_state(const uint8_t *p, opc_wlan_radio_state_t *r)
@@ -258,6 +259,8 @@ static void unpack_radio_state(const uint8_t *p, opc_wlan_radio_state_t *r)
     r->snr       = (int8_t)p[14];
     r->rssi      = (int8_t)p[15];
     memcpy(r->connect_ap_mac, &p[16], 6);
+    r->scan_band = opc_be16_read(&p[22]);
+    memcpy(r->scan_chlist, &p[24], OPC_SCAN_CHLIST_LEN);
 }
 
 ssize_t opc_get_device_info_req_pack(uint8_t *frame, size_t cap, uint16_t seq_no)
@@ -302,11 +305,11 @@ ssize_t opc_get_device_info_ack_pack(uint8_t *frame, size_t cap, uint16_t seq_no
     body[181] = in->ieee_11ai;
     body[182] = in->ieee_11k;
     body[183] = in->ieee_11v;
-    /* body[184..219] reserve */
-    pack_radio_state(&body[220], &in->wlan1);
-    /* body[244..279] reserve */
-    pack_radio_state(&body[280], &in->wlan2);
-    /* body[304..351] reserve */
+    /* body[184..223] reserve (40B) — spec rows 248..287 */
+    pack_radio_state(&body[224], &in->wlan1);     /* frame 288..319 */
+    /* body[256..287] reserve (32B) — spec rows 320..351 */
+    pack_radio_state(&body[288], &in->wlan2);     /* frame 352..383 */
+    /* body[320..351] reserve (32B) — spec rows 384..415 */
 
     return opc_frame_build(frame, cap, OPC_CMD_ACK, OPC_REQ_GET_DEVICE_INFO, seq_no,
                            OPC_GET_DEVICE_INFO_ACK_LENGTH, body, sizeof body);
@@ -347,8 +350,8 @@ int opc_get_device_info_ack_unpack(const uint8_t *frame, size_t frame_len,
     out->ieee_11ai       = body[181];
     out->ieee_11k        = body[182];
     out->ieee_11v        = body[183];
-    unpack_radio_state(&body[220], &out->wlan1);
-    unpack_radio_state(&body[280], &out->wlan2);
+    unpack_radio_state(&body[224], &out->wlan1);
+    unpack_radio_state(&body[288], &out->wlan2);
     return 0;
 }
 
