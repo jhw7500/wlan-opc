@@ -693,8 +693,11 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             devinfo_wlan_unassociated(&ack.wlan1);
             if (plat->get_link(0, &link) == 0 && link.associated) {
                 memcpy(ack.wlan1.connect_ap_mac, link.bssid, 6);
-                ack.wlan1.snr    = link.snr;
-                ack.wlan1.rssi   = link.rssi;
+                /* A metric the platform could not read keeps the -128
+                 * invalid marker; 0 would look like a measurement
+                 * (Codex, PR #112). */
+                if (link.snr_valid)  ack.wlan1.snr  = link.snr;
+                if (link.rssi_valid) ack.wlan1.rssi = link.rssi;
                 ack.wlan1.status = 0x0001;
                 w1_assoc = true;
                 w1_lfreq = link.freq_mhz;
@@ -713,8 +716,8 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                 devinfo_wlan_unassociated(&ack.wlan2);
                 if (plat->get_link(1, &link) == 0 && link.associated) {
                     memcpy(ack.wlan2.connect_ap_mac, link.bssid, 6);
-                    ack.wlan2.snr    = link.snr;
-                    ack.wlan2.rssi   = link.rssi;
+                    if (link.snr_valid)  ack.wlan2.snr  = link.snr;
+                    if (link.rssi_valid) ack.wlan2.rssi = link.rssi;
                     ack.wlan2.status = 0x0001;
                     w2_assoc = true;
                     w2_lfreq = link.freq_mhz;

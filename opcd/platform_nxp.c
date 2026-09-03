@@ -700,22 +700,25 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
         if (parse_bitrate_to_mode(buf, &mode) == 0) out->mode = mode;
     }
 
-    /* link.signal_avg "-66 dBm" → rssi */
-    if (opc_json_string_section(json, "link", "signal_avg", buf, sizeof buf) == 0) {
-        (void)parse_signed_dbm(buf, &out->rssi);
+    /* link.signal_avg "-66 dBm" → rssi. rssi_valid only on a successful
+     * parse: an absent/malformed field must not surface as 0 dBm. */
+    if (opc_json_string_section(json, "link", "signal_avg", buf, sizeof buf) == 0 &&
+        parse_signed_dbm(buf, &out->rssi) == 0) {
+        out->rssi_valid = true;
     }
 
-    /* channel_info.<freq>.noise → snr = rssi - noise.
+    /* channel_info.<freq>.noise → snr = rssi - noise (needs a measured rssi).
      * channel_info is keyed by the operating freq (dynamic), but `noise`
      * is unique within channel_info for the active channel. The nested
      * search walks into the freq sub-object via brace depth. */
-    if (out->associated &&
+    if (out->associated && out->rssi_valid &&
         opc_json_integer_section(json, "channel_info", "noise", &ival) == 0 &&
         ival >= INT8_MIN && ival < 0) {   /* 0 = uninitialized driver field */
         int snr = (int)out->rssi - (int)ival;
         if (snr < INT8_MIN) snr = INT8_MIN;
         if (snr > INT8_MAX) snr = INT8_MAX;
         out->snr = (int8_t)snr;
+        out->snr_valid = true;
     }
 
     free(json);

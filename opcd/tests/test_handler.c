@@ -52,6 +52,7 @@ extern int      stub_apply_radio_last_w1_freq(void);
 extern int      stub_apply_radio_last_station(void);
 /* device-info live-link injection (freq-source toggle test) */
 extern void     stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch);
+extern void     stub_set_link_signal(int idx, bool rssi_valid, int8_t rssi, bool snr_valid, int8_t snr);
 extern void     stub_reset_link(void);
 
 #define ASSERT(cond, label) do {                                              \
@@ -2053,7 +2054,7 @@ int main(void)
         ASSERT(ack.wlan1.freq_mhz == 5240 && ack.wlan1.channel == (uint16_t)((OPC_BAND_5GHZ << 8) | 48),
                "28: assoc FREQ/CH = live");
         ASSERT(ack.wlan1.status == 0x0001, "28: assoc Status = 0x0001");
-        ASSERT(!(ack.wlan1.snr == -128 && ack.wlan1.rssi == -128), "28: assoc SNR/RSSI from the link, not the -128 marker");
+        ASSERT(ack.wlan1.rssi == -55 && ack.wlan1.snr == 40, "28: assoc SNR/RSSI copied from the link, not the -128 marker");
         /* d) associated but the link carries no frequency (link.json without
          *    info.freq/channel): the live source must report unset, never 0/0
          *    or a bandless raw channel (Codex, PR #112). */
@@ -2075,6 +2076,20 @@ int main(void)
         stub_set_link(0, true, 4000, 44);
         ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, bandless)");
         ASSERT(ack.wlan1.channel == 0xFFFF, "28: assoc bandless freq → CH 0xFFFF, not 0x002C");
+        /* g) associated, RSSI read but channel_info noise absent: SNR keeps
+         *    the -128 invalid marker while RSSI is real (Codex, PR #112). */
+        stub_set_link(0, true, 5240, 48);
+        stub_set_link_signal(0, true, -61, false, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, no noise)");
+        ASSERT(ack.wlan1.rssi == -61, "28: assoc RSSI read → real value");
+        ASSERT(ack.wlan1.snr == -128, "28: assoc without noise → SNR -128, not 0");
+        /* h) associated but link.signal_avg absent/malformed: neither metric
+         *    was measured → both markers stay, Status still associated. */
+        stub_set_link(0, true, 5240, 48);
+        stub_set_link_signal(0, false, 0, false, 0);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28: devinfo (assoc, no signal)");
+        ASSERT(ack.wlan1.snr == -128 && ack.wlan1.rssi == -128, "28: assoc without signal → SNR/RSSI -128, not 0/0");
+        ASSERT(ack.wlan1.status == 0x0001, "28: assoc without signal still Status 0x0001");
         stub_reset_link();
     }
 
