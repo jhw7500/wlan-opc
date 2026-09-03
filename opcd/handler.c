@@ -1111,7 +1111,8 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
 {
-    (void)port;
+    /* `port` is used below: A19 retransmission match (is_radio_retransmission),
+     * persist_radio, and the pending-slot binding are all (ip,port)-scoped. */
     uint16_t result = OPC_RESULT_OK, err = OPC_ERR_NONE;
     opc_set_radio_config_req_t req;
 
