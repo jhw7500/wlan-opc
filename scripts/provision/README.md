@@ -3,6 +3,8 @@
 DFK 배정값(관리 IP/GW/NTP/무선 자격증명)을 기기 1대에 원자적으로 적용하는 **1회성 운영자 도구**.
 배경: opcd 프로토콜로는 wlan0 IP·GW·NTP를 설정할 수 없고(코드 확정), 반영 지점이 파일 4곳+재부팅으로
 흩어져 있어 부분 적용 시 고장 상태가 됨 — `docs/dfk-meeting/dfk-consolidated-questions-20260708.md` §4.
+**NTP는 이 스크립트의 `--ntp`가 공식 반영 경로다** (opcd 프로토콜 NTP 필드는 의도적 미적용 —
+결정 2026-09-02 #91·2안, 근거는 `docs/spec-inquiry/spec-conformance.md` V3).
 
 ## 설계 원칙 (사용자 지시, 2026-09-02)
 

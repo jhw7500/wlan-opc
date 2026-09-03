@@ -920,7 +920,13 @@ static int count_set_bits(uint32_t v)
  * gateway is a non-goal — the board operates as a bridge on the control
  * network, so no L3 gateway is needed (user decision 2026-06-12, #27); the
  * stored gateway field is validated (D1: inside the entry's subnet) and echoed
- * but never applied. ntp remains V3 on-target work (timesyncd). */
+ * but never applied. ntp is DELIBERATELY not applied (decision 2026-09-02,
+ * #91 option 2): a timesyncd.conf edit is non-volatile, clashing with
+ * ChangeIp's volatile reboot-restores semantics (the essid non-volatility
+ * precedent already bit us on-target), and the GW/NTP=0 spec interpretation
+ * (G6) is unconfirmed by the vendor — the official NTP provisioning path is
+ * scripts/provision/bd_provision.sh --ntp (#88, incl. the set-ntp latch).
+ * Revisit implementing it here after the G6/G12 vendor replies. */
 static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
 {
     const char *dev = (iface == 1) ? "mlan0" : "eth0";
