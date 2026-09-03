@@ -287,19 +287,26 @@ static int persist_blob(opcd_state_t *st, const char *path,
                     .client_port = port,
                     .rx_ts       = rx_ts,
                 };
-                /* A19 (§3.1.3, 그림 3-2): a retransmission of the same
-                 * command arrives carrying a NEW sequence number while the
-                 * previous write is still in flight — the earlier response
-                 * duty is discarded and only the newest SN is answered.
+                /* Same command, same client, a second write while the
+                 * previous is still in flight. SET_RADIO retransmissions
+                 * (byte-identical requests) never reach here — Rev1.01
+                 * 그림 4-2 (#104) discards them upstream in
+                 * handle_set_radio_config so the ORIGINAL SN answers. What
+                 * remains for this loop: a genuinely DIFFERENT same-command
+                 * request (rapid reconfigure), and SET_PASSWORD /
+                 * SET_IP_CONFIG_LIST re-sends, which have no per-command
+                 * identical-request gate. For those the earlier response
+                 * duty is discarded and the newest SN is answered (Rev1.00
+                 * A19 semantics). Extending 그림 4-2's original-SN rule to
+                 * password/ip is a follow-up gated on inquiry Q6.
                  * Marked only now, after the replacement is definitely
                  * queued: discarding up front could drop the original ack
                  * with no replacement when the queue is saturated and this
                  * request then fails. The discarded slot stays allocated
                  * until its job drains, so a live job's token is never
                  * handed to a new request. If the old job completed while
-                 * we waited for a slot, its ack already went out — that is
-                 * the spec's "reply crossed the retransmission" two-ack
-                 * case. */
+                 * we waited for a slot, its ack already went out — the
+                 * spec's "reply crossed the retransmission" two-ack case. */
                 for (int i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
                     opcd_pending_ack_t *pa = &st->pending_acks[i];
                     if (i != slot && pa->in_use && !pa->discarded &&
@@ -1054,19 +1061,21 @@ static bool radio_cfg_differs(const opc_set_radio_config_req_t *a,
     return false;
 }
 
-/* True while an ack for `req_id` from this client is still deferred (NVRAM
- * write in flight). An identical request arriving then is a retransmission
- * (§4.1.3 fig 4-2, A19) and must take the normal path, not the "nothing to
- * apply" shortcut. */
-static bool ack_pending_for(const opcd_state_t *st, uint16_t req_id, uint32_t ip, uint16_t port)
+/* True iff two radio requests are the SAME wire frame — every configured field
+ * compared, WLAN#2 and priority_ch INCLUDED regardless of station_type. Used
+ * only for A19 retransmission classification (그림 4-2): a retransmission is a
+ * byte-identical re-send, so a request differing in any field — even one that
+ * radio_cfg_differs() ignores for SINGLE (priority_ch / WLAN#2) — is a DISTINCT
+ * request and must be answered on its own SN, not dropped (Codex, PR #113).
+ * radio_cfg_differs() stays the comparator for the apply-skip / revert
+ * decisions, which legitimately ignore fields SINGLE does not apply. */
+static bool radio_req_identical(const opc_set_radio_config_req_t *a,
+                                const opc_set_radio_config_req_t *b)
 {
-    for (size_t i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
-        const opcd_pending_ack_t *pa = &st->pending_acks[i];
-        if (pa->in_use && !pa->discarded && pa->req_id == req_id &&
-            pa->client_ip == ip && pa->client_port == port)
-            return true;
-    }
-    return false;
+    return a->station_type == b->station_type &&
+           a->priority_ch  == b->priority_ch  &&
+           !wlan_cfg_differs(&a->wlan1, &b->wlan1) &&
+           !wlan_cfg_differs(&a->wlan2, &b->wlan2);
 }
 
 /* The live (non-discarded) pending ack slot for `req_id` from this client —
@@ -1084,11 +1093,26 @@ static opcd_pending_ack_t *pending_slot_for(opcd_state_t *st, uint16_t req_id,
     return NULL;
 }
 
+/* A19 retransmission test (그림 4-2): an identical re-send whose ORIGINAL is
+ * still persisting on THIS (ip,port). Matched against the pending slot's own
+ * stored request — NOT the global st->radio, which a different source port on
+ * the same logged-in IP may have overwritten while this port's write is in
+ * flight (session ownership is IP-scoped; pending slots are (ip,port)-scoped)
+ * (Codex, PR #113 r2). */
+static bool is_radio_retransmission(opcd_state_t *st, const opc_set_radio_config_req_t *req,
+                                    uint32_t ip, uint16_t port)
+{
+    const opcd_pending_ack_t *pend =
+        pending_slot_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port);
+    return pend != NULL && radio_req_identical(req, &pend->radio_req);
+}
+
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
 {
-    (void)port;
+    /* `port` is used below: A19 retransmission match (is_radio_retransmission),
+     * persist_radio, and the pending-slot binding are all (ip,port)-scoped. */
     uint16_t result = OPC_RESULT_OK, err = OPC_ERR_NONE;
     opc_set_radio_config_req_t req;
 
@@ -1117,15 +1141,36 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             /* §4.3.8 0x0012: a SCAN Channel List bit outside the band's table
              * (or a list without a band), or a bad Priority CH (Dual only, A16). */
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_CH;
-        } else if (st->radio_committed && !radio_cfg_differs(&req, &st->radio) &&
-                   !ack_pending_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
+        } else if (is_radio_retransmission(st, &req, ip, port)) {
+            /* A19 / Rev1.01 그림 4-2: a byte-identical request arriving while the
+             * ORIGINAL request's NVRAM write is still in flight is a
+             * RETRANSMISSION. Discard it — do not re-apply (a wpa_supplicant
+             * reconfigure would drop the link) and start no second write. The
+             * original's deferred ack answers on completion, carrying the
+             * ORIGINAL request's SN. This inverts Rev1.00, which answered the
+             * newest (retransmission) SN. The match is the WHOLE payload of
+             * THIS port's pending request (is_radio_retransmission →
+             * radio_req_identical, not radio_cfg_differs against the global
+             * st->radio) so (a) a request differing only in a SINGLE-ignored
+             * field (priority_ch / WLAN#2) is a distinct request answered on its
+             * own SN, and (b) a second port overwriting st->radio cannot mask
+             * this port's retransmission (Codex, PR #113). VHL accepting an ack
+             * whose SN differs from its last send is inquiry Q6; until answered
+             * we follow the spec diagram. */
+            fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (A19)\n");
+            session_touch(st);
+            *rlen = 0;
+            return 0;
+        } else if (st->radio_committed && !radio_cfg_differs(&req, &st->radio)) {
             /* Identical to a COMMITTED (applied + persisted) config and no ack
-             * in flight: nothing to apply or persist. Skipping the apply spares
-             * a wpa_supplicant reconfigure (link drop) on a VHL re-send; the
-             * requested state already holds. An uncommitted match (NVRAM write
-             * failed, or a boot default never applied) takes the normal path.
-             * (With an ack in flight it is an A19 retransmission and goes
-             * through persist_radio's discard logic instead.) */
+             * in flight (the branch above catches the in-flight case): nothing
+             * to apply or persist. Skipping the apply spares a wpa_supplicant
+             * reconfigure (link drop) on a VHL re-send; the requested state
+             * already holds. An uncommitted match (NVRAM write failed, or a boot
+             * default never applied) takes the normal path. This is also the
+             * 그림 4-2 엇갈림(cross) case: a retransmission that arrives after the
+             * original response was already sent is answered here with its OWN
+             * SN. */
             fprintf(stderr, "opcd: set_radio: request equals committed config — apply skipped\n");
             session_touch(st);
         } else {
@@ -1170,7 +1215,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                     /* Bind the queued write to this generation: its completion
                      * may commit only while st->radio still is this config. */
                     opcd_pending_ack_t *pa = pending_slot_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port);
-                    if (pa) pa->radio_gen = st->radio_gen;
+                    if (pa) { pa->radio_gen = st->radio_gen; pa->radio_req = req; }
                     session_touch(st);
                     *rlen = 0;   /* ack follows the NVRAM completion */
                     return 0;
