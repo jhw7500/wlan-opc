@@ -1009,6 +1009,19 @@ static bool ack_pending_for(const opcd_state_t *st, uint16_t req_id, uint32_t ip
     return false;
 }
 
+/* True while another (non-discarded) SetRadioConfig ack — i.e. another radio
+ * NVRAM write, from any client — is outstanding besides `self`. */
+static bool other_radio_write_pending(const opcd_state_t *st, const opcd_pending_ack_t *self)
+{
+    for (size_t i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
+        const opcd_pending_ack_t *pa = &st->pending_acks[i];
+        if (pa == self) continue;
+        if (pa->in_use && !pa->discarded && pa->req_id == OPC_REQ_SET_RADIO_CONFIG)
+            return true;
+    }
+    return false;
+}
+
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
@@ -1430,9 +1443,15 @@ void opcd_store_async_on_ready(opcd_state_t *st)
             break;
         }
         case OPC_REQ_SET_RADIO_CONFIG: {
-            /* The deferred write decides whether st->radio is committed; a
-             * failed write leaves it uncommitted so the retry re-persists. */
-            st->radio_committed = (done[i].result == 0);
+            /* The deferred write decides whether st->radio is committed — but
+             * only the LAST outstanding radio write may say so: a later request
+             * (e.g. a retry from another source port, which the A19 same-client
+             * discard does not catch) may have replaced st->radio with a config
+             * whose own write is still in flight, and this older completion
+             * must not vouch for it (Codex P2, round 3). A failed write always
+             * leaves it uncommitted so the retry re-persists. */
+            st->radio_committed = (done[i].result == 0) &&
+                                  !other_radio_write_pending(st, pa);
             opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
             emit_ack(&rlen, opc_set_radio_config_ack_pack(resp, sizeof resp, pa->seq, &ack));
             break;
