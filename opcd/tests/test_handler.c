@@ -895,6 +895,69 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK && st.ip_list.present[2] == 1,
            "A17: normal START..END cycle unaffected");
 
+    /* 14d. #107 Rev1.01 §4.3.6: List Boundary 0x0003 (시작 및 완료) commits in a
+     *      SINGLE frame — seed from the committed list (merge), apply the entry,
+     *      commit + persist to NVRAM, all in one entry. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*.1.101*/);
+    r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+    ASSERT(r == OPC_RESULT_OK, "0x0003: baseline slot 1 committed via normal cycle");
+    r = do_set_ip_list(&st, CIP, 5, OPC_LIST_BOUNDARY_START_END, 0xC0A80205 /*.2.5*/);
+    ASSERT(r == OPC_RESULT_OK, "0x0003: single-frame commit OK");
+    ASSERT(!st.ip_list_staging_active, "0x0003: staging closed after single-frame commit");
+    ASSERT(st.ip_list.present[4] == 1 && st.ip_list.slots[4].ip_address == 0xC0A80205,
+           "0x0003: slot 5 committed in one frame");
+    ASSERT(st.ip_list.present[0] == 1 && st.ip_list.slots[0].ip_address == 0xC0A80165,
+           "0x0003: prior slot 1 survives (seed/merge from committed list)");
+    {
+        static opcd_ip_list_t disk_list;
+        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) == (ssize_t)sizeof disk_list &&
+               disk_list.present[4] == 1 && disk_list.slots[4].ip_address == 0xC0A80205 &&
+               disk_list.present[0] == 1,
+               "0x0003: single-frame commit persisted to NVRAM (비휘발 기록)");
+    }
+
+    /* 14e. #107: 0x0003 is self-contained. A CONTINUE/END that FOLLOWS it has no
+     *      open cycle → START-less sequence → NG 0x0018, exactly like a lone one,
+     *      and commits nothing. */
+    r = do_set_ip_list(&st, CIP, 6, OPC_LIST_BOUNDARY_CONTINUE, 0xC0A80206);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LIST_SEQUENCE,
+           "0x0003: a CONTINUE after a completed single-frame commit → NG 0x0018");
+    ASSERT(st.ip_list.present[5] == 0, "0x0003: the stray CONTINUE committed nothing");
+
+    /* 14f. #107 (Claude review): 0x0003 is self-contained even INSIDE a
+     *      multi-entry frame. One request = [START_END(slot 7), CONTINUE(slot 8)]:
+     *      slot 7 commits, then the CONTINUE finds staging closed → NG 0x0018 and
+     *      slot 8 is not committed (same seed/commit/close as the single-entry
+     *      path, verified within one frame). */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    {
+        opc_set_ip_config_list_req_t mreq;
+        memset(&mreq, 0, sizeof mreq);
+        mreq.entry_count = 2;
+        mreq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+        mreq.entries[0].list_number   = 7;
+        mreq.entries[0].ip_address    = 0xC0A80207 /*.2.7*/;
+        mreq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        mreq.entries[1].boundary_flag = OPC_LIST_BOUNDARY_CONTINUE;
+        mreq.entries[1].list_number   = 8;
+        mreq.entries[1].ip_address    = 0xC0A80208 /*.2.8*/;
+        mreq.entries[1].subnet_mask   = 0xFFFFFF00u;
+        uint8_t f[OPC_FRAME_MAX]; ssize_t fn = opc_set_ip_config_list_req_pack(f, sizeof f, 9, &mreq);
+        uint8_t rp[OPC_FRAME_MAX]; ssize_t rl = 0;
+        (void)opcd_dispatch(&st, f, (size_t)fn, CIP, 5000, rp, sizeof rp, &rl);
+        opc_set_ip_config_list_ack_t mack; memset(&mack, 0, sizeof mack);
+        (void)opc_set_ip_config_list_ack_unpack(rp, (size_t)rl, &mack);
+        ASSERT(mack.result == OPC_RESULT_NG && mack.error_cause == OPC_ERR_LIST_SEQUENCE,
+               "0x0003 multi-entry: a trailing CONTINUE → NG 0x0018");
+        ASSERT(st.ip_list.present[6] == 1 && st.ip_list.slots[6].ip_address == 0xC0A80207,
+               "0x0003 multi-entry: the START_END entry committed before the bad CONTINUE");
+        ASSERT(st.ip_list.present[7] == 0,
+               "0x0003 multi-entry: the stray CONTINUE committed nothing");
+    }
+
     /* 14c-2. An open cycle dies with its session: START → logout → login →
      *        END must NG (stale staging cleared on logout, A17 review fix). */
     init_state(&st, OPC_PASSWORD_DEFAULT);

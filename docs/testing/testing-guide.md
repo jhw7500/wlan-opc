@@ -170,7 +170,7 @@ sudo ./build/native/opcd/opcd -p 55555 -i 120
 vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND
   login [--password PW] | logout | basic-info | device-info
   set-password --old PW --new PW
-  set-ip-list  --slot N --flag start|cont|end --ip .. --mask .. --gw .. --ntp .. --essid NAME
+  set-ip-list  --slot N --flag start|cont|end|start_end --ip .. --mask .. --gw .. --ntp .. --essid NAME
   change-ip    --slot N
   set-radio    --station single|dual --w1-freq F --w1-ch CH --w1-mode N --w1-bw N [--w2-.. --priority HEX]
   set-indication --bits HEX --period S --to A.B.C.D:PORT

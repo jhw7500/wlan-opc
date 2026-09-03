@@ -85,6 +85,7 @@ chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list -
 chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 1
 chk "set-ip-list 비연속 netmask → NG 0x0012"  "0x0012"      $VHL set-ip-list --slot 2 --flag cont --ip 10.0.0.60 --mask 0.255.0.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
+chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip-list --slot 3 --flag start_end --ip 10.0.0.70 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 
 # ============ 6. ChangeIpAddress (eth0 DOWN → 우리 경로 무관, 안전) ============
 sec "6. ChangeIpAddress"

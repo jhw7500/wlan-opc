@@ -113,7 +113,7 @@ ID/Length 는 `protocol/ids.h`·`protocol/commands.h`·스펙 §3.3 검증값. E
 | GetBasicInfo | `0x0001` | `basic-info` | 불요 | 0 | 72 | Vendor=0x00902cfb, Station=SINGLE(0x0001) | (발행조건 없음, 항상 응답) | §3.3.3 |
 | GetDeviceInfo | `0x0002` | `device-info` | 요 | 0 | 408 | 전 필드 디코드 | 미로그인→**0x0001** ; indication ON 중→**0x0010** | §3.3.4 |
 | SetPassword | `0x1001` | `set-password --old --new` | 요 | 312 | 60 | OK + restart 후 잔존 | 구비번 오타→0x0010 ; 신비번 문자/NUL→0x0013/0x0014 ; NVRAM→0x0004 | §3.3.5 |
-| SetIpConfigList | `0x1002` | `set-ip-list --slot --flag start\|cont\|end --ip --mask --gw --ntp --essid` | 요 | 56+64·n | 60 | END 수신 시에만 commit | slot→0x0010 ; IP→0x0011 ; netmask→0x0012 ; GW→0x0013 ; NTP→0x0014 ; ESSID 문자/NUL→0x0015/0x0016 ; Len≠56+64n→0x0017 ; seq위반→0x0018 | §3.3.6 |
+| SetIpConfigList | `0x1002` | `set-ip-list --slot --flag start\|cont\|end\|start_end --ip --mask --gw --ntp --essid` | 요 | 56+64·n | 60 | END(또는 0x0003 start_end) 수신 시 commit | slot→0x0010 ; IP→0x0011 ; netmask→0x0012 ; GW→0x0013 ; NTP→0x0014 ; ESSID 문자/NUL→0x0015/0x0016 ; Len≠56+64n→0x0017 ; seq위반→0x0018 | §3.3.6 |
 | ChangeIpAddress | `0x1003` | `change-ip --slot N` | 요 | 60 | 60 | OK(armed)→logout 후 적용 | slot→0x0010 ; 빈 슬롯→**0x0011** ; 리스트변경 중 경합→**0x0012** | §3.3.7 |
 | SetRadioConfig | `0x1004` | `set-radio --station --w1-band --w1-chlist --w1-mode --w1-bw [--w2-* --priority]` | 요 | 84 | 60 | OK + reboot 잔존(wpa freq 실수정) | station→0x0010 ; band(6G)→**0x0011** ; chlist/priority→0x0012 ; mode→**0x0013** ; bw→**0x0014** ; 적용실패→0x0050 | §3.3.8 |
 | SetIndicationConfig | `0x1005` | `set-indication --bits HEX --period S --to A.B.C.D:PORT` | 요 | 64 | 60 | unicast OK | 미할당 bit→0x0010 ; 비유니캐스트(0.0.0.0/mcast/bcast)→**0x0012** | §3.3.9 |
