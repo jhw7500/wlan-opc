@@ -504,8 +504,12 @@ int main(int argc, char **argv)
                     OLOG_INFO("stop: shutting down (signalfd readable, no signal number)");
                 st.should_exit = true;
             } else if (fd == timer_fd) {
-                uint64_t expirations;
-                while (read(timer_fd, &expirations, sizeof expirations) > 0) { }
+                /* Sum every expiration so a multi-second stall advances the
+                 * indication period by the seconds actually elapsed, not 1
+                 * (Codex, PR #116). timerfd reports the accumulated count. */
+                uint64_t expirations, elapsed = 0;
+                while (read(timer_fd, &expirations, sizeof expirations) > 0)
+                    elapsed += expirations;
                 if (st.logged_in) {
                     struct timespec ts;
                     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -514,7 +518,7 @@ int main(int argc, char **argv)
                         opcd_session_logout(&st);
                     }
                 }
-                opcd_ind_tick(&st);
+                opcd_ind_tick_elapsed(&st, elapsed > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)elapsed);
             } else if (fd == store_fd) {
                 /* store_fd is -1 when no async writer is attached (creation or
                  * epoll_ctl failed); a real fd never equals -1, so this branch

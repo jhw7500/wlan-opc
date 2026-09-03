@@ -100,6 +100,14 @@ $VHL logout
 $VHL login --password MyPassword
 $VHL set-indication --bits 0x81 --period 5 --to 192.168.0.2:9999   # 0x81 = InitComplete+KeepAlive
 $VHL logout                                                        # → KeepAlive 중단 관측(teardown)
+
+# #105 coalesce: 상태변화(WlanStatus 0x02 / Roaming 0x04 / ApDisconnect 0x08)는
+#   period>0이면 즉시가 아니라 주기 경계에서 마지막 1건만 통지. 예) period 5로
+#   set-indication(--bits 0x02) 후 5초 안에 wpa_cli disconnect;reconnect 연타 →
+#   WlanStatusChange는 경계에서 1건(마지막=CONNECTED)만 도착. period=0이면 즉시 송신.
+#   경계 catch-up: 데몬이 수 초 스톨해도 timerfd 만료 합산으로 주기가 밀리지 않고
+#   한 번에 경계를 통과(스톨 후 flush는 1회). 송신 실패 시 그 주기 마지막 상태는
+#   pending 유지 → 다음 경계에서 재시도(유실 방지).
 ```
 
 ### 무선 간헐 대비 재시도 래퍼

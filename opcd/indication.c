@@ -62,19 +62,19 @@ int opcd_ind_init_complete(opcd_state_t *st, uint32_t status)
     return send_indication_frame(st, frame, n);
 }
 
-int opcd_ind_wlan_status(opcd_state_t *st, uint16_t status, uint16_t ch)
+/* Immediate senders (bit-gating done by the public entry points below). Split
+ * out so both the period-0 path and the period-tick flush share one packer. */
+static int emit_wlan_status(opcd_state_t *st, uint16_t status, uint16_t ch)
 {
-    if (!(st->indication_info_bits & OPC_IND_BIT_WLAN_STATUS_CHANGE)) return 0;
     uint8_t frame[OPC_FRAME_MAX];
     opc_ind_wlan_status_change_t in = { .wlan_status = status, .indication_ch = ch };
     ssize_t n = opc_ind_wlan_status_change_pack(frame, sizeof frame, next_seq(st), &in);
     return send_indication_frame(st, frame, n);
 }
 
-int opcd_ind_roaming(opcd_state_t *st, int8_t snr, int8_t rssi,
-                     const uint8_t ap_mac[6], uint16_t ch)
+static int emit_roaming(opcd_state_t *st, int8_t snr, int8_t rssi,
+                        const uint8_t ap_mac[6], uint16_t ch)
 {
-    if (!(st->indication_info_bits & OPC_IND_BIT_ROAMING)) return 0;
     uint8_t frame[OPC_FRAME_MAX];
     opc_ind_roaming_t in = { .current_snr = snr, .current_rssi = rssi, .ch_number = ch };
     memcpy(in.connect_ap_mac, ap_mac, 6);
@@ -82,15 +82,62 @@ int opcd_ind_roaming(opcd_state_t *st, int8_t snr, int8_t rssi,
     return send_indication_frame(st, frame, n);
 }
 
-int opcd_ind_ap_disconnect(opcd_state_t *st, uint16_t msg_id, uint16_t reason,
-                           const uint8_t ap_mac[6])
+static int emit_ap_disconnect(opcd_state_t *st, uint16_t msg_id, uint16_t reason,
+                              const uint8_t ap_mac[6])
 {
-    if (!(st->indication_info_bits & OPC_IND_BIT_AP_DISCONNECT)) return 0;
     uint8_t frame[OPC_FRAME_MAX];
     opc_ind_ap_disconnect_t in = { .message_id = msg_id, .result_code = reason };
     memcpy(in.disconnect_ap_mac, ap_mac, 6);
     ssize_t n = opc_ind_ap_disconnect_pack(frame, sizeof frame, next_seq(st), &in);
     return send_indication_frame(st, frame, n);
+}
+
+/* §4.3.9 period coalescing (#105): with a reporting period > 0 a state change
+ * is STAGED (latest wins) and flushed once at the period boundary by
+ * opcd_ind_tick; with period 0 it is notified on arrival (spec branch pending a
+ * 발주처 answer on period-0 semantics). Only idx 0 is staged under the
+ * mlan0-only policy (opcd.c drops idx != 0). */
+int opcd_ind_wlan_status(opcd_state_t *st, uint16_t status, uint16_t ch)
+{
+    if (!(st->indication_info_bits & OPC_IND_BIT_WLAN_STATUS_CHANGE)) return 0;
+    if (st->indication_period_s > 0) {
+        struct opcd_ind_coalesce *c = &st->indication_coalesce[0];
+        c->wlan_status = status; c->wlan_ch = ch; c->wlan_pending = true;
+        return 0;
+    }
+    return emit_wlan_status(st, status, ch);
+}
+
+int opcd_ind_roaming(opcd_state_t *st, int8_t snr, int8_t rssi,
+                     const uint8_t ap_mac[6], uint16_t ch)
+{
+    if (!(st->indication_info_bits & OPC_IND_BIT_ROAMING)) return 0;
+    if (st->indication_period_s > 0) {
+        struct opcd_ind_coalesce *c = &st->indication_coalesce[0];
+        c->roam_snr = snr; c->roam_rssi = rssi; c->roam_ch = ch;
+        memcpy(c->roam_mac, ap_mac, 6); c->roam_pending = true;
+        return 0;
+    }
+    return emit_roaming(st, snr, rssi, ap_mac, ch);
+}
+
+int opcd_ind_ap_disconnect(opcd_state_t *st, uint16_t msg_id, uint16_t reason,
+                           const uint8_t ap_mac[6])
+{
+    if (!(st->indication_info_bits & OPC_IND_BIT_AP_DISCONNECT)) return 0;
+    if (st->indication_period_s > 0) {
+        struct opcd_ind_coalesce *c = &st->indication_coalesce[0];
+        c->apd_msg_id = msg_id; c->apd_reason = reason;
+        memcpy(c->apd_mac, ap_mac, 6); c->apd_pending = true;
+        return 0;
+    }
+    return emit_ap_disconnect(st, msg_id, reason, ap_mac);
+}
+
+void opcd_ind_coalesce_reset(opcd_state_t *st)
+{
+    for (size_t i = 0; i < sizeof st->indication_coalesce / sizeof st->indication_coalesce[0]; i++)
+        st->indication_coalesce[i] = (struct opcd_ind_coalesce){0};
 }
 
 int opcd_ind_fault_detect(opcd_state_t *st, uint16_t cong_id, uint16_t val)
@@ -124,7 +171,9 @@ int opcd_ind_keep_alive(opcd_state_t *st, const char *timestamp)
     return send_indication_frame(st, frame, n);
 }
 
-void opcd_ind_tick(opcd_state_t *st)
+void opcd_ind_tick(opcd_state_t *st) { opcd_ind_tick_elapsed(st, 1); }
+
+void opcd_ind_tick_elapsed(opcd_state_t *st, uint32_t elapsed_s)
 {
     if (!st->indication_enabled)             return;
     if (st->indication_period_s == 0)        return;   /* spec: 0 disables the stream */
@@ -132,11 +181,37 @@ void opcd_ind_tick(opcd_state_t *st)
      * (T6 interim: 판별은 보고 주기에 맞게) — advance the counter when
      * either is enabled. */
     if (!(st->indication_info_bits &
-          (OPC_IND_BIT_KEEP_ALIVE | OPC_IND_BIT_FAULT_DETECT))) return;
+          (OPC_IND_BIT_KEEP_ALIVE | OPC_IND_BIT_FAULT_DETECT |
+           OPC_IND_BIT_WLAN_STATUS_CHANGE | OPC_IND_BIT_ROAMING |
+           OPC_IND_BIT_AP_DISCONNECT))) return;
 
-    st->indication_tick_counter++;
+    /* Advance by the elapsed seconds (timerfd expiration count from the main
+     * loop). Clamp to one period so a long stall crosses the boundary exactly
+     * once — flush once, not a burst of KeepAlives/FaultDetects. */
+    if (elapsed_s > (uint32_t)st->indication_period_s)
+        elapsed_s = (uint32_t)st->indication_period_s;
+    st->indication_tick_counter += (int32_t)elapsed_s;
     if (st->indication_tick_counter < (int32_t)st->indication_period_s) return;
     st->indication_tick_counter = 0;
+
+    /* §4.3.9 (#105): flush this period's LAST staged state change of each kind
+     * (per link idx). State changes lead, then FaultDetect, then KeepAlive. */
+    for (size_t i = 0; i < sizeof st->indication_coalesce / sizeof st->indication_coalesce[0]; i++) {
+        struct opcd_ind_coalesce *c = &st->indication_coalesce[i];
+        /* Clear pending only on a successful emit: a transient send failure
+         * (e.g. ENETUNREACH) keeps the LAST state staged so the next period
+         * retries it, instead of dropping the state change entirely (OpenCode,
+         * PR #116). A newer change before the retry overwrites it — latest
+         * still wins. */
+        if (c->wlan_pending && emit_wlan_status(st, c->wlan_status, c->wlan_ch) == 0)
+            c->wlan_pending = false;
+        if (c->roam_pending &&
+            emit_roaming(st, c->roam_snr, c->roam_rssi, c->roam_mac, c->roam_ch) == 0)
+            c->roam_pending = false;
+        if (c->apd_pending &&
+            emit_ap_disconnect(st, c->apd_msg_id, c->apd_reason, c->apd_mac) == 0)
+            c->apd_pending = false;
+    }
 
     /* T6 interim congestion probe (decision 2026-06-12, inquiry #35): one
      * sample per reporting period, re-notified every period while the

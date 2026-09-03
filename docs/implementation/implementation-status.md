@@ -62,7 +62,7 @@
 | #102 | SetRadioConfig 요구 레이아웃 재정의(Length 76→84, SCAN Band + 64bit Channel List) | **완료** — `protocol/scan_chlist.{c,h}` 비트맵 헬퍼(워드 순서 가정 1곳 격리·관용 디코드), 검증 0x0011/0x0012 재정의, 비트맵→MHz 목록 적용, 동일 설정 재전송 시 apply 생략, radio.conf 옛 16B 포맷 변환, vhlctl `--w1-band/--w1-chlist` |
 | #103 | 미설정·미접속·무효값 규약(0xFFFF/0xFF/-128/ALL 0) + `device_info_freq_source` 기본값 | **완료** — 미접속 FREQ/CH 0xFFFF·SNR/RSSI -128·AP MAC 0·Status 0, 미설정 Mode/BW 0xFF, Single Priority CH 0xFFFF + WLAN#2 블록 전체 무효값; `device_info_freq_source` 기본 **live**(enum 0), `config`는 레거시 옵션. 테스트 25/28, `test_freq_source` |
 | #104 | 재송(Retry) 응답 SN: 재송 폐기·원 요구 SN 응답 | **완료** — SET_RADIO 재송(동일 payload + ack 대기 중)을 apply 전에 폐기, 원 요구 SN pending ack 유지(그림 4-2). 재적용·2차 write 없음. 엇갈림(cross) 재송은 응답 후 도착 → 자기 SN으로 즉시 응답. 재송 판정은 전체 payload를 해당 (ip,port) pending 슬롯이 보관한 요청과 비교(전역 st->radio 아님). 테스트 21/21b/21c/21d. password/ip 재송의 원-SN 응답 확장은 Q6 회신 후 후속 |
-| #105 | Indication Period 내 마지막 상태만 통지(coalesce) | 미착수 |
+| #105 | Indication Period 내 마지막 상태만 통지(coalesce) | **완료** — WlanStatus/Roaming/ApDisconnect는 period>0이면 종류별 슬롯에 최신 상태만 적재하고 period 경계(opcd_ind_tick)에서 1건 flush(에지→주기 샘플링). period=0은 즉시 송신 유지(발주처 Q). 설정변경·로그아웃 시 슬롯 정리. 슬롯 키에 링크 idx(#106 전방호환, 현재 idx0만). 테스트 23b/23c |
 | #106 | Dual 링크별 통지 — 링크 식별 방식 발주처 문의 선행 | 차단 |
 | #107 | SetIPConfigList Boundary 0x0003(시작 및 완료) 단일 프레임 커밋 | **완료** — 0x0003 = START(확정 리스트 시드·병합) + END(커밋·iplist.cfg 저장) 단일 프레임. 0x0003 뒤 CONTINUE/END는 START 없는 시퀀스 → 0x0018. 테스트 14d/14e, vhlctl `--flag start_end` |
 

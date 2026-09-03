@@ -77,6 +77,7 @@ void opcd_session_logout(opcd_state_t *st)
     st->logged_in          = false;
     st->boot_status        = OPC_DEVICE_READY;
     st->indication_enabled = false;
+    opcd_ind_coalesce_reset(st);   /* drop staged coalesced state changes (#105) */
     /* An open SetIpConfigList cycle dies with its session — otherwise the
      * next login could flush (or trip A17 on) a previous session's stale
      * staging buffer. */
@@ -1285,6 +1286,9 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
             st->indication_info_bits       = req.info_bits;
             st->indication_period_s        = req.period_seconds;
             st->indication_tick_counter    = 0;
+            opcd_ind_coalesce_reset(st);   /* a config change drops stale staged
+                                            * state changes so they cannot leak
+                                            * into the new recipient/period (#105) */
             session_touch(st);
             if (st->indication_enabled) {
                 /* Spec: on enable, emit InitComplete state sequence. */

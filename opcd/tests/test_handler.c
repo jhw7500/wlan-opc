@@ -1774,6 +1774,162 @@ int main(void)
             rmdir(fpd);
         }
 
+        /* 23b. §4.3.9 period coalescing (#105): within one reporting period only
+         *      the LAST state change is notified, AT the period tick — not on
+         *      arrival. WlanStatusChange, period 3: three changes staged, first
+         *      two ticks silent, the third tick emits ONE frame with the LAST
+         *      status/channel; a following change-free period emits nothing. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_WLAN_STATUS_CHANGE, 3);
+            ASSERT(r == OPC_RESULT_OK, "coalesce: WlanStatus indication (period 3) enabled");
+
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: 1st change not sent on arrival");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_DISCONNECTED, 0x0000);
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: later changes not sent on arrival");
+
+            opcd_ind_tick(&st);   /* 1/3 */
+            opcd_ind_tick(&st);   /* 2/3 */
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: nothing before the period boundary");
+            opcd_ind_tick(&st);   /* 3/3 → flush */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "coalesce: period boundary emits the coalesced change");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsi;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsi) == 0 &&
+                   wsi.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsi.indication_ch == 0x0230,
+                   "coalesce: the emitted frame carries the LAST status/channel");
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: exactly one frame per period");
+            opcd_ind_tick(&st); opcd_ind_tick(&st); opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 200) != 0, "coalesce: a change-free period emits nothing");
+        }
+
+        /* 23c. period = 0 preserves immediate send (spec branch pending 발주처
+         *      Q on period-0 semantics, #105): a WlanStatus change with period 0
+         *      is notified at once. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_WLAN_STATUS_CHANGE, 0);
+            ASSERT(r == OPC_RESULT_OK, "coalesce p0: enabled with period 0");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "coalesce p0: change sent immediately (period 0)");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsi0;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsi0) == 0 &&
+                   wsi0.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsi0.indication_ch == 0x0224,
+                   "coalesce p0: immediate frame carries the change");
+        }
+
+        /* 23d. A config change drops staged-but-unflushed state (#105, OpenCode
+         *      PR #116): stage a change, reconfigure set-indication, and the
+         *      period boundary must flush nothing (opcd_ind_coalesce_reset). */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 3);
+            ASSERT(r == OPC_RESULT_OK, "reset-on-reconfig: enabled (period 3)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);   /* staged */
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 3);
+            ASSERT(r == OPC_RESULT_OK, "reset-on-reconfig: reconfigured");
+            opcd_ind_tick(&st); opcd_ind_tick(&st); opcd_ind_tick(&st);   /* boundary */
+            ASSERT(wait_fd_readable(cli, 300) != 0,
+                   "reset-on-reconfig: the staged change was dropped, nothing flushed");
+        }
+
+        /* 23e. A multi-second stall advances the period by the elapsed seconds,
+         *      not 1 (#105 Codex PR #116): one opcd_ind_tick_elapsed(period)
+         *      crosses the boundary and flushes the staged state at once. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
+            ASSERT(r == OPC_RESULT_OK, "catch-up: enabled (period 5)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            opcd_ind_tick_elapsed(&st, 5);   /* 5 s elapsed in one wake → cross the boundary now */
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "catch-up: a 5 s stall flushes at the crossed boundary in one tick");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsie;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsie) == 0 &&
+                   wsie.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsie.indication_ch == 0x0230,
+                   "catch-up: flushed frame carries the staged state");
+        }
+
+        /* 23f. A transient emit failure keeps the state staged for the next
+         *      period instead of dropping it (#105 OpenCode PR #116). A closed
+         *      fd forces sendto to fail (EBADF) at the first boundary; after the
+         *      socket is restored the next boundary retries and delivers. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 2);
+            ASSERT(r == OPC_RESULT_OK, "keep-pending: enabled (period 2)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            int badfd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (badfd >= 0) close(badfd);   /* a closed fd → sendto returns -1 (EBADF) */
+            int saved_fd = st.udp_fd;
+            st.udp_fd = badfd;
+            opcd_ind_tick(&st); opcd_ind_tick(&st);   /* boundary → emit fails */
+            ASSERT(wait_fd_readable(cli, 200) != 0, "keep-pending: nothing delivered while send fails");
+            st.udp_fd = saved_fd;
+            opcd_ind_tick(&st); opcd_ind_tick(&st);   /* next boundary → retry the still-staged state */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "keep-pending: staged state retried the next period");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsif;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsif) == 0 &&
+                   wsif.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsif.indication_ch == 0x0230,
+                   "keep-pending: the retried frame carries the staged state");
+        }
+
+        /* 23g. Elapsed clamp / no counter overflow (#105 OpenCode PR #116): a
+         *      pathologically large elapsed (e.g. a long suspend → huge timerfd
+         *      count) must still flush the staged state exactly once, not wrap
+         *      the int32 counter negative and lose it. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
+            ASSERT(r == OPC_RESULT_OK, "clamp: enabled (period 5)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            opcd_ind_tick_elapsed(&st, 0xFFFFFFFFu);   /* absurd elapsed → clamp to one period */
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "clamp: a huge elapsed still flushes once (no negative-counter loss)");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wsig;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wsig) == 0 &&
+                   wsig.wlan_status == OPC_WLAN_STATUS_CONNECTED && wsig.indication_ch == 0x0230,
+                   "clamp: flushed frame carries the staged state");
+            ASSERT(wait_fd_readable(cli, 200) != 0, "clamp: exactly one flush for the huge elapsed");
+        }
+
+        /* 23h. opcd_session_logout also drops staged state — the second
+         *      coalesce_reset call site (#105 OpenCode PR #116). White-box: a
+         *      staged change must be gone after logout (can't flush post-logout
+         *      since indication is disabled, so assert the slot directly). */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd = srv;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
+            ASSERT(r == OPC_RESULT_OK, "logout-reset: enabled (period 5)");
+            opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
+            ASSERT(st.indication_coalesce[0].wlan_pending, "logout-reset: change staged before logout");
+            opcd_session_logout(&st);
+            ASSERT(!st.indication_coalesce[0].wlan_pending,
+                   "logout-reset: logout dropped the staged change");
+        }
+
         st.store_async = NULL;
         opc_store_async_destroy(sa);
         close(srv);
