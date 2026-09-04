@@ -173,6 +173,108 @@ int main(void)
            "late-source: subsequent delta evaluated normally");
     unlink(flate);
 
+    /* 8. #121 entry latch: a resource's congestion is reported as an ENTRY
+     *    (below→above threshold transition) once; a persisting congestion is
+     *    over but not entered; dropping below clears the latch (cleared hook)
+     *    and a later rise is a fresh entry. Per resource — disk stays under
+     *    the whole time and never enters. */
+    write_file(fstat, "cpu  0 0 0 1000 0 0 0 0\n");
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
+    write_file(frx, "0\n"); write_file(ftx, "0\n");
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.cpu_entered && !r.cpu_cleared,
+           "latch: priming call enters nothing");
+    write_file(fstat, "cpu  900 0 0 1100 0 0 0 0\n");          /* 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && r.cpu_entered &&
+           !r.cpu_cleared && !r.disk_entered && !r.net_entered,
+           "latch: first over-threshold sample is an ENTRY (cpu only)");
+    write_file(fstat, "cpu  1800 0 0 1200 0 0 0 0\n");         /* still 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && !r.cpu_entered &&
+           !r.cpu_cleared,
+           "latch: persisting congestion is over but NOT entered again");
+    write_file(fstat, "cpu  1800 0 0 2200 0 0 0 0\n");         /* 0% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.cpu_over && !r.cpu_entered &&
+           r.cpu_cleared,
+           "latch: dropping below threshold is a CLEAR");
+    write_file(fstat, "cpu  2700 0 0 2300 0 0 0 0\n");         /* 90% again */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && r.cpu_entered,
+           "latch: rising again after a clear is a fresh ENTRY");
+    write_file(fstat, "cpu  3600 0 0 2400 0 0 0 0\n");         /* still 90% */
+    p.mono_ms -= 1000;
+    opcd_fault_probe_reset_latch(&p);
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && r.cpu_entered,
+           "latch: reset_latch makes an ongoing congestion a fresh ENTRY (new recipient)");
+
+    /* 8b. #121 a transient source read failure is UNKNOWN, not "below
+     *     threshold": the latch must hold, so the recovered over-sample is
+     *     not a duplicate ENTRY. cpu over → stat unreadable → stat readable
+     *     and still over: no second entry, no clear in between. */
+    write_file(fstat, "cpu  0 0 0 1000 0 0 0 0\n");
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+    write_file(fstat, "cpu  900 0 0 1100 0 0 0 0\n");           /* 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_entered,
+           "latch/readfail: entry");
+    unlink(fstat);                                               /* source vanishes */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.cpu_over &&
+           !r.cpu_entered && !r.cpu_cleared,
+           "latch/readfail: unreadable source is neither entry nor clear");
+    write_file(fstat, "cpu  900 0 0 1100 0 0 0 0\n");           /* re-prime read */
+    p.mono_ms -= 1000;
+    (void)opcd_fault_probe_sample(&p, &r);                       /* re-primes cpu */
+    write_file(fstat, "cpu  1800 0 0 1200 0 0 0 0\n");          /* still 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && !r.cpu_entered,
+           "latch/readfail: recovered over-sample is NOT a duplicate entry");
+    write_file(fstat, "cpu  1800 0 0 2200 0 0 0 0\n");          /* 0% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_cleared,
+           "latch/readfail: a real drop after recovery is the clear");
+
+    /* 9. #121 device-internal probe interval, decoupled from the Indication
+     *    Period: default 10 s, advanced by elapsed seconds, due exactly once
+     *    per interval, a long stall clamps to one due; opc.conf
+     *    congestion_probe_interval_s overrides within 1..3600. */
+    opcd_fault_probe_init(&p);
+    ASSERT(p.probe_interval_s == OPCD_FAULT_PROBE_INTERVAL_DEFAULT &&
+           OPCD_FAULT_PROBE_INTERVAL_DEFAULT == 10,
+           "interval: default 10 s");
+    {
+        int dues = 0;
+        for (int i = 0; i < 9; i++) dues += opcd_fault_probe_due(&p, 1) ? 1 : 0;
+        ASSERT(dues == 0, "interval: not due before 10 s");
+        ASSERT(opcd_fault_probe_due(&p, 1), "interval: due at 10 s");
+        ASSERT(!opcd_fault_probe_due(&p, 1), "interval: countdown restarts after a due");
+        ASSERT(opcd_fault_probe_due(&p, 100000), "interval: long stall → due once");
+        ASSERT(!opcd_fault_probe_due(&p, 1), "interval: stall does not bank extra dues");
+    }
+    write_file(conf,
+        "congestion_probe_interval_s = 5\n");
+    opcd_fault_probe_init(&p);
+    opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.probe_interval_s == 5, "interval: conf override 5 s");
+    write_file(conf, "congestion_probe_interval_s = 0\n");
+    opcd_fault_probe_init(&p);
+    opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.probe_interval_s == 10, "interval: 0 rejected, default kept");
+    write_file(conf, "congestion_probe_interval_s = 3601\n");
+    opcd_fault_probe_init(&p);
+    opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.probe_interval_s == 10, "interval: >3600 rejected, default kept");
+    unlink(conf);
+
     unlink(fstat); unlink(fdisk); unlink(frx); unlink(ftx); unlink(fspd);
     rmdir(sub); rmdir(d);
 

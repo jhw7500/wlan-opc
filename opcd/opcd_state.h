@@ -172,6 +172,12 @@ typedef struct opcd_state {
         bool     apd_pending;
         uint16_t apd_msg_id, apd_reason;
         uint8_t  apd_mac[6];
+        /* FaultDetect congestion ENTRY per resource (#121): idx =
+         * OPC_CONGESTION_* - 1 (CPU, Memory, Disk I/O, Network); the probe
+         * never produces Memory, the slot exists so the platform-event path
+         * (opcd.c) stays under the same period rule. */
+        bool     fault_pending[4];
+        uint16_t fault_val[4];
     } indication_coalesce[2];
 
     /* Device status as visible to GetBasicInfo (boot → ready → logged_in). */

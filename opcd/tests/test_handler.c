@@ -2033,10 +2033,17 @@ int main(void)
                    "intake: NULL frame → 0");
         }
 
-        /* 23. T6 interim: the congestion probe fires FaultDetect on the
-         *     reporting period and re-notifies while the congestion
-         *     persists. Synthetic /proc/stat source; disk/net sources are
-         *     left dead so only the CPU resource can flag. */
+        /* 23. #121 / §4.3.9 p.37: FaultDetect (0x0010) is a STATE-CHANGE
+         *     notification. The congestion probe runs on its own device-internal
+         *     interval (congestion_probe_interval_s), independent of the
+         *     Indication Period, and a resource is notified ONCE on congestion
+         *     ENTRY (below→above threshold). With Period>=1 the entry is staged
+         *     in the #105 coalesce slot and flushed at the period end; a
+         *     persisting congestion is NOT re-notified; a drop below threshold
+         *     is a clear hook (no frame, inquiry Q6) and a later rise is a fresh
+         *     entry. Synthetic /proc/stat source; disk/net sources are left dead
+         *     so only the CPU resource can flag. Probe interval set to 1 s so
+         *     every tick samples. */
         {
             char fpd[64], fpstat[128];
             snprintf(fpd, sizeof fpd, "test_handler_fp_%d", (int)getpid());
@@ -2047,46 +2054,114 @@ int main(void)
             if (ff) { fputs("cpu  0 0 0 1000 0 0 0 0\n", ff); fclose(ff); }
 
             opcd_fault_probe_init(&st.fault_probe);
+            st.fault_probe.probe_interval_s = 1;
             snprintf(st.fault_probe.path_proc_stat,
                      sizeof st.fault_probe.path_proc_stat, "%s", fpstat);
             snprintf(st.fault_probe.path_diskstats,
                      sizeof st.fault_probe.path_diskstats, "%s/none", fpd);
             snprintf(st.fault_probe.net_dir,
                      sizeof st.fault_probe.net_dir, "%s/none", fpd);
-
-            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
-                                  OPC_IND_BIT_FAULT_DETECT, 1);
-            ASSERT(r == OPC_RESULT_OK, "T6: FaultDetect-only indication enabled");
-            opcd_ind_tick(&st);              /* period 1 → fires; primes probe */
-            ASSERT(wait_fd_readable(cli, 200) != 0,
-                   "T6: priming tick emits nothing");
-
-            ff = fopen(fpstat, "w");         /* +900 busy / +1000 total = 90% */
-            ASSERT(ff != NULL, "T6: fixture write (90%)");
-            if (ff) { fputs("cpu  900 0 0 1100 0 0 0 0\n", ff); fclose(ff); }
-            st.fault_probe.mono_ms -= 1000;  /* pretend one second elapsed */
-            opcd_ind_tick(&st);
-            ASSERT(wait_fd_readable(cli, 1000) == 0, "T6: congestion frame sent");
-            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
             opc_ind_fault_detect_t fdi;
+#define T6_CPU(busy, idle) do { \
+                ff = fopen(fpstat, "w"); ASSERT(ff != NULL, "T6: fixture write"); \
+                if (ff) { fprintf(ff, "cpu  %d 0 0 %d 0 0 0 0\n", (busy), (idle)); fclose(ff); } \
+                st.fault_probe.mono_ms -= 1000;  /* pretend one second elapsed */ \
+            } while (0)
+
+            /* 23-a. Period 2: entry sampled on tick 1 is staged (silent), flushed
+             *       once at the period end (tick 2); persisting congestion over
+             *       the next periods is silent. */
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_FAULT_DETECT, 2);
+            ASSERT(r == OPC_RESULT_OK, "T6: FaultDetect-only indication enabled (period 2)");
+            opcd_ind_tick(&st);              /* tick 1: primes probe */
+            ASSERT(wait_fd_readable(cli, 200) != 0, "T6: priming tick emits nothing");
+            T6_CPU(900, 1100);               /* +900 busy / +1000 total = 90% */
+            opcd_ind_tick(&st);              /* tick 2: period end; probe enters → flushed */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "T6: congestion ENTRY frame sent at period end");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
             ASSERT(rn > 0 &&
                    opc_ind_fault_detect_unpack(rx_buf, (size_t)rn, &fdi) == 0 &&
                    fdi.congestion_id == OPC_CONGESTION_CPU &&
                    fdi.current_val >= 80,
                    "T6: CPU congestion id and value reported");
-
-            ff = fopen(fpstat, "w");         /* still 90% over the next period */
-            ASSERT(ff != NULL, "T6: fixture write (repeat)");
-            if (ff) { fputs("cpu  1800 0 0 1200 0 0 0 0\n", ff); fclose(ff); }
-            st.fault_probe.mono_ms -= 1000;
+            T6_CPU(1800, 1200);              /* still 90% */
             opcd_ind_tick(&st);
-            ASSERT(wait_fd_readable(cli, 1000) == 0,
-                   "T6: persistent congestion re-notified");
+            T6_CPU(2700, 1300);              /* still 90% */
+            opcd_ind_tick(&st);              /* period end */
+            ASSERT(wait_fd_readable(cli, 300) != 0,
+                   "T6: persisting congestion is NOT re-notified (state-change semantics)");
+
+            /* 23-b. Entry sampled mid-period is staged and flushed at the period
+             *       end, not on the sampling tick. */
+            T6_CPU(2700, 2300);              /* 0% → clear (no frame, Q6 hook); tick 1 of period */
+            opcd_ind_tick(&st);
+            T6_CPU(2700, 3300);              /* 0% still; tick 2 = period end, nothing staged */
+            opcd_ind_tick(&st);
+            T6_CPU(3600, 3400);              /* 90% → fresh entry, sampled on tick 1 of the next period */
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 300) != 0,
+                   "T6: clear emits nothing; re-entry mid-period is staged, not sent");
+            T6_CPU(4500, 3500);
+            opcd_ind_tick(&st);              /* tick 2 = period end → flush */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "T6: staged re-entry flushed at period end");
             rn = recv(cli, rx_buf, sizeof rx_buf, 0);
             ASSERT(rn > 0 &&
                    opc_ind_fault_detect_unpack(rx_buf, (size_t)rn, &fdi) == 0 &&
                    fdi.congestion_id == OPC_CONGESTION_CPU,
-                   "T6: repeat frame is FaultDetect CPU");
+                   "T6: re-entry frame is FaultDetect CPU, exactly one");
+            ASSERT(wait_fd_readable(cli, 200) != 0, "T6: no second frame for the same entry");
+
+            /* 23-c. A new recipient (SetIndicationConfig) must learn of an ONGOING
+             *       congestion: the latch is reset with the coalesce state, so
+             *       the next sample is a fresh entry. */
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_FAULT_DETECT, 1);
+            ASSERT(r == OPC_RESULT_OK, "T6: reconfigured to period 1");
+            T6_CPU(5400, 3600);              /* still 90% */
+            opcd_ind_tick(&st);              /* re-primes after reset? no — counters kept; entry → flush */
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "T6: ongoing congestion re-notified once to the new recipient");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            T6_CPU(6300, 3700);
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 300) != 0, "T6: and not again while it persists");
+
+            /* 23-d. Period 0: the probe still runs (its own interval) and an
+             *       entry is notified IMMEDIATELY on the sampling tick. */
+            T6_CPU(6300, 4700);              /* 0% → clear */
+            opcd_ind_tick(&st);
+            r = do_set_indication(&st, LOOP, 0x7F000001, cli_port,
+                                  OPC_IND_BIT_FAULT_DETECT, 0);
+            ASSERT(r == OPC_RESULT_OK, "T6: FaultDetect-only indication, period 0");
+            T6_CPU(7200, 4800);              /* 90% → entry */
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "T6: period 0 — entry notified immediately on the probe tick");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 &&
+                   opc_ind_fault_detect_unpack(rx_buf, (size_t)rn, &fdi) == 0 &&
+                   fdi.congestion_id == OPC_CONGESTION_CPU && fdi.current_val >= 80,
+                   "T6: period 0 frame is FaultDetect CPU");
+            T6_CPU(8100, 4900);              /* still 90% */
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 300) != 0, "T6: period 0 — persisting congestion silent");
+
+            /* 23-e. The probe interval is device-internal: with interval 3 and
+             *       period 0, ticks 1-2 do not sample, tick 3 does. */
+            T6_CPU(8100, 5900);              /* 0% → clear */
+            opcd_ind_tick(&st);
+            st.fault_probe.probe_interval_s = 3;
+            T6_CPU(9000, 6000);              /* 90% present from now on */
+            opcd_ind_tick(&st);
+            T6_CPU(9900, 6100);
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 300) != 0, "T6: interval 3 — no sample on ticks 1-2");
+            T6_CPU(10800, 6200);
+            opcd_ind_tick(&st);
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "T6: interval 3 — sampled and notified on tick 3");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+#undef T6_CPU
             unlink(fpstat);
             rmdir(fpd);
         }
