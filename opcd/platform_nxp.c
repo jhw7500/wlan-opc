@@ -935,8 +935,11 @@ static int count_set_bits(uint32_t v)
 }
 
 /* Apply a committed IP-config slot to the management IP at runtime, on the
- * interface selected by opc.conf device_ip_iface (0=eth0 default, 1=mlan0 —
- * the SAME selector the GetDeviceInfo read path uses; see ip_iface.h).
+ * interface the caller selects (0=eth0, 1=mlan0): opc.conf device_ip_iface
+ * under the eth0_ip topology, mlan0 unconditionally under peer_route (#122,
+ * topology.h) — always the SAME plane the GetDeviceInfo read path uses
+ * (handler.c mgmt_ip_iface_idx; see ip_iface.h). Under peer_route the
+ * caller follows a success with nxp_peer_route_refresh (below).
  *
  * eth0 routing on this board is owned by wifi_init.sh (it assigns the mlan0 IP
  * as a host-scope /32 and manages a table-100 policy rule, actively overriding
@@ -1045,6 +1048,83 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
         fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply%s\n",
                 essid_buf, erc == 0 ? " (wpa_cli)" : " FAILED");
     }
+    return ret;
+}
+
+/* #122 peer_route artifact refresh — what wifi_init.sh's peer_route block
+ * installs at boot (eth0 /32 mirror FIRST in eth0's address list, table-100
+ * link route) plus wifi_peer_net_reapply.sh's mgmt-address reorder and
+ * host-route `src`, with the address supplied by opcd instead of re-read from
+ * 20-mlan0.network. The iif=eth0 policy rule is left alone
+ * (address-independent, installed at boot).
+ *
+ * The kernel deletes every route whose preferred source is an address being
+ * removed from the device (fib_sync_down_addr) — and by the time this runs
+ * apply_ip_change has already taken the OLD address off mlan0, so dropping
+ * eth0's old /32 mirror would silently erase the peer host routes and the
+ * eth_fallback metric-200 route, and the del/add reorder of the demoted
+ * 22-eth0.network address erases any non-kernel route with THAT src too.
+ * Hence the order:
+ *   0. SNAPSHOT every non-kernel main-table route on eth0, with `src OLD`
+ *      rewritten to `src NEW` (iproute2 prints IPv4 host routes WITHOUT
+ *      "/32", so the match is on the src field) and the kernel's state
+ *      flags stripped — with no carrier on eth0 (wired peer detached, the
+ *      everyday state here) every line ends in `linkdown`, which
+ *      `ip route replace` rejects as garbage;
+ *   1. add the NEW /32 before touching anything (a failure here leaves the
+ *      old mirror in place — never an eth0 without a mirror);
+ *   2. drop every OTHER /32 (the old mirror; eth_fallback shares it);
+ *   3. re-add each non-/32 global address (brd preserved; other attributes —
+ *      lifetimes, labels, noprefixroute — are not, fine for the static
+ *      22-eth0.network address, wrong if eth0 ever became DHCP) so the mirror
+ *      is eth0's FIRST inet line — wifi_logger's link.json takes the first
+ *      line and the #90 guard's /32 exemption depends on it (brief del→add
+ *      window, the same trade-off wifi_peer_net_reapply.sh makes);
+ *   4. table 100 link route for the new subnet;
+ *   5. RE-ISSUE the snapshot verbatim (`ip route replace`, idempotent for
+ *      untouched routes, restores the flushed ones with the new src).
+ * Each step records failure into rc; a route that cannot be re-issued is a
+ * failure (artifacts lost). Bounded by IP_CHANGE_TIMEOUT_MS. ipbuf/netbuf
+ * are digits-and-dots and prefix is 1..32 — injection-safe. */
+static int nxp_peer_route_refresh(uint32_t ip_host, uint32_t netmask_host)
+{
+    int prefix = count_set_bits(netmask_host);
+    if (prefix < 1 || prefix > 32 ||
+        netmask_host != (prefix == 32 ? 0xFFFFFFFFu : ~(0xFFFFFFFFu >> prefix)))
+        return -EINVAL;                       /* non-contiguous, as in apply */
+    char ipbuf[INET_ADDRSTRLEN], netbuf[INET_ADDRSTRLEN];
+    uint32_t ip_be  = htonl(ip_host);
+    uint32_t net_be = htonl(ip_host & netmask_host);
+    if (!inet_ntop(AF_INET, &ip_be, ipbuf, sizeof ipbuf) ||
+        !inet_ntop(AF_INET, &net_be, netbuf, sizeof netbuf))
+        return -EINVAL;
+
+    char cmd[1400];
+    int n = snprintf(cmd, sizeof cmd,
+        "rc=0; new=%s; "
+        "old=$(ip -4 addr show dev eth0 | awk '/inet .*\\/32/{sub(\"/32\",\"\",$2); print $2; exit}'); "
+        "snap=$(ip -4 route show dev eth0 | awk -v o=\"$old\" -v n=\"$new\" "
+        "'/proto kernel/{next} {for(i=1;i<NF;i++) if($i==\"src\"&&$(i+1)==o){$(i+1)=n}; "
+        "gsub(/(^| )(linkdown|dead|offload|trap|notify)( |$)/,\" \"); print}'); "
+        "ip addr replace \"$new/32\" dev eth0 || rc=1; "
+        "ip -4 addr show dev eth0 | awk '/inet .*\\/32/{print $2}' | "
+        "while read -r a; do [ \"$a\" = \"$new/32\" ] || ip addr del \"$a\" dev eth0 || exit 1; done || rc=1; "
+        "ip -4 addr show dev eth0 | awk '/inet .*scope global/&&!/\\/32/{b=($3==\"brd\")?\" brd \"$4:\"\"; print $2 b}' | "
+        "while read -r a; do ip addr del $a dev eth0 2>/dev/null; ip addr add $a dev eth0 || exit 1; done || rc=1; "
+        "ip route flush table 100 2>/dev/null; ip route replace %s/%d dev eth0 scope link table 100 || rc=1; "
+        "printf '%%s\\n' \"$snap\" | while read -r r; do [ -n \"$r\" ] || continue; "
+        "ip route replace $r dev eth0 || exit 1; done || rc=1; "
+        "exit $rc",
+        ipbuf, netbuf, prefix);
+    if (n < 0 || (size_t)n >= sizeof cmd) {
+        fprintf(stderr, "opcd: nxp_peer_route_refresh: command too long\n");
+        return -ENAMETOOLONG;
+    }
+    const char *argv[] = { "sh", "-c", cmd, NULL };
+    int ret = run_argv_bounded("nxp_peer_route_refresh", IP_BIN_SH,
+                               (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
+    fprintf(stderr, "opcd: nxp_peer_route_refresh: eth0 mirror %s/32, table 100 %s/%d%s\n",
+            ipbuf, netbuf, prefix, ret == 0 ? "" : " (FAILED — artifacts may be stale)");
     return ret;
 }
 
@@ -1463,6 +1543,7 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .get_link              = nxp_get_link,
     .apply_radio_config    = nxp_apply_radio_config,
     .apply_ip_change       = nxp_apply_ip_change,
+    .peer_route_refresh    = nxp_peer_route_refresh,
     .prepare_reset         = nxp_prepare_reset,
     .event_fd              = nxp_event_fd,
     .drain_events          = nxp_drain_events,

@@ -10,6 +10,7 @@
 #include "fault_probe.h"
 #include "freq_source.h"
 #include "ip_iface.h"
+#include "topology.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,9 @@ typedef struct opcd_conf {
     uint32_t login_idle_s;         /* configurable for tests (default OPC_LOGIN_IDLE_S) */
     opcd_freq_source_t device_info_freq_source; /* default OPC_FREQ_SRC_CONFIG */
     opcd_ip_iface_t    device_ip_iface;         /* default OPC_IP_IFACE_ETH0 */
+    opcd_topology_t    management_topology;     /* #122: resolved at startup —
+                                                 * peer_route forces mlan0 for
+                                                 * the IP read/apply plane */
 } opcd_conf_t;
 
 #define OPC_DEFAULT_UDP_PORT         50607
@@ -42,6 +46,7 @@ typedef struct opcd_paths {
     const char *radio;
     const char *device_info;
     const char *temp_dir;
+    const char *wifi_init_conf;   /* topology source (#122), see topology.h */
 } opcd_paths_t;
 
 #define OPC_PATH_BASE        "/usr/local/opc/etc"
@@ -50,6 +55,7 @@ typedef struct opcd_paths {
 #define OPC_PATH_IPLIST      OPC_PATH_BASE "/iplist.cfg"
 #define OPC_PATH_RADIO       OPC_PATH_BASE "/radio.conf"
 #define OPC_PATH_DEVICE_INFO OPC_PATH_BASE "/device_info.json"
+#define OPC_PATH_WIFI_INIT_CONF "/usr/local/etc/wifi_init_conf.json"   /* wlan-package */
 #define OPC_PATH_TEMP        OPC_PATH_BASE "/temp"
 
 /* 128 IP-config slots. */

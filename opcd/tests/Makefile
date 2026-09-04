@@ -37,6 +37,7 @@ OPCD_OBJS_CHAN      := $(OPCDOBJ)/chan_encode.o
 # Pure opc.conf freq-source parser — no platform backend, no protocol library.
 OPCD_OBJS_FREQSRC   := $(OPCDOBJ)/freq_source.o
 OPCD_OBJS_IPIFACE   := $(OPCDOBJ)/ip_iface.o
+OPCD_OBJS_TOPOLOGY  := $(OPCDOBJ)/topology.o
 # Pure opc.conf roam-notify-port parser — no platform backend, no protocol library.
 OPCD_OBJS_ROAMCONF  := $(OPCDOBJ)/roam_notify_conf.o
 # roam-notify datagram parser — links roam_datagram.o + its deps (json_util for
@@ -47,7 +48,7 @@ OPCD_OBJS_OLOG      := $(OPCDOBJ)/opcd_log.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
          test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
-         test_freq_source test_ip_iface test_roam_notify_conf test_roam_datagram test_opcd_log
+         test_freq_source test_ip_iface test_topology test_roam_notify_conf test_roam_datagram test_opcd_log
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -93,6 +94,10 @@ $(TESTDIR)/test_freq_source: $(TESTDIR)/test_freq_source.o $(OPCD_OBJS_FREQSRC)
 # protocol library), mirroring test_freq_source.
 $(TESTDIR)/test_ip_iface: $(TESTDIR)/test_ip_iface.o $(OPCD_OBJS_IPIFACE)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_ip_iface.o $(OPCD_OBJS_IPIFACE)
+
+# Management-topology resolver test (#122) — links only topology.o.
+$(TESTDIR)/test_topology: $(TESTDIR)/test_topology.o $(OPCD_OBJS_TOPOLOGY)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_topology.o $(OPCD_OBJS_TOPOLOGY)
 
 # Pure opc.conf parser test — links only roam_notify_conf.o (no platform
 # backend, no libopcproto). Reuses the host opcd object built by `make native`.

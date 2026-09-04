@@ -48,9 +48,25 @@ static int stub_get_eth_mac(uint8_t mac[6])
  * test_handler can observe the device_ip_iface source switch:
  *   ip 192.0.2.100 (0xC0000264) / mask 255.255.255.0 / gw 0 ("no gateway",
  *   mirroring the mlan0 link.json gateway:null reality). */
+static struct { bool set; uint32_t ip, mask, gw; } s_dev_ipv4[2];
+/* Test-only override of the per-interface triple (#122 guard tests need
+ * eth0 to report an address); stub_reset_dev_ipv4 restores the fixed table. */
+void stub_set_dev_ipv4(int iface, uint32_t ip, uint32_t mask, uint32_t gw)
+{
+    if (iface < 0 || iface > 1) return;
+    s_dev_ipv4[iface].set = true;
+    s_dev_ipv4[iface].ip = ip; s_dev_ipv4[iface].mask = mask; s_dev_ipv4[iface].gw = gw;
+}
+void stub_reset_dev_ipv4(void) { memset(s_dev_ipv4, 0, sizeof s_dev_ipv4); }
+
 static int stub_get_dev_ipv4(int iface, uint32_t *ip_host,
                              uint32_t *netmask_host, uint32_t *gateway_host)
 {
+    if ((iface == 0 || iface == 1) && s_dev_ipv4[iface].set) {
+        *ip_host = s_dev_ipv4[iface].ip; *netmask_host = s_dev_ipv4[iface].mask;
+        *gateway_host = s_dev_ipv4[iface].gw;
+        return 0;
+    }
     if (iface == 1) {
         *ip_host      = 0xC0000264u;
         *netmask_host = 0xFFFFFF00u;
@@ -250,6 +266,22 @@ void        stub_apply_ip_reset(void)           { s_apply_ip_calls = 0; s_apply_
                                                   s_apply_ip_last_essid[0] = '\0'; s_apply_ip_fail = 0; }
 void        stub_apply_ip_set_fail(int fail)    { s_apply_ip_fail = fail; }
 
+static unsigned s_pr_refresh_calls = 0;
+static uint32_t s_pr_refresh_last_ip = 0, s_pr_refresh_last_mask = 0;
+
+static int stub_peer_route_refresh(uint32_t ip_host, uint32_t netmask_host)
+{
+    s_pr_refresh_calls++;
+    s_pr_refresh_last_ip   = ip_host;
+    s_pr_refresh_last_mask = netmask_host;
+    return 0;
+}
+unsigned stub_peer_route_refresh_calls(void)     { return s_pr_refresh_calls; }
+uint32_t stub_peer_route_refresh_last_ip(void)   { return s_pr_refresh_last_ip; }
+uint32_t stub_peer_route_refresh_last_mask(void) { return s_pr_refresh_last_mask; }
+void     stub_peer_route_refresh_reset(void)     { s_pr_refresh_calls = 0;
+                                                   s_pr_refresh_last_ip = s_pr_refresh_last_mask = 0; }
+
 static int stub_prepare_reset(void)
 {
     return 0;
@@ -288,6 +320,7 @@ static const opcd_platform_ops_t g_stub_ops = {
     .get_link              = stub_get_link,
     .apply_radio_config    = stub_apply_radio_config,
     .apply_ip_change       = stub_apply_ip_change,
+    .peer_route_refresh    = stub_peer_route_refresh,
     .prepare_reset         = stub_prepare_reset,
     .event_fd              = stub_event_fd,
     .drain_events          = stub_drain_events,

@@ -43,6 +43,12 @@ extern uint32_t     stub_apply_ip_last_ip(void);
 extern int          stub_apply_ip_last_iface(void);
 extern void         stub_apply_ip_reset(void);
 extern void         stub_apply_ip_set_fail(int fail);
+extern unsigned     stub_peer_route_refresh_calls(void);
+extern uint32_t     stub_peer_route_refresh_last_ip(void);
+extern uint32_t     stub_peer_route_refresh_last_mask(void);
+extern void         stub_peer_route_refresh_reset(void);
+extern void         stub_set_dev_ipv4(int iface, uint32_t ip, uint32_t mask, uint32_t gw);
+extern void         stub_reset_dev_ipv4(void);
 extern const char  *stub_apply_ip_last_essid(void);
 extern void     stub_apply_radio_set_fail(int fail);
 extern void     stub_apply_radio_set_fail_once(int fail);
@@ -2903,6 +2909,82 @@ int main(void)
         opcd_apply_pending_ip_change(&st);
         ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_iface() == 1,
                "ip-iface mlan0: apply_ip_change targets iface=1 (mlan0)");
+    }
+
+    /* 28. #122 peer_route management topology: one management IP lives on
+     *     mlan0 (eth0 carries only its /32 mirror), so the §3.3.4 read and the
+     *     §3.3.7 apply BOTH follow mlan0 regardless of device_ip_iface, and a
+     *     successful apply refreshes the peer_route artifacts (eth0 /32
+     *     mirror, table-100 link route, peer host-route src) through the
+     *     platform hook. eth0_ip topology (shipping default) is unchanged:
+     *     no refresh. A failed apply never refreshes (IP did not move). */
+    {
+        uint32_t ip = 1, mask = 1, gw = 1;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.conf.management_topology = OPC_TOPOLOGY_PEER_ROUTE;
+        st.conf.device_ip_iface     = OPC_IP_IFACE_ETH0;   /* stale/default selector */
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        ASSERT(do_get_devinfo_ip(&st, CIP, &ip, &mask, &gw) == 0 &&
+               ip == 0xC0000264u && mask == 0xFFFFFF00u,
+               "peer_route: device-info IP triple follows mlan0 even with device_ip_iface=eth0");
+
+        stub_apply_ip_reset(); stub_peer_route_refresh_reset();
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK, "peer_route: change-ip accepted");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "peer_route: logout ok");
+        opcd_apply_pending_ip_change(&st);
+        ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_iface() == 1,
+               "peer_route: apply_ip_change targets iface=1 (mlan0) regardless of selector");
+        ASSERT(stub_peer_route_refresh_calls() == 1 &&
+               stub_peer_route_refresh_last_ip() == 0xC0A80165u &&
+               stub_peer_route_refresh_last_mask() == 0xFFFFFF00u,
+               "peer_route: artifacts refreshed once with the new IP/mask after a successful apply");
+
+        /* failed apply → no refresh (the address did not move) */
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_apply_ip_reset(); stub_peer_route_refresh_reset();
+        stub_apply_ip_set_fail(1);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK, "peer_route: change-ip accepted (fail arm)");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "peer_route: logout ok (fail arm)");
+        opcd_apply_pending_ip_change(&st);
+        ASSERT(stub_apply_ip_calls() == 1 && stub_peer_route_refresh_calls() == 0,
+               "peer_route: failed apply does NOT refresh artifacts");
+        stub_apply_ip_set_fail(0);
+
+        /* #90 guard under peer_route: "other" is now eth0. Its /32 mirror of
+         * the management IP is NOT a subnet clash (same-subnet re-address is
+         * the normal ChangeIp), while a demoted 22-eth0.network /24 that
+         * overlaps the requested subnet still is (0x0050). */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.conf.management_topology = OPC_TOPOLOGY_PEER_ROUTE;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START, 0xC0000265 /* 192.0.2.101/24 */);
+        (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_END,   0xC0000265);
+        stub_set_dev_ipv4(0, 0xC0000264u, 0xFFFFFFFFu, 0);   /* eth0 = /32 mirror of 192.0.2.100 */
+        ASSERT(do_change_ip(&st, CIP, 2) == OPC_RESULT_OK,
+               "peer_route guard: eth0 /32 mirror is not a clash — same-subnet re-address accepted");
+        stub_set_dev_ipv4(0, 0xC0000201u, 0xFFFFFF00u, 0);   /* eth0 = 192.0.2.1/24 (demoted mgmt addr) */
+        r = do_change_ip(&st, CIP, 2);
+        ASSERT(r == OPC_RESULT_NG && g_last_chgip_err == OPC_ERR_IP_CHANGE_CLASH,
+               "peer_route guard: eth0 /24 overlapping the target subnet -> 0x0050");
+        stub_reset_dev_ipv4();
+
+        /* eth0_ip topology (shipping default): selector honoured, no refresh */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.conf.management_topology = OPC_TOPOLOGY_ETH0_IP;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        ASSERT(do_get_devinfo_ip(&st, CIP, &ip, &mask, &gw) == 0 && ip == 0 && mask == 0,
+               "eth0_ip: device-info IP triple follows the selector (eth0 zeros)");
+        stub_apply_ip_reset(); stub_peer_route_refresh_reset();
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK, "eth0_ip: change-ip accepted");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "eth0_ip: logout ok");
+        opcd_apply_pending_ip_change(&st);
+        ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_iface() == 0 &&
+               stub_peer_route_refresh_calls() == 0,
+               "eth0_ip: apply targets eth0 and does not touch peer_route artifacts");
     }
 
     unlink(g_pw_path);

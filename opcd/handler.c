@@ -65,6 +65,17 @@ static int check_login_required(const opcd_state_t *st, uint32_t client_ip,
     return 0;
 }
 
+/* The platform interface index the management IP read/apply plane follows.
+ * eth0_ip: the opc.conf device_ip_iface selector. peer_route (#122): mlan0 by
+ * construction — the shared management IP is mlan0's, eth0 holds only its
+ * /32 mirror — so the selector is not consulted (a stale eth0 selector would
+ * otherwise read zeros and swap the demoted 22-eth0.network address). */
+static int mgmt_ip_iface_idx(const opcd_state_t *st)
+{
+    if (st->conf.management_topology == OPC_TOPOLOGY_PEER_ROUTE) return 1;
+    return opcd_ip_iface_idx(st->conf.device_ip_iface);
+}
+
 /* Single owner of session teardown — used by explicit logout, dispatch idle
  * check, and the main-loop timer idle check (previously three divergent
  * copies). Emits the final LOGGED_OUT transition while indication is still
@@ -723,12 +734,14 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             (void)plat->get_firmware_version(ack.firmware_version, sizeof ack.firmware_version);
             (void)plat->get_ntp_server(&ack.ntp_server);
             (void)plat->get_eth_mac(ack.ethernet_mac);
-            /* IP triple follows the management-IP interface selector
-             * (opc.conf device_ip_iface, default eth0) so the §3.3.4 read
-             * stays on the same plane as the §3.3.7 apply target — see
-             * ip_iface.h. ethernet_mac intentionally stays eth0: mlan0's MAC
-             * is the cloned peer MAC and would misreport the device. */
-            (void)plat->get_dev_ipv4(opcd_ip_iface_idx(st->conf.device_ip_iface),
+            /* IP triple follows the management-IP plane — opc.conf
+             * device_ip_iface (default eth0) under the eth0_ip topology,
+             * mlan0 under peer_route (#122) — so the §3.3.4 read stays on
+             * the same plane as the §3.3.7 apply target (mgmt_ip_iface_idx;
+             * see ip_iface.h / topology.h). ethernet_mac intentionally stays
+             * eth0: mlan0's MAC is the cloned peer MAC and would misreport
+             * the device. */
+            (void)plat->get_dev_ipv4(mgmt_ip_iface_idx(st),
                                      &ack.ip_address, &ack.subnet_mask,
                                      &ack.default_gateway);
             (void)plat->get_wlan_mac(0, ack.wlan1.mac);
@@ -1037,7 +1050,7 @@ static bool ipcfg_clashes_other_iface(const opcd_state_t *st,
 {
     const opcd_platform_ops_t *plat = opcd_platform();
     if (!plat) return false;
-    int other = (opcd_ip_iface_idx(st->conf.device_ip_iface) == 0) ? 1 : 0;
+    int other = (mgmt_ip_iface_idx(st) == 0) ? 1 : 0;
     uint32_t oip = 0, omask = 0, ogw = 0;
     if (plat->get_dev_ipv4(other, &oip, &omask, &ogw) != 0) return false;
     if (oip == 0 || omask == 0 || omask == 0xFFFFFFFFu) return false;
@@ -1499,8 +1512,7 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
      * vtable is fully populated after init(), so only the registration guard
      * (opcd_platform() can be NULL before register) is needed. */
     const opcd_platform_ops_t *plat = opcd_platform();
-    int rc = plat ? plat->apply_ip_change(
-                        e, opcd_ip_iface_idx(st->conf.device_ip_iface)) : -1;
+    int rc = plat ? plat->apply_ip_change(e, mgmt_ip_iface_idx(st)) : -1;
     if (rc != 0) {
         fprintf(stderr, "opcd: apply pending IP change: platform apply_ip_change failed\n");
         OLOG_ERR("exec: IP change apply failed (slot=%u)", st->ip_change_armed_no);
@@ -1508,6 +1520,16 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
         OLOG_INFO("exec: IP change applied (slot=%u) — indication target invalidated",
                   st->ip_change_armed_no);
         st->indication_enabled = false;   /* IP changed → indication target invalid */
+        /* peer_route (#122): the address moved on mlan0; eth0's /32 mirror,
+         * the table-100 link route and the peer host-route src still name
+         * the OLD address until refreshed. Best-effort — the IP itself is
+         * already applied, so a refresh failure is logged, not reverted. */
+        if (st->conf.management_topology == OPC_TOPOLOGY_PEER_ROUTE &&
+            plat->peer_route_refresh(e->ip_address, e->subnet_mask) != 0) {
+            fprintf(stderr, "opcd: apply pending IP change: peer_route artifact refresh failed\n");
+            OLOG_ERR("exec: peer_route refresh failed after IP change (slot=%u) — eth0 mirror/routes stale",
+                     st->ip_change_armed_no);
+        }
     }
 
     /* Fully reset the deferred-commit state. The arm gate already prevents a
