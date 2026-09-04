@@ -47,6 +47,7 @@ typedef struct opcd_paths {
     const char *device_info;
     const char *temp_dir;
     const char *wifi_init_conf;   /* topology source (#122), see topology.h */
+    const char *reset_cause;      /* autonomous-reset cause ID file (#47 T9), reset_cause.h */
 } opcd_paths_t;
 
 #define OPC_PATH_BASE        "/usr/local/opc/etc"
