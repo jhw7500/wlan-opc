@@ -38,6 +38,7 @@
 #include "inventory.h"
 #include "json_util.h"
 #include "opcd_log.h"
+#include "reset_cause.h"
 #include "opcd_state.h"
 #include "platform.h"
 #include "roam_datagram.h"
@@ -136,6 +137,7 @@ static void state_set_defaults(opcd_state_t *st)
     st->conf.management_topology     = OPC_TOPOLOGY_ETH0_IP;
     st->paths.conf        = OPC_PATH_CONF;
     st->paths.wifi_init_conf = OPC_PATH_WIFI_INIT_CONF;
+    st->paths.reset_cause    = OPC_PATH_RESET_CAUSE;
     st->paths.password    = OPC_PATH_PASSWORD;
     st->paths.ip_list     = OPC_PATH_IPLIST;
     st->paths.radio       = OPC_PATH_RADIO;
@@ -509,6 +511,28 @@ int main(int argc, char **argv)
                     OLOG_INFO("stop: signal %u received — shutting down", first_signo);
                 else
                     OLOG_INFO("stop: shutting down (signalfd readable, no signal number)");
+                /* §3.4.6 autonomous-reset notice (#47 T9, reset_cause.h): a
+                 * SIGTERM that is part of a SYSTEM shutdown/reboot — every
+                 * board recovery path ends in one — is announced with the
+                 * cause the reboot policy left behind (else SYSTEM). A plain
+                 * `systemctl stop opcd` answers "running" and stays silent;
+                 * an unanswerable probe (OPC_RESET_PROBE_TIMEOUT_MS, sized from
+                 * the measured shutdown latency) also stays silent — a reset
+                 * is never announced on a guess. The network is still up
+                 * here (opcd is After=network-online.target). */
+                if (first_signo == SIGTERM) {
+                    int stopping = opcd_system_stopping(OPC_PATH_SYSTEMCTL,
+                                                        OPC_RESET_PROBE_TIMEOUT_MS);
+                    uint32_t cause = opcd_shutdown_reset_cause(
+                        stopping, opcd_reset_cause_read(st.paths.reset_cause));
+                    if (cause) {
+                        (void)opcd_ind_reset_notice(&st, cause);
+                        OLOG_INFO("stop: system going down — ResetNotice cause=0x%08X sent (if enabled)",
+                                  (unsigned)cause);
+                    } else {
+                        OLOG_INFO("stop: not a system shutdown (probe=%d) — no ResetNotice", stopping);
+                    }
+                }
                 st.should_exit = true;
             } else if (fd == timer_fd) {
                 /* Sum every expiration so a multi-second stall advances the

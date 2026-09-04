@@ -213,6 +213,23 @@ $VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) �
 > **이벤트성 producer 구현됨**(2026-06-15): FaultDetect(0x10) 폴링 폭주 프로브(`fault_probe.c`) · WlanStatusChange(0x02)/Roaming(0x04)/ApDisconnect(0x08) nl80211 연동(PR #46, `nxp_drain_events`). 무선 이벤트 트리거는 **`wpa_cli -i mlan0 disconnect/reconnect`** 사용(`iw … disconnect`는 wpa_supplicant가 SME 소유라 "Operation not permitted"). ApDisconnect는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행 — 로컬 disconnect는 WlanStatusChange만 냄. 실타깃 검증(2026-06-15, 214.5): WlanStatusChange ✓ / Roaming·ApDisconnect는 트리거 환경 잔여(#47). 상세 절차는 `docs/testing/manual-runthrough.md` §4 / 세션 메모리 참조.
 > 항상 발생: InitComplete(0x01, enable/login/logout 시), KeepAlive(0x80, period마다), ResetNotice(0x20, reset 시).
 
+### 장치 리셋 통지(0x0020) 자율 리셋 producer — Reset Cause 표와 `/run/opc/reset_cause` (#47 T9)
+
+사양 §3.4.6/§4.4.6의 Reset Cause는 "장치별 리셋 요인 ID"라 당사 정의(문의 Q10 참고 항목). 값은 `protocol/ids.h` `OPC_RESET_CAUSE_*`:
+
+| 값 | 의미 | 발원 |
+|---|---|---|
+| 0x0000_0001 | 운용자 Reset 요구 | opcd `handle_reset` |
+| 0x0000_0002 | 시스템 재부팅/종료, 원인 미상 | opcd SIGTERM(시스템 종료 중) — cause 파일 없음 |
+| 0x0000_0010 / 0x11 / 0x12 | 무선 IF 소실·FW 크래시 / station dump 장애 지속 / 드라이버 wedge | wifi_checker / wlan_fw_watch |
+| 0x0000_0020 | 과열 복구 재부팅 | wifi_logger_temp |
+| 0x0000_0030 | wifi_init 실패 | wlan_emergency_reboot |
+| 0x0000_0040 | 공장 초기화 후 재부팅 | factory_reset |
+
+동작: 모든 자율 재부팅은 `wlan_reboot_policy.sh`/`systemctl reboot`로 수렴하고, opcd.service는 `After=network-online.target`이라 종료 시 네트워크보다 먼저 SIGTERM을 받는다. opcd는 SIGTERM에서 `systemctl is-system-running`(3 s 데드라인 — 종료 중 첫 응답이 실측 1.1 s, 운전 중 22 ms)이 `stopping`이면 `/run/opc/reset_cause`(한 줄, `0x12` 또는 10진)를 읽어 그 값으로, 없으면 0x0002로 ResetNotice를 1회 보내고 종료한다. `systemctl stop opcd`(running)나 판정 불가(타임아웃)는 통지하지 않는다. HW watchdog 타임아웃·sysrq 강제 리셋은 원리상 통지 불가. **부모 저장소 후속**: `wlan_reboot_policy.sh`가 재부팅 직전 `--source/--reason`을 위 값으로 매핑해 `/run/opc/reset_cause`에 쓰면 원인이 세분화된다(없어도 동작).
+
+실기 확인: `vhlctl set-indication --bits 0x20`(RESET_NOTICE) 후 리스너를 영속 파일로 캡처(`vhlctl --hex listen --bind 127.0.0.1:50699 > /root/reset_notice.log`)한 채 `systemctl reboot` → 재부팅 후 로그에 `reset_cause` 프레임 확인. 음성 대조군: `systemctl stop`(또는 `kill -TERM`)만으로는 프레임이 없어야 한다. 호스트는 `opcd/tests/test_reset_cause.c`(가짜 systemctl 스크립트·타임아웃·파일 파싱·판정).
+
 ### 관리 IP 토폴로지 — `wifi_init_conf.json` peer_route / opc.conf `management_topology` (#122)
 
 | 소스 | 값 | 의미 |

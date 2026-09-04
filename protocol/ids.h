@@ -170,7 +170,20 @@
  * the seven assigned OPC_IND_BIT_* above OR to 0xBF. */
 #define OPC_IND_BITS_RESERVED                 0x40
 
-/* Reset cause (Reset ack / ResetNotice indication). */
+/* Reset cause (ResetNotice indication, §3.4.6 / Rev1.01 §4.4.6). The spec
+ * defines the field as a device-specific "리셋 요인 ID" — these are OUR
+ * vendor-defined values (inquiry Q10, 참고: 발주처에 목록 제출 가능).
+ * 0x0000_0001 is the operator Reset request; 0x0000_0002 is any system
+ * reboot whose cause opcd could not learn; 0x0000_0010+ are the autonomous
+ * reset sources of the board's recovery scripts (issue #47 T9), written to
+ * OPC_PATH_RESET_CAUSE by wlan_reboot_policy.sh before it reboots. */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */
+#define OPC_RESET_CAUSE_SYSTEM                0x00000002  /* system reboot/shutdown, cause unknown */
+#define OPC_RESET_CAUSE_WLAN_LINK_LOST        0x00000010  /* wifi_checker: interface/FW gone */
+#define OPC_RESET_CAUSE_WLAN_STATION_FAULT    0x00000011  /* wifi_checker: persistent station dump fault */
+#define OPC_RESET_CAUSE_WLAN_DRIVER_WEDGE     0x00000012  /* wlan_fw_watch: driver wedge, reload failed */
+#define OPC_RESET_CAUSE_OVERTEMP              0x00000020  /* wifi_logger_temp: thermal recovery reboot */
+#define OPC_RESET_CAUSE_INIT_FAILURE          0x00000030  /* wlan_emergency_reboot: wifi_init failed */
+#define OPC_RESET_CAUSE_FACTORY_RESET         0x00000040  /* factory_reset: reboot after reset */
 
 #endif /* WLAN_OPC_IDS_H */
