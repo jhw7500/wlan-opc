@@ -16,8 +16,15 @@ extern "C" {
  *   - threshold: 80% for every resource, overridable via opc.conf
  *     (congestion_threshold_pct / congestion_net_if / congestion_disk_dev /
  *      congestion_net_capacity_mbps)
- *   - sampling: once per indication reporting period (period_seconds)
- *   - persistence: re-notified every period while the congestion persists
+ *   - sampling: on a DEVICE-INTERNAL interval (congestion_probe_interval_s,
+ *     default 10 s), independent of the Indication Period (#121 — the spec
+ *     leaves the resource watch period to the vendor, like Reset Cause)
+ *   - notification: §4.3.9 state-change semantics — ONCE on congestion ENTRY
+ *     (below→above threshold transition), per resource; a persisting
+ *     congestion is not re-notified. Period 0 → immediate, Period ≥ 1 →
+ *     staged in the coalesce slot and flushed at the period end (#105).
+ *     A drop below threshold clears the latch; whether/how to notify the
+ *     clear is inquiry Q6 — hook only, nothing emitted.
  *   - CPU (0x0001):  /proc/stat busy ratio over the interval, current_val = %
  *   - Memory (0x0002): NOT emitted — the target runs swapless, so the spec's
  *     paging-based definition cannot occur; flash pressure is covered by
@@ -34,6 +41,8 @@ extern "C" {
 
 #define OPCD_FAULT_THRESHOLD_PCT_DEFAULT 80
 #define OPCD_FAULT_NET_CAPACITY_DEFAULT  1000   /* Mbps, when sysfs speed is absent */
+#define OPCD_FAULT_PROBE_INTERVAL_DEFAULT 10    /* s, device-internal watch period (#121) */
+#define OPCD_FAULT_PROBE_INTERVAL_MAX     3600
 
 typedef struct opcd_fault_probe {
     /* config */
@@ -41,6 +50,12 @@ typedef struct opcd_fault_probe {
     unsigned net_capacity_mbps;     /* fallback when <net_dir>/speed unusable */
     char     disk_dev[33];          /* /proc/diskstats device name —
                                      * kernel DISK_NAME_LEN(32) + NUL */
+    unsigned probe_interval_s;      /* watch period, 1..OPCD_FAULT_PROBE_INTERVAL_MAX */
+    uint32_t probe_countdown_s;     /* seconds accumulated toward the next sample */
+    /* entry latch (#121): true while the resource is over threshold as of the
+     * last sample. A sample flips it and reports the transition in
+     * opcd_fault_report_t.*_entered / *_cleared. */
+    bool     cpu_congested, disk_congested, net_congested;
     /* source paths (overridable for tests) */
     char     path_proc_stat[96];
     char     path_diskstats[96];
@@ -62,6 +77,10 @@ typedef struct opcd_fault_report {
     bool     cpu_over;  uint16_t cpu_pct;
     bool     disk_over; uint16_t disk_pct;
     bool     net_over;  uint16_t net_pct;
+    /* transitions since the previous sample (#121): entered = below→above
+     * (notify once), cleared = above→below (Q6 hook, not notified). */
+    bool     cpu_entered,  disk_entered,  net_entered;
+    bool     cpu_cleared,  disk_cleared,  net_cleared;
 } opcd_fault_report_t;
 
 /* Defaults: 80% threshold, mmcblk0, eth0, real /proc and /sys paths. */
@@ -70,6 +89,16 @@ void opcd_fault_probe_init(opcd_fault_probe_t *p);
 /* Minimal key=value reader for the congestion_* keys in opc.conf. A missing
  * file or key leaves the defaults; never fails. */
 void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path);
+
+/* Advance the device-internal watch countdown by `elapsed_s`; true when a
+ * sample is due (once per interval — a long stall clamps to a single due,
+ * mirroring the indication tick). */
+bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s);
+
+/* Forget the entry latch so an ONGOING congestion is reported as a fresh
+ * entry on the next sample — for a new indication recipient / config
+ * (opcd_ind_coalesce_reset). Counter baselines are kept. */
+void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p);
 
 /* Sample the sources and evaluate utilisation since the previous call.
  * The first call only primes the counters (*out zeroed, returns 0). An

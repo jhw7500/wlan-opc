@@ -138,15 +138,67 @@ void opcd_ind_coalesce_reset(opcd_state_t *st)
 {
     for (size_t i = 0; i < sizeof st->indication_coalesce / sizeof st->indication_coalesce[0]; i++)
         st->indication_coalesce[i] = (struct opcd_ind_coalesce){0};
+    /* A new recipient/config (or a new session) has no knowledge of an
+     * ONGOING congestion — forget the entry latch so the next probe sample
+     * reports it as a fresh entry (#121). */
+    opcd_fault_probe_reset_latch(&st->fault_probe);
 }
 
-int opcd_ind_fault_detect(opcd_state_t *st, uint16_t cong_id, uint16_t val)
+static int emit_fault_detect(opcd_state_t *st, uint16_t cong_id, uint16_t val)
 {
-    if (!(st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT)) return 0;
     uint8_t frame[OPC_FRAME_MAX];
     opc_ind_fault_detect_t in = { .congestion_id = cong_id, .current_val = val };
     ssize_t n = opc_ind_fault_detect_pack(frame, sizeof frame, next_seq(st), &in);
     return send_indication_frame(st, frame, n);
+}
+
+/* Coalesce slot index for a congestion id (OPC_CONGESTION_* 1..4 → 0..3);
+ * -1 for an id outside the spec table. */
+static int fault_slot(uint16_t cong_id)
+{
+    return (cong_id >= OPC_CONGESTION_CPU && cong_id <= OPC_CONGESTION_NETWORK)
+               ? (int)cong_id - 1 : -1;
+}
+
+/* §4.3.9 (#121): FaultDetect is a state-change notification like the WLAN
+ * status kinds — period 0 notifies on arrival, period > 0 stages the LAST
+ * value per resource for the period-end flush. Callers pass congestion
+ * ENTRIES only (fault_probe entry latch); a persisting congestion is not
+ * re-notified. */
+int opcd_ind_fault_detect(opcd_state_t *st, uint16_t cong_id, uint16_t val)
+{
+    if (!(st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT)) return 0;
+    if (st->indication_period_s > 0) {
+        int slot = fault_slot(cong_id);
+        if (slot < 0) return -1;   /* unknown id: never off-boundary under period>0 */
+        struct opcd_ind_coalesce *c = &st->indication_coalesce[0];
+        c->fault_val[slot]     = val;
+        c->fault_pending[slot] = true;
+        return 0;
+    }
+    return emit_fault_detect(st, cong_id, val);
+}
+
+/* Device-internal congestion watch (#121): runs on its own interval
+ * regardless of the Indication Period (period 0 included — the stream is
+ * off but state changes are still notified on arrival). Only ENTRIES are
+ * notified; a clear only drops the latch (inquiry Q6 decides whether the
+ * clear itself is a notifiable state change). Memory (0x0002) is
+ * deliberately not produced — swapless target, see fault_probe.h. */
+static void fault_probe_tick(opcd_state_t *st, uint32_t elapsed_s)
+{
+    if (!(st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT)) return;
+    if (!opcd_fault_probe_due(&st->fault_probe, elapsed_s)) return;
+    opcd_fault_report_t rep;
+    if (opcd_fault_probe_sample(&st->fault_probe, &rep) != 0) return;
+    if (rep.cpu_entered)
+        (void)opcd_ind_fault_detect(st, OPC_CONGESTION_CPU, rep.cpu_pct);
+    if (rep.disk_entered)
+        (void)opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct);
+    if (rep.net_entered)
+        (void)opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_pct);
+    /* rep.*_cleared: congestion-clear hook — intentionally no notification
+     * until the vendor answers Q6 (notify as a state change, or not at all). */
 }
 
 int opcd_ind_reset_notice(opcd_state_t *st, uint32_t cause)
@@ -176,10 +228,13 @@ void opcd_ind_tick(opcd_state_t *st) { opcd_ind_tick_elapsed(st, 1); }
 void opcd_ind_tick_elapsed(opcd_state_t *st, uint32_t elapsed_s)
 {
     if (!st->indication_enabled)             return;
+    /* The congestion watch has its own interval (#121) and must run before
+     * the period-0 return below: with period 0 an entry is notified at once,
+     * with period > 0 it is staged and flushed further down in this call. */
+    fault_probe_tick(st, elapsed_s);
     if (st->indication_period_s == 0)        return;   /* spec: 0 disables the stream */
-    /* The reporting period drives both KeepAlive and the congestion probe
-     * (T6 interim: 판별은 보고 주기에 맞게) — advance the counter when
-     * either is enabled. */
+    /* The reporting period drives KeepAlive and the coalesce flush — advance
+     * the counter when any of them is enabled. */
     if (!(st->indication_info_bits &
           (OPC_IND_BIT_KEEP_ALIVE | OPC_IND_BIT_FAULT_DETECT |
            OPC_IND_BIT_WLAN_STATUS_CHANGE | OPC_IND_BIT_ROAMING |
@@ -211,22 +266,11 @@ void opcd_ind_tick_elapsed(opcd_state_t *st, uint32_t elapsed_s)
         if (c->apd_pending &&
             emit_ap_disconnect(st, c->apd_msg_id, c->apd_reason, c->apd_mac) == 0)
             c->apd_pending = false;
-    }
-
-    /* T6 interim congestion probe (decision 2026-06-12, inquiry #35): one
-     * sample per reporting period, re-notified every period while the
-     * congestion persists. Memory (0x0002) is deliberately not produced —
-     * swapless target, see fault_probe.h. */
-    if (st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT) {
-        opcd_fault_report_t rep;
-        if (opcd_fault_probe_sample(&st->fault_probe, &rep) == 0) {
-            if (rep.cpu_over)
-                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_CPU, rep.cpu_pct);
-            if (rep.disk_over)
-                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct);
-            if (rep.net_over)
-                (void)opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_pct);
-        }
+        /* FaultDetect congestion entries staged by fault_probe_tick (#121) */
+        for (int k = 0; k < 4; k++)   /* idx = OPC_CONGESTION_* - 1 */
+            if (c->fault_pending[k] &&
+                emit_fault_detect(st, (uint16_t)(k + 1), c->fault_val[k]) == 0)
+                c->fault_pending[k] = false;
     }
 
     /* Emit KeepAlive with ISO-8601 timestamp — skipped entirely when only

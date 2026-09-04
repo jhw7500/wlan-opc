@@ -20,8 +20,10 @@ int opcd_ind_fault_detect  (opcd_state_t *st, uint16_t cong_id, uint16_t val);
 int opcd_ind_reset_notice  (opcd_state_t *st, uint32_t cause);
 int opcd_ind_keep_alive    (opcd_state_t *st, const char *timestamp);
 
-/* Called once per second by the main loop's timerfd. Emits KeepAlive when the
- * configured period has elapsed. */
+/* Called once per second by the main loop's timerfd. Runs the congestion
+ * probe on its own interval (#121 — also with period 0, where an entry is
+ * notified at once), then at a period boundary flushes the staged state
+ * changes and emits KeepAlive. */
 void opcd_ind_tick(opcd_state_t *st);
 
 /* Like opcd_ind_tick but advances the reporting-period counter by `elapsed_s`

@@ -213,6 +213,17 @@ $VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) �
 > **이벤트성 producer 구현됨**(2026-06-15): FaultDetect(0x10) 폴링 폭주 프로브(`fault_probe.c`) · WlanStatusChange(0x02)/Roaming(0x04)/ApDisconnect(0x08) nl80211 연동(PR #46, `nxp_drain_events`). 무선 이벤트 트리거는 **`wpa_cli -i mlan0 disconnect/reconnect`** 사용(`iw … disconnect`는 wpa_supplicant가 SME 소유라 "Operation not permitted"). ApDisconnect는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행 — 로컬 disconnect는 WlanStatusChange만 냄. 실타깃 검증(2026-06-15, 214.5): WlanStatusChange ✓ / Roaming·ApDisconnect는 트리거 환경 잔여(#47). 상세 절차는 `docs/testing/manual-runthrough.md` §4 / 세션 메모리 참조.
 > 항상 발생: InitComplete(0x01, enable/login/logout 시), KeepAlive(0x80, period마다), ResetNotice(0x20, reset 시).
 
+### FaultDetect(0x0010) 폭주 probe — opc.conf `congestion_*` 키
+
+| 키 | 기본 | 의미 |
+|---|---|---|
+| `congestion_probe_interval_s` | 10 (1..3600) | 자원 사용률 측정 주기(장치 고유, Indication Period와 무관 — #121). Period 0에서도 측정·즉시 통지 |
+| `congestion_threshold_pct` | 80 | CPU/Disk/Net 공통 임계(%) |
+| `congestion_net_if` / `congestion_net_capacity_mbps` | eth0 / 1000 | 네트워크 사용률 소스·링크 속도 폴백 |
+| `congestion_disk_dev` | mmcblk0 | `/proc/diskstats` 장치명 |
+
+통지는 자원별 **폭주 진입 시 1회**(임계 미만→초과 전이). 지속 중 재통지 없음, 해소 통지는 발주처 Q6 회신 대기. 로컬 재현은 `opcd/tests/test_handler.c` 23 블록(합성 `/proc/stat`) 참조.
+
 ### ErrorCause (protocol/ids.h) — `0x0010`은 다의(ARCH-001)
 `0x0001` login-violation · `0x0002` login-condition · `0x0010` indication-violation/pw-mismatch/slot-range/station-type ·
 `0x0011` slot-empty · `0x0012` ip-change-conflict · `0x0013` radio-mode · `0x0014` radio-bw · `0x0050` radio-apply

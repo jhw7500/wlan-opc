@@ -1,8 +1,10 @@
 /*
- * FaultDetect (0x0010) congestion probe — T6 INTERIM policy.
- * See fault_probe.h for the full policy note (operator decision 2026-06-12,
- * vendor inquiry #35). Called from opcd_ind_tick() once per indication
- * reporting period when the FaultDetect info bit (0x10) is enabled.
+ * FaultDetect (0x0010) congestion probe.
+ * See fault_probe.h for the policy note (thresholds: operator decision
+ * 2026-06-12 / vendor inquiry #35; watch period + entry-only notification:
+ * #121). Sampled from the indication tick on its own device-internal
+ * interval (congestion_probe_interval_s) when the FaultDetect info bit (0x10)
+ * is enabled — independent of the Indication Period.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -147,6 +149,7 @@ void opcd_fault_probe_init(opcd_fault_probe_t *p)
     memset(p, 0, sizeof *p);
     p->threshold_pct     = OPCD_FAULT_THRESHOLD_PCT_DEFAULT;
     p->net_capacity_mbps = OPCD_FAULT_NET_CAPACITY_DEFAULT;
+    p->probe_interval_s  = OPCD_FAULT_PROBE_INTERVAL_DEFAULT;
     snprintf(p->disk_dev,       sizeof p->disk_dev,       "mmcblk0");
     snprintf(p->path_proc_stat, sizeof p->path_proc_stat, "/proc/stat");
     snprintf(p->path_diskstats, sizeof p->path_diskstats, "/proc/diskstats");
@@ -169,6 +172,12 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
         if (strcmp(key, "congestion_threshold_pct") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             if (v >= 1 && v <= 100) p->threshold_pct = (unsigned)v;
+        } else if (strcmp(key, "congestion_probe_interval_s") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            /* out-of-range keeps the default, silently like the sibling
+             * numeric keys above/below */
+            if (v >= 1 && v <= OPCD_FAULT_PROBE_INTERVAL_MAX)
+                p->probe_interval_s = (unsigned)v;
         } else if (strcmp(key, "congestion_net_capacity_mbps") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             /* upper bound guards the (unsigned) store on LP64 hosts */
@@ -192,6 +201,25 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
         }
     }
     fclose(f);
+}
+
+bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s)
+{
+    if (!p) return false;
+    uint32_t interval = p->probe_interval_s ? p->probe_interval_s : 1;
+    /* Clamp like opcd_ind_tick_elapsed: a stall longer than the interval
+     * yields one sample, not a burst. */
+    if (elapsed_s > interval) elapsed_s = interval;
+    p->probe_countdown_s += elapsed_s;
+    if (p->probe_countdown_s < interval) return false;
+    p->probe_countdown_s = 0;
+    return true;
+}
+
+void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)
+{
+    if (!p) return;
+    p->cpu_congested = p->disk_congested = p->net_congested = false;
 }
 
 static int read_net_bytes(const opcd_fault_probe_t *p, uint64_t *bytes)
@@ -225,7 +253,7 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
 
     /* 32 KiB stack buffer is deliberate: diskstats on the NXP target is
      * well under 1 KiB; the headroom absorbs many-device dev/CI hosts.
-     * One frame per reporting period on the daemon stack — no recursion. */
+     * One frame per probe interval on the daemon stack — no recursion. */
     char buf[32768];
     uint64_t busy = 0, total = 0, disk = 0, net = 0;
     bool cpu_ok  = read_text(p->path_proc_stat, buf, sizeof buf) == 0 &&
@@ -258,6 +286,27 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
         opcd_fault_evaluate(p, d_busy, d_total, d_disk, elapsed, d_net,
                             (net_ok && p->net_primed) ? read_link_mbps(p) : 0,
                             out);
+        /* Entry latch (#121): report the transition, then remember the level
+         * — but only for a source that was actually measured this sample
+         * (read ok AND primed). An unreadable or re-priming source is
+         * UNKNOWN, not "below threshold": its latch holds, so a transient
+         * read failure neither clears the congestion nor makes the recovered
+         * over-sample a duplicate entry (Claude review, #121). */
+        if (cpu_ok && p->cpu_primed) {
+            out->cpu_entered  =  out->cpu_over  && !p->cpu_congested;
+            out->cpu_cleared  = !out->cpu_over  &&  p->cpu_congested;
+            p->cpu_congested  = out->cpu_over;
+        }
+        if (disk_ok && p->disk_primed) {
+            out->disk_entered =  out->disk_over && !p->disk_congested;
+            out->disk_cleared = !out->disk_over &&  p->disk_congested;
+            p->disk_congested = out->disk_over;
+        }
+        if (net_ok && p->net_primed) {
+            out->net_entered  =  out->net_over  && !p->net_congested;
+            out->net_cleared  = !out->net_over  &&  p->net_congested;
+            p->net_congested  = out->net_over;
+        }
     }
 
     /* Refresh baselines: a successful read (re)primes its source; a failed
