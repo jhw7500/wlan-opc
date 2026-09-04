@@ -133,7 +133,9 @@ static void state_set_defaults(opcd_state_t *st)
     st->conf.login_idle_s         = OPC_LOGIN_IDLE_S;
     st->conf.device_info_freq_source = OPC_FREQ_SRC_LIVE;   /* Rev1.01 §4.3.4 (#103) */
     st->conf.device_ip_iface         = OPC_IP_IFACE_ETH0;
+    st->conf.management_topology     = OPC_TOPOLOGY_ETH0_IP;
     st->paths.conf        = OPC_PATH_CONF;
+    st->paths.wifi_init_conf = OPC_PATH_WIFI_INIT_CONF;
     st->paths.password    = OPC_PATH_PASSWORD;
     st->paths.ip_list     = OPC_PATH_IPLIST;
     st->paths.radio       = OPC_PATH_RADIO;
@@ -307,6 +309,11 @@ int main(int argc, char **argv)
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
     st.conf.device_info_freq_source = opcd_freq_source_parse(st.paths.conf);
     st.conf.device_ip_iface         = opcd_ip_iface_parse(st.paths.conf);
+    st.conf.management_topology     = opcd_topology_parse(st.paths.conf, st.paths.wifi_init_conf);
+    if (st.conf.management_topology == OPC_TOPOLOGY_PEER_ROUTE &&
+        st.conf.device_ip_iface != OPC_IP_IFACE_MLAN0)
+        fprintf(stderr, "opcd: management topology peer_route — the IP read/apply "
+                        "plane follows mlan0; opc.conf device_ip_iface is ignored (#122)\n");
     st.conf.roam_notify_port =
         opcd_roam_notify_port_parse(st.paths.conf, st.conf.roam_notify_port);
 

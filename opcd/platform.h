@@ -226,6 +226,15 @@ typedef struct opcd_platform_ops {
      * GetDeviceInfo read path uses (ip_iface.h): a read/apply split across
      * interfaces makes the VHL §3.3.6→§3.3.7→§3.3.4 loop diverge. */
     int  (*apply_ip_change)(const opc_ipcfg_entry_t *slot, int iface);
+    /* peer_route topology only (#122, topology.h): after apply_ip_change
+     * moved the shared management IP on mlan0, re-point the wifi_init.sh
+     * artifacts at the NEW address — eth0 /32 mirror, table-100
+     * link route for the new subnet, and the `src` of peer host routes on
+     * eth0. Mirrors wifi_init.sh's peer_route block / wifi_peer_net_reapply.sh
+     * but takes the address from opcd (those scripts read 20-mlan0.network,
+     * which a volatile ChangeIp does not rewrite). Non-blocking, bounded.
+     * Non-zero = artifacts may be stale (logged; the IP change stands). */
+    int  (*peer_route_refresh)(uint32_t ip_host, uint32_t netmask_host);
 
     /* Deterministic reset notice → soft reboot ack path.
      * opcd exits cleanly after Ack (main returns 0; systemd Restart=always

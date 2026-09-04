@@ -72,7 +72,7 @@
 |---|---|---|
 | #120 | SetPassword/SetIPConfigList 재송을 §4.1.3(재송 폐기·원 요구 SN 응답)으로 정렬 + 낡은 주석·테스트 정합 | **완료** (PR #124) — pending ack 슬롯에 요청 body 보관, 명령 공통 `is_body_retransmission`(같은 (ip,port) in-flight 슬롯과 memcmp) → 재송 폐기·원 SN 응답. 주석 정정(A19/Q6/period-0/NTP 0.0.0.0). 테스트 21e~21l·14i 0.0.0.0·14d-2 로그인 게이트 |
 | #121 | 장애 검출 통지(0x0010) 측정 타이머를 Indication Period에서 분리 + 폭주 진입 시 1회 통지 | **완료** — probe는 `opc.conf::congestion_probe_interval_s`(기본 10 s, 1..3600) 자체 카운트다운으로 1 s tick에서 분리(Period 0에서도 동작). 자원별 진입 래치: 진입 전이만 통지(Period 0 즉시, ≥1은 #105 슬롯 staging 후 주기 말 1회), 지속 시 재통지 없음, 해소는 훅만(Q6 대기). SetIndicationConfig/로그아웃 시 래치 초기화(새 수신자에 진행 중 폭주 1회 통지). 테스트 23·test_fault_probe 8/9 |
-| #122 | peer_route 구성에서 ChangeIp·device_ip_iface·서브넷 겹침 가드 검증 및 정합 | 미착수 |
+| #122 | peer_route 구성에서 ChangeIp·device_ip_iface·서브넷 겹침 가드 검증 및 정합 | **구현 완료·실기 검증 대기** — 토폴로지 판정 `opcd/topology.{c,h}`: 소스는 `wifi_init_conf.json` `.wbridge.peer_route.enabled`(wifi_init.sh와 동일 토글), opc.conf `management_topology = auto\|eth0_ip\|peer_route`는 테스트용 override. peer_route면 IP 읽기/적용 평면을 mlan0로 강제(device_ip_iface 무시·경고), ChangeIp 성공 후 플랫폼 훅 `peer_route_refresh`로 eth0 /32 미러·table 100 link route·peer host route src를 새 IP로 갱신(wifi_init.sh 시퀀스 재현, 스크립트는 20-mlan0.network를 읽어 휘발성 ChangeIp와 맞지 않음). 겹침 가드는 변경 없음(/32는 서브넷 충돌이 될 수 없음). 테스트 28·test_topology. **실기(peer-route 프로파일 + 재부팅) 검증은 미완** |
 
 ## 우선순위 요약
 - **임팩트 순(자율)**: ① SetRadio 실반영(L) > ② ChangeIp essid/ntp(M/S) > ③ Version/EEPROM(M) > ④ AP구분/EHT/스텔스(M/S)

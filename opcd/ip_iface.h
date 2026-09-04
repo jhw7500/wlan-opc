@@ -9,6 +9,11 @@
  * ("option X") topology where the management plane lives on the wireless
  * interface (issue #89).
  *
+ * Under the peer_route topology (#122, topology.h) the selector is NOT
+ * consulted: the management IP is mlan0's by construction (eth0 carries only
+ * its /32 mirror), so read and apply follow mlan0 — handler.c
+ * mgmt_ip_iface_idx() is the single decision point.
+ *
  * The selector governs BOTH the GetDeviceInfo IP/netmask/gateway read source
  * AND the ChangeIp apply target: reading and writing must stay on the same
  * interface, or the VHL's spec loop (§3.3.6 set → §3.3.7 change → §3.3.4

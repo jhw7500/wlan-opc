@@ -213,6 +213,15 @@ $VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) �
 > **이벤트성 producer 구현됨**(2026-06-15): FaultDetect(0x10) 폴링 폭주 프로브(`fault_probe.c`) · WlanStatusChange(0x02)/Roaming(0x04)/ApDisconnect(0x08) nl80211 연동(PR #46, `nxp_drain_events`). 무선 이벤트 트리거는 **`wpa_cli -i mlan0 disconnect/reconnect`** 사용(`iw … disconnect`는 wpa_supplicant가 SME 소유라 "Operation not permitted"). ApDisconnect는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때만 발행 — 로컬 disconnect는 WlanStatusChange만 냄. 실타깃 검증(2026-06-15, 214.5): WlanStatusChange ✓ / Roaming·ApDisconnect는 트리거 환경 잔여(#47). 상세 절차는 `docs/testing/manual-runthrough.md` §4 / 세션 메모리 참조.
 > 항상 발생: InitComplete(0x01, enable/login/logout 시), KeepAlive(0x80, period마다), ResetNotice(0x20, reset 시).
 
+### 관리 IP 토폴로지 — `wifi_init_conf.json` peer_route / opc.conf `management_topology` (#122)
+
+| 소스 | 값 | 의미 |
+|---|---|---|
+| `/usr/local/etc/wifi_init_conf.json` `.wbridge.peer_route.enabled` | true/false | **운영 기준**. true면 관리 IP 1개를 mlan0(primary)+eth0 /32 미러가 공유하는 peer_route 토폴로지. wifi_init.sh와 같은 판정표: 파일 없음→eth0_ip(degraded), 파일 있고 키 없음/무효→**peer_route(공장 기본)** |
+| `opc.conf` `management_topology` | `auto`(기본)·`eth0_ip`·`peer_route` | 테스트/벤치용 override. `auto`는 JSON을 따름 |
+
+peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_iface`와 무관하게 mlan0를 따르고(기동 시 경고 1줄), ChangeIp 성공 후 eth0 /32 미러(첫 주소로 재배치)·table 100 link route·eth0 경로의 `src`(peer host route, eth_fallback metric 200)가 새 IP로 갱신된다(`nxp_peer_route_refresh`, 실패 시 로그만). 호스트에서는 `unshare -rn` + dummy eth0/mlan0로 시퀀스를 드라이런할 수 있다 — 픽스처는 **mlan0에 NEW만, eth0에 강등 /24 + OLD/32**(apply 후 상태)로 만들어야 커널 prefsrc flush가 재현된다(PR #122 검증 절차). 호스트 stub는 `stub_peer_route_refresh_*`로 호출을 관측한다(`test_handler.c` 28). 실기 검증은 `wifi 0 br profile peer-route apply` + 재부팅 후 ChangeIp → `ip -4 addr show eth0`(새 IP /32)·`ip route show table 100`·`ip route show dev eth0`(src) 확인.
+
 ### FaultDetect(0x0010) 폭주 probe — opc.conf `congestion_*` 키
 
 | 키 | 기본 | 의미 |
