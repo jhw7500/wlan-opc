@@ -983,6 +983,29 @@ int main(void)
     ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_LOGIN_CONDITION,
            "A14: other IP while logged in → 0x0002 (0x0013 deleted per DFK)");
 
+    /* 14d-2. The login gate of the two body-compared deferred-ack commands
+     *        (#120): SetPassword / SetIpConfigList from a not-logged-in source
+     *        → 0x0001, from a logged-in *other* IP → 0x0002 — nothing is
+     *        staged, committed, or persisted. Pins the gate that the §4.1.3
+     *        retransmission test must sit BEHIND. */
+    init_state(&st, OPC_PASSWORD_DEFAULT);
+    r = do_set_password(&st, CIP, OPC_PASSWORD_DEFAULT, "NoLoginPw1");
+    ASSERT(r == OPC_RESULT_NG && g_last_pw_err == OPC_ERR_LOGIN_VIOLATION &&
+           strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+           "login gate: set-password not logged in → 0x0001, password unchanged");
+    r = do_set_ip_list(&st, CIP, 3, OPC_LIST_BOUNDARY_START_END, 0xC0A80303);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LOGIN_VIOLATION &&
+           !st.ip_list.present[2] && !st.ip_list_staging_active,
+           "login gate: set-ip-list not logged in → 0x0001, nothing staged or committed");
+    (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    r = do_set_password(&st, CIP + 1, OPC_PASSWORD_DEFAULT, "NoLoginPw1");
+    ASSERT(r == OPC_RESULT_NG && g_last_pw_err == OPC_ERR_LOGIN_CONDITION,
+           "login gate: set-password from other IP while logged in → 0x0002");
+    r = do_set_ip_list(&st, CIP + 1, 3, OPC_LIST_BOUNDARY_START_END, 0xC0A80303);
+    ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LOGIN_CONDITION &&
+           !st.ip_list.present[2],
+           "login gate: set-ip-list from other IP while logged in → 0x0002, nothing committed");
+
     /* 14e. D10: non-unicast indication recipient → 0x0012 (spec "IP 주소 이상"). */
     r = do_set_indication(&st, CIP, 0xFFFFFFFF, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
     ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
@@ -1150,6 +1173,11 @@ int main(void)
         r = do_set_ip_entry(&st, CIP, &ent);
         ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
                "D1: loopback host IP → 0x0011");
+
+        ent.ip_address      = 0;                      /* 0.0.0.0 — unset device IP */
+        r = do_set_ip_entry(&st, CIP, &ent);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
+               "D1: 0.0.0.0 device IP → 0x0011 (Rev1.01 Q9: the device IP has no unset value)");
 
         ent.ip_address      = 0xC0A80165u;            /* /32 P2P: off-block GW ok */
         ent.subnet_mask     = 0xFFFFFFFFu;
@@ -1484,12 +1512,12 @@ int main(void)
                disk_radio.wlan1.mode == OPC_WLAN_MODE_11A,
                "async set-radio: NVRAM file written");
 
-        /* 21. A19 / Rev1.01 그림 4-2: a byte-identical retransmission (new SN)
-         *     arriving while the ORIGINAL request's NVRAM write is still in
-         *     flight is DISCARDED — it is not re-applied and starts no second
-         *     write — and the single ack carries the ORIGINAL request's SN, not
-         *     the retransmission's. (#104 inverts Rev1.00, which answered the
-         *     newest SN.) */
+        /* 21. §4.1.3 그림 4-2 (= Rev1.00 그림 3-4): a byte-identical
+         *     retransmission (new SN) arriving while the ORIGINAL request's
+         *     NVRAM write is still in flight is DISCARDED — it is not
+         *     re-applied and starts no second write — and the single ack
+         *     carries the ORIGINAL request's SN, not the retransmission's
+         *     (#104). */
         opc_set_radio_config_req_t a19r;
         memset(&a19r, 0, sizeof a19r);
         a19r.station_type    = OPC_STATION_SINGLE;
@@ -1625,6 +1653,295 @@ int main(void)
             ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
                    ahdr.sequence_number == 96,
                    "A19 multiport: P2 answered with Y's SN (96)");
+            close(cli2);
+        }
+
+        /* 21e. #120 / §4.1.3 (Rev1.00 그림 3-4 = Rev1.01 그림 4-2, identical):
+         *     the original-SN retransmission rule is COMMAND-COMMON, not a
+         *     SetRadioConfig special case. SetPassword: a byte-identical
+         *     re-send arriving while the ORIGINAL's NVRAM write is in flight
+         *     is discarded — it is not re-evaluated against the already
+         *     changed password (which would NG it inline on the new SN) and
+         *     starts no second write — and the single ack carries the
+         *     ORIGINAL SN. Fresh session so this does not depend on 20-21. */
+        while (wait_fd_readable(opc_store_async_event_fd(sa), 200) == 0)
+            opcd_store_async_on_ready(&st);
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd      = srv;
+        st.store_async = sa;
+        (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, OPC_PASSWORD_DEFAULT, sizeof preq.old_password - 1);
+        strncpy(preq.new_password, "RetxSecret1", sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 100, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "pw retx: original (SN=100) deferred");
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 101, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0,
+               "pw retx: in-flight retransmission (SN=101) gives no immediate response");
+        ASSERT(strcmp(st.password, "RetxSecret1") == 0,
+               "pw retx: in-memory password is the original's, untouched by the retransmission");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "pw retx: completion signalled");
+        opcd_store_async_on_ready(&st);
+        if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
+            opcd_store_async_on_ready(&st);   /* only the original enqueued a write */
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "pw retx: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 100 &&
+               opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
+               pack_ack.result == OPC_RESULT_OK,
+               "pw retx: the single ack carries the ORIGINAL SN (100), not the retransmission's");
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "pw retx: no second ack for the discarded retransmission");
+
+        /* 21f. 엇갈림(cross): the same re-send arriving AFTER the original ack
+         *      went out is a NEW request answered with its OWN SN. Processed
+         *      afresh, its old password no longer matches → inline NG on
+         *      SN=102 (the new-request outcome, not a silent discard). */
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 102, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen > 0, "pw cross: post-response retransmission answered immediately");
+        ASSERT(opc_frame_parse(resp, (size_t)rlen, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 102 &&
+               opc_set_password_ack_unpack(resp, (size_t)rlen, &pack_ack) == 0 &&
+               pack_ack.result == OPC_RESULT_NG &&
+               pack_ack.error_cause == OPC_ERR_PASSWORD_MISMATCH,
+               "pw cross: crossed retransmission processed as a new request on its own SN (102)");
+
+        /* 21g. A DIFFERENT same-command request while A is in flight is a new
+         *      request (rapid reconfigure), not a retransmission: B is
+         *      processed and answered on ITS OWN SN; A's superseded ack is
+         *      dropped (one ack total). B ends at the default password so the
+         *      following cases start from a known state. */
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, "RetxSecret1", sizeof preq.old_password - 1);
+        strncpy(preq.new_password, "RetxSecretA", sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 103, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "pw payload: original A(SN=103) deferred");
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, "RetxSecretA", sizeof preq.old_password - 1);
+        strncpy(preq.new_password, OPC_PASSWORD_DEFAULT, sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 104, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "pw payload: distinct B(SN=104) deferred, not dropped as a retry");
+        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+               "pw payload: distinct B applied");
+        for (int d = 0; d < 3; d++) {
+            if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+            opcd_store_async_on_ready(&st);
+        }
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "pw payload: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 104 &&
+               opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
+               pack_ack.result == OPC_RESULT_OK,
+               "pw payload: distinct request answered with its OWN SN (104)");
+        ASSERT(wait_fd_readable(cli, 300) != 0, "pw payload: exactly one ack");
+
+        /* 21h. Multiport: the retransmission is matched against THIS port's
+         *      pending request. P1's X (default→PwX) in flight, P2 sends a
+         *      distinct valid Y (PwX→PwY), then P1 re-sends X: X's old
+         *      password no longer matches memory, yet it is a retransmission
+         *      of P1's in-flight request → discarded; P1 gets X's ORIGINAL SN,
+         *      P2 gets Y's. A final P1 request restores the default password. */
+        {
+            uint16_t cli2_port = 0;
+            int cli2 = bind_loopback_udp(&cli2_port);
+            ASSERT(cli2 >= 0, "pw multiport: second client socket");
+            opc_set_password_req_t pqX, pqY, pqR;
+            memset(&pqX, 0, sizeof pqX);
+            strncpy(pqX.old_password, OPC_PASSWORD_DEFAULT, sizeof pqX.old_password - 1);
+            strncpy(pqX.new_password, "RetxPwX", sizeof pqX.new_password - 1);
+            memset(&pqY, 0, sizeof pqY);
+            strncpy(pqY.old_password, "RetxPwX", sizeof pqY.old_password - 1);
+            strncpy(pqY.new_password, "RetxPwY", sizeof pqY.new_password - 1);
+            memset(&pqR, 0, sizeof pqR);
+            strncpy(pqR.old_password, "RetxPwY", sizeof pqR.old_password - 1);
+            strncpy(pqR.new_password, OPC_PASSWORD_DEFAULT, sizeof pqR.new_password - 1);
+
+            fn   = opc_set_password_req_pack(frame, sizeof frame, 105, &pqX);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "pw multiport: X(SN=105) from P1 deferred");
+            fn   = opc_set_password_req_pack(frame, sizeof frame, 106, &pqY);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "pw multiport: distinct Y(SN=106) from P2 deferred");
+            fn   = opc_set_password_req_pack(frame, sizeof frame, 107, &pqX);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0,
+                   "pw multiport: X retransmission(SN=107) from P1 no inline resp");
+            for (int d = 0; d < 4; d++) {
+                if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+                opcd_store_async_on_ready(&st);
+            }
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "pw multiport: P1 ack arrived");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 105,
+                   "pw multiport: P1 answered with X's ORIGINAL SN (105), not the retransmission SN");
+            ASSERT(wait_fd_readable(cli, 300) != 0, "pw multiport: P1 exactly one ack");
+            ASSERT(wait_fd_readable(cli2, 5000) == 0, "pw multiport: P2 ack arrived");
+            rn = recv(cli2, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 106,
+                   "pw multiport: P2 answered with Y's SN (106)");
+            close(cli2);
+
+            fn   = opc_set_password_req_pack(frame, sizeof frame, 108, &pqR);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "pw multiport: restore (SN=108) deferred");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+                   "pw multiport: restore completion signalled");
+            opcd_store_async_on_ready(&st);
+            ASSERT(wait_fd_readable(cli, 5000) == 0 &&
+                   recv(cli, rx_buf, sizeof rx_buf, 0) > 0 &&
+                   strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+                   "pw multiport: default password restored");
+        }
+
+        /* 21i. SetIpConfigList, same §4.1.3 series. A 0x0003 (시작 및 완료)
+         *     entry commits + persists in one frame; its byte-identical
+         *     re-send while that write is in flight is discarded — not
+         *     re-committed, no second write — and the ack carries the
+         *     ORIGINAL SN. */
+        opc_set_ip_config_list_req_t ireq;
+        memset(&ireq, 0, sizeof ireq);
+        ireq.entry_count              = 1;
+        ireq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+        ireq.entries[0].list_number   = 7;
+        ireq.entries[0].ip_address    = 0xC0A8070Au;   /* 192.168.7.10 */
+        ireq.entries[0].subnet_mask   = 0xFFFFFF00u;
+        opc_set_ip_config_list_ack_t iack;
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 110, &ireq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "ip retx: original (SN=110) deferred");
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 111, &ireq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0,
+               "ip retx: in-flight retransmission (SN=111) gives no immediate response");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+               "ip retx: completion signalled");
+        opcd_store_async_on_ready(&st);
+        if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
+            opcd_store_async_on_ready(&st);   /* only the original enqueued a write */
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "ip retx: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 110 &&
+               opc_set_ip_config_list_ack_unpack(rx_buf, (size_t)rn, &iack) == 0 &&
+               iack.result == OPC_RESULT_OK,
+               "ip retx: the single ack carries the ORIGINAL SN (110), not the retransmission's");
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "ip retx: no second ack for the discarded retransmission");
+        ASSERT(st.ip_list.present[6] && st.ip_list.slots[6].ip_address == 0xC0A8070Au,
+               "ip retx: original entry committed");
+
+        /* 21j. 엇갈림(cross): the re-send after the original ack is a NEW
+         *      request — a 0x0003 is self-contained, so it re-commits and is
+         *      answered (deferred) with its OWN SN. */
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 112, &ireq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "ip cross: post-response retransmission processed anew (deferred)");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "ip cross: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "ip cross: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 112 &&
+               opc_set_ip_config_list_ack_unpack(rx_buf, (size_t)rn, &iack) == 0 &&
+               iack.result == OPC_RESULT_OK,
+               "ip cross: crossed retransmission answered with its own SN (112)");
+
+        /* 21k. A DIFFERENT list request while A is in flight is a new request:
+         *      B is committed and answered on ITS OWN SN; A's superseded ack
+         *      is dropped (one ack total). */
+        opc_set_ip_config_list_req_t irA = ireq, irB = ireq;
+        irA.entries[0].ip_address  = 0xC0A8070Bu;   /* 192.168.7.11 */
+        irB.entries[0].list_number = 8;
+        irB.entries[0].ip_address  = 0xC0A80714u;   /* 192.168.7.20 */
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 113, &irA);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "ip payload: original A(SN=113) deferred");
+        fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 114, &irB);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "ip payload: distinct B(SN=114) deferred, not dropped as a retry");
+        ASSERT(st.ip_list.present[7] && st.ip_list.slots[7].ip_address == 0xC0A80714u,
+               "ip payload: distinct B committed");
+        for (int d = 0; d < 3; d++) {
+            if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+            opcd_store_async_on_ready(&st);
+        }
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "ip payload: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 &&
+               opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 114 &&
+               opc_set_ip_config_list_ack_unpack(rx_buf, (size_t)rn, &iack) == 0 &&
+               iack.result == OPC_RESULT_OK,
+               "ip payload: distinct request answered with its OWN SN (114)");
+        ASSERT(wait_fd_readable(cli, 300) != 0, "ip payload: exactly one ack");
+
+        /* 21l. Multiport: P1's X in flight, P2 sends a distinct Y, P1 re-sends
+         *      X → discarded against P1's pending request; P1 gets X's
+         *      ORIGINAL SN, P2 gets Y's. */
+        {
+            uint16_t cli2_port = 0;
+            int cli2 = bind_loopback_udp(&cli2_port);
+            ASSERT(cli2 >= 0, "ip multiport: second client socket");
+            opc_set_ip_config_list_req_t irX = ireq, irY = ireq;
+            irX.entries[0].ip_address  = 0xC0A8070Cu;   /* 192.168.7.12 */
+            irY.entries[0].list_number = 8;
+            irY.entries[0].ip_address  = 0xC0A80715u;   /* 192.168.7.21 */
+            fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 115, &irX);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "ip multiport: X(SN=115) from P1 deferred");
+            fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 116, &irY);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "ip multiport: distinct Y(SN=116) from P2 deferred");
+            fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 117, &irX);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0,
+                   "ip multiport: X retransmission(SN=117) from P1 no inline resp");
+            for (int d = 0; d < 4; d++) {
+                if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+                opcd_store_async_on_ready(&st);
+            }
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "ip multiport: P1 ack arrived");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 115,
+                   "ip multiport: P1 answered with X's ORIGINAL SN (115), not the retransmission SN");
+            ASSERT(wait_fd_readable(cli, 300) != 0, "ip multiport: P1 exactly one ack");
+            ASSERT(wait_fd_readable(cli2, 5000) == 0, "ip multiport: P2 ack arrived");
+            rn = recv(cli2, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 116,
+                   "ip multiport: P2 answered with Y's SN (116)");
             close(cli2);
         }
 

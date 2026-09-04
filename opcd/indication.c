@@ -94,9 +94,9 @@ static int emit_ap_disconnect(opcd_state_t *st, uint16_t msg_id, uint16_t reason
 
 /* §4.3.9 period coalescing (#105): with a reporting period > 0 a state change
  * is STAGED (latest wins) and flushed once at the period boundary by
- * opcd_ind_tick; with period 0 it is notified on arrival (spec branch pending a
- * 발주처 answer on period-0 semantics). Only idx 0 is staged under the
- * mlan0-only policy (opcd.c drops idx != 0). */
+ * opcd_ind_tick; with period 0 it is notified on arrival, as the spec requires
+ * (p.37, unchanged since Rev1.00). Only idx 0 is staged under the mlan0-only
+ * policy (opcd.c drops idx != 0). */
 int opcd_ind_wlan_status(opcd_state_t *st, uint16_t status, uint16_t ch)
 {
     if (!(st->indication_info_bits & OPC_IND_BIT_WLAN_STATUS_CHANGE)) return 0;

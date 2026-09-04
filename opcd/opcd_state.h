@@ -68,17 +68,26 @@ struct opc_store_async;
 #define OPCD_PENDING_ACK_MAX 4
 typedef struct opcd_pending_ack {
     bool     in_use;
-    bool     discarded;     /* A19: superseded by a same-command retransmission
-                             * — completion frees the slot without replying */
+    bool     discarded;     /* superseded by a DIFFERENT same-command request
+                             * from the same client (rapid reconfigure) —
+                             * completion frees the slot without replying. A
+                             * byte-identical retransmission never discards:
+                             * §4.1.3 drops the retransmission instead (#120) */
     uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */
     uint16_t seq;           /* echoed sequence number */
     uint32_t radio_gen;     /* SET_RADIO only: st->radio generation this write
                              * persists — completion commits only if it still
                              * equals st->radio_gen (#102) */
     opc_set_radio_config_req_t radio_req;  /* SET_RADIO only: the request this
-                             * slot is persisting — an A19 retransmission is
+                             * slot is persisting — a §4.1.3 retransmission is
                              * matched against THIS, not the global st->radio,
                              * which another port may have overwritten (#104) */
+    uint8_t  req_body[OPC_PAYLOAD_MAX];  /* SET_PASSWORD / SET_IP_CONFIG_LIST:
+                             * the request body this slot is persisting — a
+                             * byte-identical re-send on the same (ip,port)
+                             * while it is in flight is a §4.1.3
+                             * retransmission (#120) */
+    uint16_t req_body_len;
     uint32_t client_ip;     /* host byte order */
     uint16_t client_port;   /* host byte order */
     struct timespec rx_ts;  /* request receipt (CLOCK_MONOTONIC) — T7
