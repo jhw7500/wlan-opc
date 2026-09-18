@@ -102,6 +102,19 @@ bool opc_scan_list_empty(const uint8_t list[OPC_SCAN_CHLIST_LEN])
     return true;
 }
 
+bool opc_scan_list_normalize_rows(uint16_t band, uint8_t list[OPC_SCAN_CHLIST_LEN])
+{
+    if (band != OPC_SCAN_BAND_2_4GHZ && band != OPC_SCAN_BAND_5GHZ) return false;
+    uint32_t a = opc_scan_row_word(list, OPC_SCAN_ROW_A);
+    uint32_t b = opc_scan_row_word(list, OPC_SCAN_ROW_B);
+    if (a != 0 || b == 0) return false;      /* nothing to move, or ambiguous */
+    size_t ao = OPC_SCAN_ROW_A_FIRST ? 0u : 4u;
+    size_t bo = OPC_SCAN_ROW_A_FIRST ? 4u : 0u;
+    memcpy(&list[ao], &list[bo], 4);
+    memset(&list[bo], 0, 4);
+    return true;
+}
+
 bool opc_scan_list_valid(uint16_t band, const uint8_t list[OPC_SCAN_CHLIST_LEN])
 {
     if (!opc_scan_band_known(band)) return opc_scan_list_empty(list);

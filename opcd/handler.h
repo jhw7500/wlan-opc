@@ -68,6 +68,25 @@ void opcd_store_async_on_ready(opcd_state_t *st);
 #define OPCD_RADIO_CONF_LEGACY_LEN 16
 int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t *out);
 
+/* Migrate a config just restored from radio.conf so the CURRENT SCAN-list
+ * validator accepts it, and report whether it does.
+ *
+ * radio.conf written before the row order was confirmed (vendor reply
+ * 2026-09-18) may carry a 2.4/5 GHz SCAN list in row B, which the strict
+ * decoder now rejects and enumerates as zero channels. Restoring such a config
+ * as COMMITTED would report frequency/CH 0 through GetDeviceInfo and make the
+ * deferred best-effort revert a silent no-op — its channel enumeration would be
+ * empty, so the platform apply is skipped while the revert reports success,
+ * breaking the "apply failed => no net change" contract.
+ *
+ * Moves a row-B 2.4/5 GHz list to row A in place (logging that it did) and
+ * returns true when the resulting config passes validation. Returns false when
+ * it still does not; the caller must then discard it to defaults rather than
+ * leave it committed. WLAN#2 is examined only for DUAL — SINGLE ignores it and
+ * the stored bytes may be anything. Inbound frames are never normalized: they
+ * are rejected with 0x0012. */
+bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg);
+
 #ifdef __cplusplus
 }
 #endif

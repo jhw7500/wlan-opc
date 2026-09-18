@@ -439,6 +439,21 @@ static void legacy_radio_wlan_convert(const struct legacy_radio_wlan *in, opc_wl
         opc_scan_list_set_channel(out->scan_chlist, out->scan_band, ch);   /* no-op if unknown */
 }
 
+bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg)
+{
+    if (!cfg) return false;
+    const bool dual = (cfg->station_type == OPC_STATION_DUAL);
+    bool moved = opc_scan_list_normalize_rows(cfg->wlan1.scan_band, cfg->wlan1.scan_chlist);
+    if (dual && opc_scan_list_normalize_rows(cfg->wlan2.scan_band, cfg->wlan2.scan_chlist))
+        moved = true;
+    if (moved)
+        fprintf(stderr, "opcd: radio.conf: stored 2.4/5 GHz SCAN list found in row B — "
+                        "migrated to row A (row order confirmed 2026-09-18)\n");
+    if (!opc_scan_list_valid(cfg->wlan1.scan_band, cfg->wlan1.scan_chlist)) return false;
+    if (dual && !opc_scan_list_valid(cfg->wlan2.scan_band, cfg->wlan2.scan_chlist)) return false;
+    return true;
+}
+
 int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t *out)
 {
     if (!buf || !out) return -1;
@@ -1159,7 +1174,26 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
         const prio_ch_verdict_t prio_v =
             (req.station_type == OPC_STATION_DUAL) ? check_priority_ch(req.priority_ch)
                                                    : PRIO_CH_OK;
-        if (req.station_type != OPC_STATION_SINGLE && req.station_type != OPC_STATION_DUAL) {
+        if (is_request_retransmission(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
+            /* §4.1.3 그림 4-2 (identical in Rev1.00 그림 3-4): any SetRadioConfig
+             * arriving on this socket while the ORIGINAL request's NVRAM write
+             * is still in flight is a RETRANSMISSION. Discard it — do not
+             * re-apply (a wpa_supplicant reconfigure would drop the link) and
+             * start no second write. The original's deferred ack answers on
+             * completion, carrying the ORIGINAL request's SN. The payload is
+             * not compared: the vendor's 2026-09-18 reply made Request ID the
+             * whole criterion, superseding the byte-identical rule this branch
+             * used to apply (#104 / PR #113).
+             * This test runs BEFORE value validation, exactly as it does in
+             * set_password and set_ip_config_list: otherwise an invalid frame
+             * arriving inside the in-flight window would be answered NG on its
+             * own SN while the original's deferred ack answers on the original
+             * SN — two responses where the vendor rule prescribes one. */
+            fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (§4.1.3)\n");
+            session_touch(st);
+            *rlen = 0;
+            return 0;
+        } else if (req.station_type != OPC_STATION_SINGLE && req.station_type != OPC_STATION_DUAL) {
             result = OPC_RESULT_NG; err = OPC_ERR_STATION_TYPE;
         } else if (!valid_wlan_mode(req.wlan1.mode)) {
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_MODE;
@@ -1188,22 +1222,6 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             result = OPC_RESULT_NG;
             err = (prio_v == PRIO_CH_BAD_BAND) ? OPC_ERR_RADIO_PRIO_BAND
                                                : OPC_ERR_RADIO_PRIO_CH;
-        } else if (is_request_retransmission(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
-            /* §4.1.3 그림 4-2 (identical in Rev1.00 그림 3-4): any SetRadioConfig
-             * arriving on this socket while the ORIGINAL request's NVRAM write
-             * is still in flight is a RETRANSMISSION. Discard it — do not
-             * re-apply (a wpa_supplicant reconfigure would drop the link) and
-             * start no second write. The original's deferred ack answers on
-             * completion, carrying the ORIGINAL request's SN. The payload is
-             * not compared: the vendor's 2026-09-18 reply made Request ID the
-             * whole criterion, superseding the byte-identical rule this branch
-             * used to apply (#104 / PR #113). The same rule now covers
-             * SET_PASSWORD / SET_IP_CONFIG_LIST through the shared
-             * is_request_retransmission. */
-            fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (§4.1.3)\n");
-            session_touch(st);
-            *rlen = 0;
-            return 0;
         } else if (st->radio_committed && !radio_cfg_differs(&req, &st->radio)) {
             /* Identical to a COMMITTED (applied + persisted) config and no ack
              * in flight (the branch above catches the in-flight case): nothing

@@ -199,6 +199,22 @@ static void state_load_from_disk(opcd_state_t *st)
             LOG("radio.conf: legacy Rev1.00 layout converted to SCAN band/channel list — "
                 "re-send SetRadioConfig to confirm");
         }
+        if (rc >= 0 && !opcd_radio_conf_migrate_lists(&st->radio)) {
+            /* The stored config is one the CURRENT validator rejects and could
+             * not be migrated. Leaving it committed would report frequency/CH 0
+             * through GetDeviceInfo and make the deferred best-effort revert a
+             * silent no-op (its channel enumeration would be empty), breaking
+             * the "apply failed => no net change" contract. Fall back to
+             * defaults instead, uncommitted, so the next SetRadioConfig applies
+             * and persists normally. */
+            LOG("radio.conf: stored SCAN list rejected by the current validator "
+                "and not migratable — discarding to defaults");
+            memset(&st->radio, 0, sizeof st->radio);
+            st->radio.station_type    = st->conf.default_station_type;
+            st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+            st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+            st->radio_committed = false;
+        }
     }
     n = opc_store_read_all(st->paths.ip_list, &st->ip_list, sizeof st->ip_list);
     if (n > 0 && (size_t)n != sizeof st->ip_list) {

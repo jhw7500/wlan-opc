@@ -58,6 +58,13 @@ bool     opc_scan_list_empty(const uint8_t list[OPC_SCAN_CHLIST_LEN]);
 /* Every set bit maps to an assigned channel of `band`. For 2.4/5 GHz the list
  * must sit in one row (A, or B when A is empty — lenient row order). */
 bool     opc_scan_list_valid(uint16_t band, const uint8_t list[OPC_SCAN_CHLIST_LEN]);
+/* Migration helper for state PERSISTED before the row order was confirmed: a
+ * 2.4/5 GHz list written by an older build may sit in row B, which the strict
+ * decoder above now rejects and enumerates as zero channels. Moves such a list
+ * to row A in place and returns true; returns false when nothing was moved
+ * (already row A, empty, 6 GHz, both rows populated, or an unknown band).
+ * Inbound frames are NOT normalized — they are rejected with 0x0012. */
+bool     opc_scan_list_normalize_rows(uint16_t band, uint8_t list[OPC_SCAN_CHLIST_LEN]);
 /* Channels selected by `list`, ascending bit order, into out[0..max). An empty
  * list selects the whole band table ("band only"). Returns the number of
  * channels selected (may exceed `max`; only `max` are stored). */

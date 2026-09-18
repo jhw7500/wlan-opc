@@ -1623,6 +1623,36 @@ int main(void)
         ASSERT(wait_fd_readable(cli, 300) != 0, "A19 payload: exactly one ack");
         ASSERT(stub_apply_radio_calls() == 1, "A19 payload: B never started a second apply");
 
+        /* 21c-2 (A-R1-002). The Request-ID gate runs BEFORE value validation, as
+         *      it does in set_password / set_ip_config_list. An INVALID frame
+         *      arriving inside the in-flight window must therefore be discarded
+         *      too — answering it NG on its own SN while the original's deferred
+         *      ack answers on the original SN would emit two responses where the
+         *      vendor rule prescribes one. */
+        stub_apply_radio_reset_calls();
+        opc_set_radio_config_req_t rqC = a19r;
+        legacy_to_scan(5240, 48, &rqC.wlan1);
+        rqC.priority_ch = 0x0000;
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 98, &rqC);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "A19 gate: original C(SN=98) deferred");
+        opc_set_radio_config_req_t rqD = rqC;
+        rqD.wlan1.mode = 99;                       /* invalid — would NG 0x0013 */
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 99, &rqD);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0,
+               "A-R1-002: an INVALID in-window frame is discarded by the gate, not NG'd on its own SN");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "A19 gate: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 gate: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 98,
+               "A-R1-002: only the ORIGINAL SN (98) answers — exactly one response");
+        ASSERT(wait_fd_readable(cli, 300) != 0, "A-R1-002: no second ack for the invalid frame");
+
         /* 21d. A retry must be matched against THIS port's pending request, not
          *      the global st->radio. Session ownership is IP-scoped but pending
          *      slots are (ip,port)-scoped: a DISTINCT request Y from a second
@@ -2170,6 +2200,23 @@ int main(void)
                        "D4(ii): a clear inside the period withdraws the staged entry");
                 ASSERT(wait_fd_readable(cli, 200) != 0,
                        "D4(ii): nothing was emitted by the withdrawal itself");
+
+                /* B-R1-C007. At Period 0 there is nothing staged to withdraw —
+                 * the entry was already sent on arrival — so the withdrawal is
+                 * a no-op and must not disturb coalesce state or emit a frame.
+                 * Exercised here rather than left to static reading. */
+                {
+                    uint32_t saved = st.indication_period_s;
+                    st.indication_period_s = 0;
+                    st.indication_coalesce[0].fault_pending[cpu_slot] = true;  /* stale marker */
+                    opcd_ind_fault_clear(&st, OPC_CONGESTION_CPU);
+                    ASSERT(st.indication_coalesce[0].fault_pending[cpu_slot],
+                           "B-R1-C007: period 0 withdrawal is a no-op (staged flag untouched)");
+                    ASSERT(wait_fd_readable(cli, 200) != 0,
+                           "B-R1-C007: period 0 withdrawal emits no frame");
+                    st.indication_coalesce[0].fault_pending[cpu_slot] = false;
+                    st.indication_period_s = saved;
+                }
             }
 
             /* 23-c. A new recipient (SetIndicationConfig) must learn of an ONGOING
@@ -2670,6 +2717,67 @@ int main(void)
         ASSERT(out.wlan2.scan_band == OPC_SCAN_BAND_UNSET && opc_scan_list_empty(out.wlan2.scan_chlist),
                "decode: legacy wlan2 (freq 0) → unset band, empty list");
         ASSERT(opcd_radio_conf_decode(legacy, 20, &out) == -1, "decode: unknown size → -1");
+    }
+
+    /* 26b-2 (A-R1-001). radio.conf PERSISTED by a build that predates the row
+     *      order confirmation may carry a 2.4/5 GHz SCAN list in row B. The
+     *      strict validator now rejects that shape, so restoring it as
+     *      COMMITTED would enumerate zero channels: GetDeviceInfo would report
+     *      frequency/CH 0, and the deferred best-effort revert would skip the
+     *      platform apply (n1 == 0) while reporting success — breaking the
+     *      "apply failed => no net change" contract. Drive decode + migrate as
+     *      the restore path does and require a valid, non-empty result. */
+    {
+        opc_set_radio_config_req_t stored;
+        memset(&stored, 0, sizeof stored);
+        stored.station_type    = OPC_STATION_SINGLE;
+        stored.priority_ch     = OPC_PRIORITY_CH_UNSET;
+        stored.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        stored.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        stored.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        stored.wlan1.scan_chlist[6] = 0x04;      /* ch1/6/11 written into row B */
+        stored.wlan1.scan_chlist[7] = 0x21;
+        stored.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+
+        opc_set_radio_config_req_t out2;
+        ASSERT(opcd_radio_conf_decode(&stored, sizeof stored, &out2) == 0,
+               "A-R1-001: row-B radio.conf decodes as the exact layout (would be committed)");
+        ASSERT(!opc_scan_list_valid(out2.wlan1.scan_band, out2.wlan1.scan_chlist),
+               "A-R1-001: the decoded list is rejected by the current validator");
+        ASSERT(opcd_radio_conf_migrate_lists(&out2),
+               "A-R1-001: migration accepts the stored config");
+        ASSERT(opc_scan_list_valid(out2.wlan1.scan_band, out2.wlan1.scan_chlist),
+               "A-R1-001: migrated list passes the current validator");
+        {
+            uint8_t chs[8];
+            size_t n2 = opc_scan_list_channels(OPC_SCAN_BAND_2_4GHZ, out2.wlan1.scan_chlist,
+                                               chs, sizeof chs);
+            ASSERT(n2 == 3 && chs[0] == 1 && chs[1] == 6 && chs[2] == 11,
+                   "A-R1-001: migrated list enumerates 1/6/11, not an empty set");
+        }
+        {
+            uint16_t mhz = 0, chf = 0;
+            opc_scan_derive_freq_ch(out2.wlan1.scan_band, out2.wlan1.scan_chlist, &mhz, &chf);
+            ASSERT(mhz == 2412 && chf == (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1),
+                   "A-R1-001: GetDeviceInfo freq/CH no longer derive as 0");
+        }
+        /* A list the migration cannot rescue (both rows populated) must be
+         * refused so the caller discards it instead of committing it. */
+        opc_set_radio_config_req_t bad2 = stored;
+        bad2.wlan1.scan_chlist[3] = 0x01;        /* row A also populated */
+        ASSERT(!opcd_radio_conf_migrate_lists(&bad2),
+               "A-R1-001: an unmigratable stored list is refused (caller discards to defaults)");
+        /* A well-formed stored config is accepted untouched. */
+        opc_set_radio_config_req_t good2;
+        memset(&good2, 0, sizeof good2);
+        good2.station_type    = OPC_STATION_SINGLE;
+        good2.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        good2.wlan1.scan_chlist[2] = 0x04; good2.wlan1.scan_chlist[3] = 0x21;
+        good2.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        opc_set_radio_config_req_t good_copy = good2;
+        ASSERT(opcd_radio_conf_migrate_lists(&good2) &&
+               memcmp(&good2, &good_copy, sizeof good2) == 0,
+               "A-R1-001: a row-A stored config is accepted unchanged");
     }
 
     /* 26c(#102). The identical-request shortcut applies only to a COMMITTED
