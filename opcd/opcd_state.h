@@ -72,29 +72,22 @@ struct opc_store_async;
  * One slot per queued store_async job; the job token is the slot index.
  * The ack is packed and sent from opcd_store_async_on_ready() once the
  * worker reports the write result. */
+/* Kept at 4 (D3(a) re-decided 2026-09-18). The Request-ID retransmission rule
+ * did shrink this slot — radio_req and req_body[OPC_PAYLOAD_MAX] are gone — but
+ * the binding constraint is the async store's job queue, not this array:
+ * handler.c static_asserts OPCD_PENDING_ACK_MAX <= OPC_STORE_ASYNC_QUEUE_DEPTH
+ * (intended equality), and each store job carries its own
+ * OPC_STORE_ASYNC_DATA_MAX (8 KiB) buffer. Raising both to 16 would add ~96 KiB
+ * of heap for a saturation path a spec-compliant VHL cannot reach — §4.1.3.1
+ * makes it wait for each response before sending the next. */
 #define OPCD_PENDING_ACK_MAX 4
 typedef struct opcd_pending_ack {
     bool     in_use;
-    bool     discarded;     /* superseded by a DIFFERENT same-command request
-                             * from the same client (rapid reconfigure) —
-                             * completion frees the slot without replying. A
-                             * byte-identical retransmission never discards:
-                             * §4.1.3 drops the retransmission instead (#120) */
     uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */
     uint16_t seq;           /* echoed sequence number */
     uint32_t radio_gen;     /* SET_RADIO only: st->radio generation this write
                              * persists — completion commits only if it still
                              * equals st->radio_gen (#102) */
-    opc_set_radio_config_req_t radio_req;  /* SET_RADIO only: the request this
-                             * slot is persisting — a §4.1.3 retransmission is
-                             * matched against THIS, not the global st->radio,
-                             * which another port may have overwritten (#104) */
-    uint8_t  req_body[OPC_PAYLOAD_MAX];  /* SET_PASSWORD / SET_IP_CONFIG_LIST:
-                             * the request body this slot is persisting — a
-                             * byte-identical re-send on the same (ip,port)
-                             * while it is in flight is a §4.1.3
-                             * retransmission (#120) */
-    uint16_t req_body_len;
     uint32_t client_ip;     /* host byte order */
     uint16_t client_port;   /* host byte order */
     struct timespec rx_ts;  /* request receipt (CLOCK_MONOTONIC) — T7

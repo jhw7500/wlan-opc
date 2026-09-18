@@ -2,7 +2,8 @@
  * opcd — OPC-side UDP/IP control daemon for the VHL ↔ wireless-board protocol.
  *
  * Single-threaded epoll loop driving:
- *   - UDP socket on /usr/local/opc/etc/opc.conf::udp_port  (default 50607)
+ *   - UDP socket on opc.conf::udp_port (default 50607, CLI -p overrides) —
+ *     §4.1.2 requires the control port to be settable from Config data
  *   - signalfd  for SIGINT / SIGTERM      → graceful shutdown
  *   - timerfd   1 s tick                  → indication period & idle check
  *   - eventfd   async NVRAM completions   → deferred Set* acks (PERF-001)
@@ -304,10 +305,23 @@ int main(int argc, char **argv)
         case 'h': default: usage(); return (opt == 'h') ? 0 : 2;
         }
     }
+    /* §4.1.2 "제어용 통신에 사용되는 포트 번호는 무선 기판의 Config 데이터에서
+     * 지정할 수 있도록 한다" — restated by the vendor on 2026-09-18 ("고정
+     * 설정값은 NG"): the control port must be changeable from configuration, not
+     * only from the command line. Parsed BEFORE the CLI override so -p still
+     * wins for benches. An invalid value falls back to the current value and
+     * says so, rather than failing silently. */
+    {
+        int bad = 0;
+        st.conf.udp_port = opcd_conf_port_parse(st.paths.conf, "udp_port",
+                                                st.conf.udp_port, &bad);
+        if (bad)
+            fprintf(stderr, "opcd: opc.conf udp_port invalid (want 1..65535) — "
+                            "using %u\n", (unsigned)st.conf.udp_port);
+    }
     if (port_override > 0) st.conf.udp_port     = (uint16_t)port_override;
     if (idle_override > 0) st.conf.login_idle_s = (uint32_t)idle_override;
-    /* opc.conf currently carries only the congestion_* overrides (T6 interim
-     * thresholds); other settings still come from defaults / CLI options. */
+    /* Remaining opc.conf keys. */
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
     st.conf.device_info_freq_source = opcd_freq_source_parse(st.paths.conf);
     st.conf.device_ip_iface         = opcd_ip_iface_parse(st.paths.conf);

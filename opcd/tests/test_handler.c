@@ -1060,23 +1060,30 @@ int main(void)
         bad.wlan1.scan_chlist[0] = 0x02;              /* row A bit25: unassigned in 5 GHz */
         bad.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
         r = do_set_radio_req(&st, CIP, &bad);
-        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_SCAN_CH,
                "5 GHz list bit25 (unassigned) → 0x0012");
         bad.wlan1.scan_band = OPC_SCAN_BAND_UNSET;   /* unset band but channels listed */
         bad.wlan1.scan_chlist[0] = 0;
         bad.wlan1.scan_chlist[3] = 0x01;
         r = do_set_radio_req(&st, CIP, &bad);
-        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_SCAN_CH,
                "unset band with a channel list → 0x0012");
         memset(bad.wlan1.scan_chlist, 0, sizeof bad.wlan1.scan_chlist);
         r = do_set_radio_req(&st, CIP, &bad);
         ASSERT(r == OPC_RESULT_OK, "unset band + empty list (no band lock) → OK");
+        /* D1 (vendor reply 2026-09-18): the row order is now CONFIRMED — frame
+         * offset 312/72 carries Bit31~Bit0, 316/76 carries Bit63~Bit32. A
+         * 2.4/5 GHz list placed in row B is therefore a malformed frame, not a
+         * row-order variant to tolerate. The old leniency (single_row) made
+         * opcd answer OK to input the spec says is 0x0012, hiding the peer's
+         * bug; it is gone. */
         memset(bad.wlan1.scan_chlist, 0, sizeof bad.wlan1.scan_chlist);
-        bad.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;  /* list carried in row B (bytes 4..7) */
+        bad.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;  /* list wrongly carried in row B (bytes 4..7) */
         bad.wlan1.scan_chlist[6] = 0x04;
         bad.wlan1.scan_chlist[7] = 0x21;
         r = do_set_radio_req(&st, CIP, &bad);
-        ASSERT(r == OPC_RESULT_OK, "2.4 GHz list in row B tolerated (lenient row order) → OK");
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_SCAN_CH,
+               "D1: 2.4 GHz list in row B rejected (row order confirmed) → 0x0012");
     }
     r = do_set_radio(&st, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
     ASSERT(r == OPC_RESULT_OK, "valid 2.4 GHz band + ch1 accepted");
@@ -1105,12 +1112,12 @@ int main(void)
         rreq.wlan2.scan_band = OPC_SCAN_BAND_2_4GHZ;
         rreq.priority_ch     = (uint16_t)((OPC_BAND_6GHZ << 8) | 1);
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
-               "A21: DUAL priority_ch 6 GHz → 0x0012");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_PRIO_BAND,
+               "Rev1.02: DUAL priority_ch 6 GHz band → 0x0015 (not the SCAN 0x0012)");
         rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 38);   /* not in the 5 GHz table */
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
-               "DUAL priority_ch 5 GHz ch38 → 0x0012");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_PRIO_CH,
+               "Rev1.02: DUAL priority_ch 5 GHz ch38 → 0x0016 (not the SCAN 0x0012)");
         rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 36);
         rr = do_set_radio_req(&st, CIP, &rreq);
         ASSERT(rr == OPC_RESULT_OK, "DUAL 5 GHz/2.4 GHz bands, priority ch36 → OK");
@@ -1580,11 +1587,15 @@ int main(void)
 
         /* 21c. Retry classification must compare the WHOLE payload, not the
          *      apply-relevant fields. radio_cfg_differs() ignores priority_ch /
-         *      WLAN#2 for SINGLE, but a request that differs there is a DISTINCT
-         *      wire frame, not a retransmission — dropping it would answer the
-         *      original SN and time the client out (Codex, PR #113). Original
-         *      A(SN=93) in flight, then B(SN=94): same WLAN#1, different
-         *      priority_ch → B must be processed and answered with ITS OWN SN. */
+         *      WLAN#2 for SINGLE. Under the Request-ID rule (vendor reply
+         *      2026-09-18, inquiry Q5: "응답 전에 다음 요청을 받으면 파기") the
+         *      payload no longer matters: B is discarded and A's ORIGINAL SN
+         *      answers. This INVERTS the PR #113 reading ("a distinct wire
+         *      frame must be answered on its own SN"), which was our own
+         *      judgement and the reply superseded.
+         *      B also keeps priority_ch = 0x1234 (an unsupported band byte) on
+         *      a SINGLE request — it must still reach the retransmission test,
+         *      i.e. the 0x0015/0x0016 split must stay DUAL-gated. */
         stub_apply_radio_reset_calls();
         opc_set_radio_config_req_t rqA = a19r;   /* SINGLE, {5200/40} */
         legacy_to_scan(5220, 44, &rqA.wlan1);    /* differ from committed → deferred */
@@ -1598,20 +1609,19 @@ int main(void)
         fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 94, &rqB);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "A19 payload: distinct B(SN=94) not answered inline");
+        ASSERT(drc == 0 && rlen == 0, "A19 payload: distinct B(SN=94) discarded, no inline answer");
         ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "A19 payload: completion signalled");
         opcd_store_async_on_ready(&st);
-        if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
-            opcd_store_async_on_ready(&st);
         ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 payload: an ack arrived");
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 94 &&
+               ahdr.sequence_number == 93 &&
                opc_set_radio_config_ack_unpack(rx_buf, (size_t)rn, &rack) == 0 &&
                rack.result == OPC_RESULT_OK,
-               "A19 payload: distinct request answered with its OWN SN (94), not dropped as a retry");
+               "A19 payload: B discarded, ORIGINAL SN (93) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "A19 payload: exactly one ack");
+        ASSERT(stub_apply_radio_calls() == 1, "A19 payload: B never started a second apply");
 
         /* 21d. A retry must be matched against THIS port's pending request, not
          *      the global st->radio. Session ownership is IP-scoped but pending
@@ -1721,11 +1731,11 @@ int main(void)
                pack_ack.error_cause == OPC_ERR_PASSWORD_MISMATCH,
                "pw cross: crossed retransmission processed as a new request on its own SN (102)");
 
-        /* 21g. A DIFFERENT same-command request while A is in flight is a new
-         *      request (rapid reconfigure), not a retransmission: B is
-         *      processed and answered on ITS OWN SN; A's superseded ack is
-         *      dropped (one ack total). B ends at the default password so the
-         *      following cases start from a known state. */
+        /* 21g. Request-ID rule: a DIFFERENT same-command request while A is in
+         *      flight is discarded like any re-send — A's ORIGINAL SN answers
+         *      and B is never applied. (Inverts the old "rapid reconfigure"
+         *      reading; see 21c.) A restore step then returns the password to
+         *      the default so the following cases start from a known state. */
         memset(&preq, 0, sizeof preq);
         strncpy(preq.old_password, "RetxSecret1", sizeof preq.old_password - 1);
         strncpy(preq.new_password, "RetxSecretA", sizeof preq.new_password - 1);
@@ -1739,9 +1749,9 @@ int main(void)
         fn   = opc_set_password_req_pack(frame, sizeof frame, 104, &preq);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "pw payload: distinct B(SN=104) deferred, not dropped as a retry");
-        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
-               "pw payload: distinct B applied");
+        ASSERT(drc == 0 && rlen == 0, "pw payload: distinct B(SN=104) discarded, no inline answer");
+        ASSERT(strcmp(st.password, "RetxSecretA") == 0,
+               "pw payload: B never applied — A's value stands");
         for (int d = 0; d < 3; d++) {
             if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
             opcd_store_async_on_ready(&st);
@@ -1750,11 +1760,31 @@ int main(void)
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 104 &&
+               ahdr.sequence_number == 103 &&
                opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
                pack_ack.result == OPC_RESULT_OK,
-               "pw payload: distinct request answered with its OWN SN (104)");
+               "pw payload: B discarded, ORIGINAL SN (103) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "pw payload: exactly one ack");
+        /* Restore the default password for the cases below: the slot is free
+         * now that A completed, so this is an ordinary deferred write. */
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, "RetxSecretA", sizeof preq.old_password - 1);
+        strncpy(preq.new_password, OPC_PASSWORD_DEFAULT, sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 194, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "pw payload: restore(SN=194) deferred");
+        for (int d = 0; d < 3; d++) {
+            if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+            opcd_store_async_on_ready(&st);
+        }
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "pw payload: restore ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 194,
+               "pw payload: restore answered on its own SN (194)");
+        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+               "pw payload: default password restored");
 
         /* 21h. Multiport: the retransmission is matched against THIS port's
          *      pending request. P1's X (default→PwX) in flight, P2 sends a
@@ -1878,9 +1908,10 @@ int main(void)
                iack.result == OPC_RESULT_OK,
                "ip cross: crossed retransmission answered with its own SN (112)");
 
-        /* 21k. A DIFFERENT list request while A is in flight is a new request:
-         *      B is committed and answered on ITS OWN SN; A's superseded ack
-         *      is dropped (one ack total). */
+        /* 21k. Request-ID rule: a DIFFERENT list request while A is in flight is
+         *      discarded like any re-send — it is never committed and A's
+         *      ORIGINAL SN answers (one ack total). Inverts the old
+         *      "rapid reconfigure" reading; see 21c. */
         opc_set_ip_config_list_req_t irA = ireq, irB = ireq;
         irA.entries[0].ip_address  = 0xC0A8070Bu;   /* 192.168.7.11 */
         irB.entries[0].list_number = 8;
@@ -1892,9 +1923,9 @@ int main(void)
         fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 114, &irB);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "ip payload: distinct B(SN=114) deferred, not dropped as a retry");
-        ASSERT(st.ip_list.present[7] && st.ip_list.slots[7].ip_address == 0xC0A80714u,
-               "ip payload: distinct B committed");
+        ASSERT(drc == 0 && rlen == 0, "ip payload: distinct B(SN=114) discarded, no inline answer");
+        ASSERT(!st.ip_list.present[7],
+               "ip payload: B never committed — slot 8 untouched");
         for (int d = 0; d < 3; d++) {
             if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
             opcd_store_async_on_ready(&st);
@@ -1903,10 +1934,10 @@ int main(void)
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 114 &&
+               ahdr.sequence_number == 113 &&
                opc_set_ip_config_list_ack_unpack(rx_buf, (size_t)rn, &iack) == 0 &&
                iack.result == OPC_RESULT_OK,
-               "ip payload: distinct request answered with its OWN SN (114)");
+               "ip payload: B discarded, ORIGINAL SN (113) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "ip payload: exactly one ack");
 
         /* 21l. Multiport: P1's X in flight, P2 sends a distinct Y, P1 re-sends
@@ -2117,6 +2148,29 @@ int main(void)
                    fdi.congestion_id == OPC_CONGESTION_CPU,
                    "T6: re-entry frame is FaultDetect CPU, exactly one");
             ASSERT(wait_fd_readable(cli, 200) != 0, "T6: no second frame for the same entry");
+
+            /* 23-b2. D4(ii): an entry staged inside a period is WITHDRAWN when
+             *        the congestion clears before the period end. §4.3.9 notifies
+             *        "the last state change at the end of the period"; when entry
+             *        and clear both fall in one period the last change is the
+             *        clear, and a clear is not notified (vendor reply 2026-09-18,
+             *        inquiry Q3). Flushing the stale entry instead would leave the
+             *        peer believing a finished congestion is still running, since
+             *        no clear notification exists to correct it.
+             *        State-neutral: stages and withdraws without ticking. */
+            {
+                const int cpu_slot = OPC_CONGESTION_CPU - 1;
+                ASSERT(st.indication_period_s > 0, "D4(ii): precondition — period > 0");
+                ASSERT(opcd_ind_fault_detect(&st, OPC_CONGESTION_CPU, 90) == 0,
+                       "D4(ii): entry staged, not sent (period > 0)");
+                ASSERT(st.indication_coalesce[0].fault_pending[cpu_slot],
+                       "D4(ii): staged entry is pending before the clear");
+                opcd_ind_fault_clear(&st, OPC_CONGESTION_CPU);
+                ASSERT(!st.indication_coalesce[0].fault_pending[cpu_slot],
+                       "D4(ii): a clear inside the period withdraws the staged entry");
+                ASSERT(wait_fd_readable(cli, 200) != 0,
+                       "D4(ii): nothing was emitted by the withdrawal itself");
+            }
 
             /* 23-c. A new recipient (SetIndicationConfig) must learn of an ONGOING
              *       congestion: the latch is reset with the coalesce state, so

@@ -165,6 +165,14 @@ static int fault_slot(uint16_t cong_id)
  * value per resource for the period-end flush. Callers pass congestion
  * ENTRIES only (fault_probe entry latch); a persisting congestion is not
  * re-notified. */
+void opcd_ind_fault_clear(opcd_state_t *st, uint16_t cong_id)
+{
+    if (st->indication_period_s == 0) return;   /* already emitted on entry */
+    int slot = fault_slot(cong_id);
+    if (slot < 0) return;
+    st->indication_coalesce[0].fault_pending[slot] = false;
+}
+
 int opcd_ind_fault_detect(opcd_state_t *st, uint16_t cong_id, uint16_t val)
 {
     if (!(st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT)) return 0;
@@ -191,14 +199,23 @@ static void fault_probe_tick(opcd_state_t *st, uint32_t elapsed_s)
     if (!opcd_fault_probe_due(&st->fault_probe, elapsed_s)) return;
     opcd_fault_report_t rep;
     if (opcd_fault_probe_sample(&st->fault_probe, &rep) != 0) return;
-    if (rep.cpu_entered)
-        (void)opcd_ind_fault_detect(st, OPC_CONGESTION_CPU, rep.cpu_pct);
-    if (rep.disk_entered)
-        (void)opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct);
-    if (rep.net_entered)
-        (void)opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_pct);
-    /* rep.*_cleared: congestion-clear hook — intentionally no notification
-     * until the vendor answers Q6 (notify as a state change, or not at all). */
+    /* D4(i): the entry latch is already committed inside the sample above, so a
+     * failed send at Period 0 would lose the one notification the spec allows.
+     * Re-arm that resource instead — the next due sample reports it again. */
+    if (rep.cpu_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_CPU, rep.cpu_pct) != 0)
+        opcd_fault_probe_rearm(&st->fault_probe, OPCD_FAULT_RES_CPU);
+    if (rep.disk_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct) != 0)
+        opcd_fault_probe_rearm(&st->fault_probe, OPCD_FAULT_RES_DISK);
+    if (rep.net_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_pct) != 0)
+        opcd_fault_probe_rearm(&st->fault_probe, OPCD_FAULT_RES_NET);
+    /* D4(ii): a clear is never notified — the vendor reply of 2026-09-18 settled
+     * that ("장애 해소 후의 통지는 통지 불필요"). But when the clear happens inside
+     * the same Indication Period as the entry, §4.3.9's "last state change" is
+     * the clear, so the staged entry must be withdrawn rather than flushed with
+     * a value that no longer holds. */
+    if (rep.cpu_cleared)  opcd_ind_fault_clear(st, OPC_CONGESTION_CPU);
+    if (rep.disk_cleared) opcd_ind_fault_clear(st, OPC_CONGESTION_DISK_IO);
+    if (rep.net_cleared)  opcd_ind_fault_clear(st, OPC_CONGESTION_NETWORK);
 }
 
 int opcd_ind_reset_notice(opcd_state_t *st, uint32_t cause)

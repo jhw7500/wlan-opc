@@ -557,15 +557,22 @@ static int test_scan_chlist_validity_and_enumeration(void)
     list[0] = 0x02;                              /* row A bit25: unassigned in 5G */
     ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_5GHZ, list), "5G bit25 invalid");
 
-    /* Lenient row order: a 2.4 GHz list carried in row B (bytes 4..7) is accepted
-     * when row A is empty — and enumerates the same channels. */
+    /* D1 (vendor reply 2026-09-18): the row order is confirmed, so a 2.4 GHz
+     * list carried in row B (bytes 4..7) is a malformed frame — no longer
+     * tolerated, and it enumerates nothing. */
     memset(list, 0, sizeof list);
     list[6] = 0x04; list[7] = 0x21;
-    ASSERT(opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G list in row B tolerated");
+    ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G list in row B rejected");
     size_t n = opc_scan_list_channels(OPC_SCAN_BAND_2_4GHZ, list, out, sizeof out);
-    ASSERT(n == 3 && out[0] == 1 && out[1] == 6 && out[2] == 11, "row-B list enumerates 1/6/11");
+    ASSERT(n == 0, "row-B 2.4G list enumerates nothing");
+    /* The same list in row A is the well-formed form and enumerates 1/6/11. */
+    memset(list, 0, sizeof list);
+    list[2] = 0x04; list[3] = 0x21;
+    ASSERT(opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G list in row A valid");
+    n = opc_scan_list_channels(OPC_SCAN_BAND_2_4GHZ, list, out, sizeof out);
+    ASSERT(n == 3 && out[0] == 1 && out[1] == 6 && out[2] == 11, "row-A list enumerates 1/6/11");
     /* Both rows populated for 2.4 GHz -> invalid (only one row is defined). */
-    list[3] = 0x01;
+    list[6] = 0x04;
     ASSERT(!opc_scan_list_valid(OPC_SCAN_BAND_2_4GHZ, list), "2.4G with both rows set invalid");
 
     /* Enumeration in ascending bit order; empty list = whole band table. */
