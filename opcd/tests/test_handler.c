@@ -1624,11 +1624,14 @@ int main(void)
         ASSERT(stub_apply_radio_calls() == 1, "A19 payload: B never started a second apply");
 
         /* 21c-2 (A-R1-002). The Request-ID gate runs BEFORE value validation, as
-         *      it does in set_password / set_ip_config_list. An INVALID frame
-         *      arriving inside the in-flight window must therefore be discarded
-         *      too — answering it NG on its own SN while the original's deferred
-         *      ack answers on the original SN would emit two responses where the
-         *      vendor rule prescribes one. */
+         *      it does in set_password / set_ip_config_list. A frame that fails
+         *      VALUE validation inside the in-flight window must therefore be
+         *      discarded too — answering it NG on its own SN while the original's
+         *      deferred ack answers on the original SN would emit two responses
+         *      where the vendor rule prescribes one.
+         *      Scope: frames rejected earlier by the per-command unpack
+         *      (OPC_ERR_PACKET_SIZE) never reach this gate and are outside the
+         *      guarantee — see the note at the gate in handler.c. */
         stub_apply_radio_reset_calls();
         opc_set_radio_config_req_t rqC = a19r;
         legacy_to_scan(5240, 48, &rqC.wlan1);
@@ -1643,14 +1646,14 @@ int main(void)
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
         ASSERT(drc == 0 && rlen == 0,
-               "A-R1-002: an INVALID in-window frame is discarded by the gate, not NG'd on its own SN");
+               "A-R1-002: an in-window frame failing VALUE validation is discarded by the gate, not NG'd on its own SN");
         ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "A19 gate: completion signalled");
         opcd_store_async_on_ready(&st);
         ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 gate: an ack arrived");
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
                ahdr.sequence_number == 98,
-               "A-R1-002: only the ORIGINAL SN (98) answers — exactly one response");
+               "A-R1-002: only the ORIGINAL SN (98) answers — one response for an unpackable in-window frame");
         ASSERT(wait_fd_readable(cli, 300) != 0, "A-R1-002: no second ack for the invalid frame");
 
         /* 21d. A retry must be matched against THIS port's pending request, not

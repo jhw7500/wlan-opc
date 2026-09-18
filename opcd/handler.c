@@ -1185,10 +1185,18 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
              * whole criterion, superseding the byte-identical rule this branch
              * used to apply (#104 / PR #113).
              * This test runs BEFORE value validation, exactly as it does in
-             * set_password and set_ip_config_list: otherwise an invalid frame
-             * arriving inside the in-flight window would be answered NG on its
-             * own SN while the original's deferred ack answers on the original
-             * SN — two responses where the vendor rule prescribes one. */
+             * set_password and set_ip_config_list: otherwise a frame that fails
+             * VALUE validation inside the in-flight window would be answered NG
+             * on its own SN while the original's deferred ack answers on the
+             * original SN — two responses where the vendor rule prescribes one.
+             * Scope of that guarantee: it covers frames that UNPACK. A frame
+             * rejected by opc_set_radio_config_req_unpack() above (self-
+             * consistent but short body → OPC_ERR_PACKET_SIZE, frame.c) is
+             * answered on its own SN before this gate is reached, so such a
+             * frame can still draw a second response. Closing that would mean
+             * moving the per-command unpack behind the session/gate logic in
+             * all three deferred-ack handlers — a frame-processing order change
+             * beyond this commit. */
             fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (§4.1.3)\n");
             session_touch(st);
             *rlen = 0;

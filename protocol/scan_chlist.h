@@ -56,7 +56,10 @@ uint32_t opc_scan_row_word(const uint8_t list[OPC_SCAN_CHLIST_LEN], int row);
 void     opc_scan_list_set_channel(uint8_t list[OPC_SCAN_CHLIST_LEN], uint16_t band, uint8_t ch);
 bool     opc_scan_list_empty(const uint8_t list[OPC_SCAN_CHLIST_LEN]);
 /* Every set bit maps to an assigned channel of `band`. For 2.4/5 GHz the list
- * must sit in one row (A, or B when A is empty — lenient row order). */
+ * lives in row A ONLY: any bit in row B makes it invalid (the row order is
+ * confirmed — see the wire-placement note above). Callers restoring state that
+ * predates that confirmation must run opc_scan_list_normalize_rows() first;
+ * inbound frames are not normalized, they are rejected. */
 bool     opc_scan_list_valid(uint16_t band, const uint8_t list[OPC_SCAN_CHLIST_LEN]);
 /* Migration helper for state PERSISTED before the row order was confirmed: a
  * 2.4/5 GHz list written by an older build may sit in row B, which the strict
