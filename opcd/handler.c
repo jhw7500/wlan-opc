@@ -453,6 +453,65 @@ bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg, bool *moved)
     return true;
 }
 
+opcd_radio_restore_t opcd_radio_conf_load(opcd_state_t *st)
+{
+    uint8_t rbuf[64];
+    ssize_t rn = opc_store_read_all(st->paths.radio, rbuf, sizeof rbuf);
+    opc_set_radio_config_req_t loaded;
+    opcd_radio_restore_t rr =
+        opcd_radio_conf_restore(rn > 0 ? rbuf : NULL, rn > 0 ? (size_t)rn : 0, &loaded);
+
+    if (rr == OPCD_RADIO_RESTORE_DISCARD_SIZE || rr == OPCD_RADIO_RESTORE_DISCARD_INVALID) {
+        if (rr == OPCD_RADIO_RESTORE_DISCARD_SIZE) {
+            if (rn > 0)
+                fprintf(stderr, "opcd: radio.conf size mismatch (%zd vs %zu) — discarding\n",
+                        rn, sizeof st->radio);
+        } else {
+            /* Stored bytes the CURRENT validator rejects and migration could not
+             * rescue. Leaving them committed would report frequency/CH 0 through
+             * GetDeviceInfo and make the deferred best-effort revert a silent
+             * no-op (its channel enumeration would be empty), breaking the
+             * "apply failed => no net change" contract. The file is left
+             * untouched on purpose: the config is already unusable, so there is
+             * nothing to preserve, and keeping the bytes keeps the evidence of
+             * what was stored. Every boot reaches this same stable state. */
+            fprintf(stderr, "opcd: radio.conf: stored SCAN list rejected by the current "
+                            "validator and not migratable — discarding to defaults\n");
+        }
+        memset(&st->radio, 0, sizeof st->radio);
+        st->radio.station_type    = st->conf.default_station_type;
+        st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+        st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        st->radio_committed = false;
+        return rr;
+    }
+
+    st->radio = loaded;
+    /* Only an exact-layout file counts as committed. A converted Rev1.00 file
+     * describes what the old semantics applied (e.g. one frequency), not what
+     * the converted band/list would apply now (e.g. a whole band) — so the next
+     * matching request must run apply + persist instead of being skipped as
+     * "already there" (Codex P2). */
+    st->radio_committed = (rr != OPCD_RADIO_RESTORE_LEGACY);
+    if (rr == OPCD_RADIO_RESTORE_LEGACY)
+        fprintf(stderr, "opcd: radio.conf: legacy Rev1.00 layout converted to SCAN "
+                        "band/channel list — re-send SetRadioConfig to confirm\n");
+    if (rr == OPCD_RADIO_RESTORE_MIGRATED) {
+        /* Write the normalized config back. The migrated config is now
+         * byte-equal to the frame a correct VHL sends, so the apply-skip branch
+         * answers OK without reaching persist_radio — nothing else would ever
+         * rewrite the file, and the rejected bytes would stay on disk
+         * indefinitely (the migration helper could then never be retired
+         * without losing this device's stored config at boot). */
+        fprintf(stderr, "opcd: radio.conf: stored 2.4/5 GHz SCAN list found in row B — "
+                        "migrated to row A (row order confirmed 2026-09-18)\n");
+        if (opc_store_write_atomic(st->paths.radio, &st->radio, sizeof st->radio, 0644) != 0)
+            fprintf(stderr, "opcd: radio.conf: write-back of the migrated config failed: %s — "
+                            "the stored bytes stay in the old row-B form\n", strerror(errno));
+    }
+    return rr;
+}
+
 opcd_radio_restore_t opcd_radio_conf_restore(const void *buf, size_t n,
                                              opc_set_radio_config_req_t *out)
 {
@@ -1205,10 +1264,19 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
              * rejected by opc_set_radio_config_req_unpack() above (self-
              * consistent but short body → OPC_ERR_PACKET_SIZE, frame.c) is
              * answered on its own SN before this gate is reached, so such a
-             * frame can still draw a second response. Closing that would mean
-             * moving the per-command unpack behind the session/gate logic in
-             * all three deferred-ack handlers — a frame-processing order change
-             * beyond this commit. */
+             * frame can still draw a second response inside the window. The
+             * same ordering holds in handle_set_password and
+             * handle_set_ip_config_list.
+             * DECISION (2026-09-18): this is an accepted corner, not a deferred
+             * fix. §4.1.3 discards a re-send of "동일한 처리" — the SAME
+             * processing. A datagram that does not even unpack into a request
+             * names no processing at all, so it is not a retransmission of the
+             * in-flight one; answering it 0x0003 on its own SN tells the peer
+             * its frame was malformed, which is the more useful response and
+             * the one the spec's packet-size cause exists for. Folding the
+             * unpack behind the gate would instead swallow malformed traffic
+             * silently. Recorded so the deviation is explicit; see the Rev1.02
+             * inquiry log for the same reasoning. */
             fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (§4.1.3)\n");
             session_touch(st);
             *rlen = 0;

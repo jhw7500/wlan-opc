@@ -2827,6 +2827,79 @@ int main(void)
         }
     }
 
+    /* 26b-3 (B-R1-C014). The startup path END-TO-END through st->paths.radio:
+     *      load, decide, and — on MIGRATED — actually rewrite the file. The
+     *      write-back is what makes the repair permanent: once migrated, the
+     *      in-memory config equals the frame a correct VHL sends, so
+     *      radio_cfg_differs() is false and the apply-skip branch answers OK
+     *      without ever reaching persist_radio. The decisive assertion is that
+     *      a SECOND load of the rewritten file returns COMMITTED rather than
+     *      MIGRATED again — revert the write-back and it stays MIGRATED forever,
+     *      which is exactly the latent boot-time trap this closes. */
+    {
+        static opcd_state_t ls;
+        char rpath[160];
+        snprintf(rpath, sizeof rpath, "/tmp/test_radioconf_%d.bin", (int)getpid());
+        unlink(rpath);
+        memset(&ls, 0, sizeof ls);
+        ls.paths.radio = rpath;
+        ls.conf.default_station_type = OPC_STATION_SINGLE;
+
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_DISCARD_SIZE &&
+               !ls.radio_committed,
+               "B-R1-C014: an absent radio.conf loads as defaults, uncommitted");
+
+        opc_set_radio_config_req_t onwire;
+        memset(&onwire, 0, sizeof onwire);
+        onwire.station_type    = OPC_STATION_SINGLE;
+        onwire.priority_ch     = OPC_PRIORITY_CH_UNSET;
+        onwire.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        onwire.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        onwire.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        onwire.wlan1.scan_chlist[6] = 0x04;      /* ch1/6/11 stored in row B */
+        onwire.wlan1.scan_chlist[7] = 0x21;
+        onwire.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        ASSERT(opc_store_write_atomic(rpath, &onwire, sizeof onwire, 0644) == 0,
+               "B-R1-C014: fixture — row-B radio.conf written");
+
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_MIGRATED && ls.radio_committed,
+               "B-R1-C014: a row-B radio.conf loads as MIGRATED and stays committed");
+        ASSERT(opc_scan_list_valid(ls.radio.wlan1.scan_band, ls.radio.wlan1.scan_chlist),
+               "B-R1-C014: the in-memory config now passes the current validator");
+        {
+            opc_set_radio_config_req_t ondisk;
+            memset(&ondisk, 0, sizeof ondisk);
+            ASSERT(opc_store_read_all(rpath, &ondisk, sizeof ondisk) == (ssize_t)sizeof ondisk &&
+                   memcmp(&ondisk, &ls.radio, sizeof ondisk) == 0,
+                   "B-R1-C014: the FILE was rewritten to match the migrated config");
+            ASSERT(opc_scan_list_valid(ondisk.wlan1.scan_band, ondisk.wlan1.scan_chlist) &&
+                   ondisk.wlan1.scan_chlist[2] == 0x04 && ondisk.wlan1.scan_chlist[3] == 0x21 &&
+                   ondisk.wlan1.scan_chlist[6] == 0 && ondisk.wlan1.scan_chlist[7] == 0,
+                   "B-R1-C014: the stored list now lives in row A, not row B");
+        }
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_COMMITTED,
+               "B-R1-C014: reloading the rewritten file yields COMMITTED — the repair stuck");
+
+        /* An unmigratable stored config falls back to defaults, uncommitted, and
+         * the file is deliberately left untouched (evidence of what was stored). */
+        onwire.wlan1.scan_chlist[6] = 0x04; onwire.wlan1.scan_chlist[7] = 0x21;
+        onwire.wlan1.scan_chlist[3] = 0x01;      /* both rows populated */
+        ASSERT(opc_store_write_atomic(rpath, &onwire, sizeof onwire, 0644) == 0,
+               "B-R1-C014: fixture — unmigratable radio.conf written");
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_DISCARD_INVALID &&
+               !ls.radio_committed &&
+               ls.radio.wlan1.scan_band == OPC_SCAN_BAND_UNSET,
+               "B-R1-C014: an unmigratable radio.conf falls back to defaults, uncommitted");
+        {
+            opc_set_radio_config_req_t ondisk;
+            memset(&ondisk, 0, sizeof ondisk);
+            ASSERT(opc_store_read_all(rpath, &ondisk, sizeof ondisk) == (ssize_t)sizeof ondisk &&
+                   memcmp(&ondisk, &onwire, sizeof ondisk) == 0,
+                   "B-R1-C014: the rejected file is left untouched");
+        }
+        unlink(rpath);
+    }
+
     /* 26c(#102). The identical-request shortcut applies only to a COMMITTED
      *     config. A matching but uncommitted state (never applied) must still
      *     reach the platform; once committed, the same request is skipped. */
