@@ -2897,6 +2897,40 @@ int main(void)
                    memcmp(&ondisk, &onwire, sizeof ondisk) == 0,
                    "B-R1-C014: the rejected file is left untouched");
         }
+        /* A-R1-001 (round 5). A FAILED write-back must leave the config
+         * UNCOMMITTED. Otherwise the failure is permanent, not transient: the
+         * migrated config equals the frame a correct VHL sends, so the next
+         * matching SetRadioConfig takes the apply-skip branch and never reaches
+         * persist_radio — the rejected bytes would survive even after the
+         * filesystem became writable again. Made unwritable by dropping write
+         * permission on the containing directory (root ignores that, so the
+         * case is skipped there rather than asserted falsely). */
+        if (geteuid() != 0) {
+            char rdir[160], rp2[200];
+            snprintf(rdir, sizeof rdir, "/tmp/test_radioconf_ro_%d", (int)getpid());
+            snprintf(rp2, sizeof rp2, "%s/radio.conf", rdir);
+            (void)unlink(rp2); (void)rmdir(rdir);
+            ASSERT(mkdir(rdir, 0755) == 0, "A-R1-001: fixture — ro dir created");
+            ASSERT(opc_store_write_atomic(rp2, &onwire, sizeof onwire, 0644) == 0,
+                   "A-R1-001: fixture — row-B radio.conf written before lockdown");
+            /* onwire currently holds the unmigratable both-rows form; rewrite the
+             * migratable row-B-only form for this case. */
+            onwire.wlan1.scan_chlist[3] = 0;
+            ASSERT(opc_store_write_atomic(rp2, &onwire, sizeof onwire, 0644) == 0,
+                   "A-R1-001: fixture — migratable row-B form written");
+            ASSERT(chmod(rdir, 0555) == 0, "A-R1-001: fixture — directory made read-only");
+            ls.paths.radio = rp2;
+            ls.radio_committed = true;
+            opcd_radio_restore_t rr2 = opcd_radio_conf_load(&ls);
+            ASSERT(rr2 == OPCD_RADIO_RESTORE_MIGRATED,
+                   "A-R1-001: an unwritable destination still reports MIGRATED");
+            ASSERT(!ls.radio_committed,
+                   "A-R1-001: a FAILED write-back leaves the config UNCOMMITTED "
+                   "(so the next SetRadioConfig applies + persists and repairs the file)");
+            ASSERT(opc_scan_list_valid(ls.radio.wlan1.scan_band, ls.radio.wlan1.scan_chlist),
+                   "A-R1-001: the in-memory config is still the migrated, valid one");
+            (void)chmod(rdir, 0755); (void)unlink(rp2); (void)rmdir(rdir);
+        }
         unlink(rpath);
     }
 

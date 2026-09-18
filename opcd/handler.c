@@ -505,9 +505,23 @@ opcd_radio_restore_t opcd_radio_conf_load(opcd_state_t *st)
          * without losing this device's stored config at boot). */
         fprintf(stderr, "opcd: radio.conf: stored 2.4/5 GHz SCAN list found in row B — "
                         "migrated to row A (row order confirmed 2026-09-18)\n");
-        if (opc_store_write_atomic(st->paths.radio, &st->radio, sizeof st->radio, 0644) != 0)
+        if (opc_store_write_atomic(st->paths.radio, &st->radio, sizeof st->radio, 0644) != 0) {
+            /* The write-back is not optional (see handler.h). Leaving the config
+             * COMMITTED here would make the failure permanent rather than
+             * transient: the migrated config is byte-equal to the frame a
+             * correct VHL sends, so radio_cfg_differs() is false and the next
+             * matching SetRadioConfig takes the apply-skip branch — it answers
+             * OK without reaching persist_radio, the only other writer of this
+             * file. The rejected bytes would then survive for the life of the
+             * installation, even after the filesystem became writable again.
+             * Dropping the flag matches what DISCARD_SIZE, DISCARD_INVALID and
+             * LEGACY already do, so the next matching request applies and
+             * persists, repairing the file. */
             fprintf(stderr, "opcd: radio.conf: write-back of the migrated config failed: %s — "
-                            "the stored bytes stay in the old row-B form\n", strerror(errno));
+                            "left uncommitted so the next SetRadioConfig re-persists it\n",
+                    strerror(errno));
+            st->radio_committed = false;
+        }
     }
     return rr;
 }
