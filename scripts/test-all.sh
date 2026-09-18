@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 전체 OPC 프로토콜 명령 자동 검증 스위트 (test-env.sh 재사용).
 #
-#   bash scripts/test-all.sh                 # 안전 전체 (set-radio 실적용 제외)
-#   RADIO_APPLY=1 bash scripts/test-all.sh   # set-radio OK 실적용까지 (동일 freq 재적용/자기복구) ⚠️콘솔권장
+#   bash scripts/test-all.sh                     # 안전 전체 (실적용/커밋 제외)
+#   RADIO_APPLY=1 bash scripts/test-all.sh       # set-radio OK 실적용까지 (동일 freq 재적용/자기복구) ⚠️콘솔권장
+#   CHANGEIP_COMMIT=1 bash scripts/test-all.sh   # ChangeIp 커밋(§6)까지 ⚠️⚠️콘솔필수 — 관리 IF의 IP가 바뀐다
 #
 # 안전장치: 시작 시 타겟 /usr/local/opc/etc 를 스냅샷, 종료(정상/중단) 시 복원 + opcd 재시작.
 # 링크위험(자기절단)으로 스킵: WlanStatusChange/ApDisconnect/FaultDetect (사유 출력).
@@ -12,6 +13,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/test-env.sh" >/dev/null || { echo "loader 로드 실패"; exit 1; }
 
 RADIO_APPLY="${RADIO_APPLY:-0}"
+# ChangeIp 커밋은 관리 인터페이스의 IP를 실제로 바꾸므로 기본 비활성. 제어 경로가 그 인터페이스면
+# 하니스가 스스로 연결을 끊고, 복원 트랩도 ssh 경유라 함께 실패한다(시리얼 콘솔 없이 복구 불가).
+CHANGEIP_COMMIT="${CHANGEIP_COMMIT:-0}"
 LOG="${LOG:-${TMPDIR:-/tmp}/opc-test-all.$$.log}"
 pass=0; fail=0; skip=0; FAILED=""
 
@@ -81,16 +85,30 @@ $VHL login --password "$PW" >/dev/null 2>&1
 
 # ============ 5. SetIpConfigList (백업/복원) ============
 sec "5. SetIpConfigList"
-chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
+# slot1은 §6에서 커밋 대상이 될 수 있으므로 ESSID/GW/NTP를 미설정(0.0.0.0 / "")으로 둔다.
+# ESSID가 비어 있지 않으면 ChangeIp 커밋이 platform_nxp.c의 run_opc_wlan_apply()로 wpa_cli에
+# 그 ESSID를 mlan0(하드코딩)에 적용해 무선을 끊는다. GW도 기본 경로를 갈아치운다.
+# (온타겟 기록: set-ip-list는 --gw 0.0.0.0 --ntp 0.0.0.0 --essid "" 형태로 쓸 것)
+chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 1
 chk "set-ip-list 비연속 netmask → NG 0x0012"  "0x0012"      $VHL set-ip-list --slot 2 --flag cont --ip 10.0.0.60 --mask 0.255.0.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
-chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
+chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip-list --slot 3 --flag start_end --ip 10.0.0.70 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 
-# ============ 6. ChangeIpAddress (eth0 DOWN → 우리 경로 무관, 안전) ============
+# ============ 6. ChangeIpAddress ============
+# 과거 주석은 "eth0 DOWN → 우리 경로 무관, 안전"이었으나 그것은 제어 경로가 eth0(유선)이던 시절의
+# 전제였고, 제어가 mlan0인 구성에서는 거짓이다. 커밋(armed→Logout)은 관리 인터페이스의 IP를
+# 실제로 바꾸므로 명시적 옵트인 없이는 돌리지 않는다. NG 경로는 커밋이 없어 항상 안전.
 sec "6. ChangeIpAddress"
+# 보드 기준으로 하니스 호스트에 도달하는 인터페이스 = 제어 경로. 실측해서 사유에 남긴다.
+CTRL_IF=$(vhl_ssh "ip route get $VHLIP 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
 chk "change-ip 빈슬롯(25) → NG 0x0011"       "0x0011"       $VHL change-ip --slot 25
-chk "change-ip slot1 (armed) → OK"           "OK"           $VHL change-ip --slot 1
+if [ "$CHANGEIP_COMMIT" = "1" ]; then
+  chk "change-ip slot1 (armed) → OK"         "OK"           $VHL change-ip --slot 1
+else
+  skipn "change-ip slot1 (armed→Logout 커밋)" \
+        "CHANGEIP_COMMIT=1 필요 — 제어경로=${CTRL_IF:-불명}, 커밋 시 관리 IF의 IP가 바뀌어 자기절단 위험"
+fi
 
 # ============ 7. SetRadioConfig ============
 sec "7. SetRadioConfig"
@@ -98,6 +116,11 @@ chk "set-radio mode 99 → NG 0x0013"          "0x0013"       $VHL set-radio --s
 chk "set-radio bw 99 → NG 0x0014"            "0x0014"       $VHL set-radio --station single --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 99
 chk "set-radio 6G band → NG 0x0011"          "0x0011"       $VHL set-radio --station single --w1-band 6 --w1-chlist 1 --w1-mode 11 --w1-bw 2
 chk "set-radio 5G bit25(표 밖) → NG 0x0012"  "0x0012"       $VHL set-radio --station single --w1-band 5 --w1-chlist-hex 0200000000000000 --w1-mode 11 --w1-bw 2
+# D1 (회신 2026-09-18): 행 순서 확정 — 2.4/5GHz 리스트가 row B(뒤 4Byte)에 실리면 부정 프레임
+chk "set-radio 2.4G 리스트 row B → NG 0x0012" "0x0012"      $VHL set-radio --station single --w1-band 2.4 --w1-chlist-hex 0000000000000421 --w1-mode 11 --w1-bw 2
+# Rev1.02 §4.3.8: Priority CH 오류는 SCAN 오류(0x0011/0x0012)와 분리된 0x0015/0x0016
+chk "set-radio Dual priority 6G대역 → NG 0x0015" "0x0015"   $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x06FF
+chk "set-radio Dual priority 5G ch38(표 밖) → NG 0x0016" "0x0016" $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x0226
 if [ "$RADIO_APPLY" = "1" ]; then
   # Rev1.01: band + channel list. Same config re-sent → apply skipped (OK), so use ch40+ch36 first.
   chk "set-radio OK 실적용(5G ch40,36 밴드락)"  "OK"           $VHL set-radio --station single --w1-band 5 --w1-chlist 40,36 --w1-mode 11 --w1-bw 2
