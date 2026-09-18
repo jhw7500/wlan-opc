@@ -85,7 +85,30 @@ int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t
  * leave it committed. WLAN#2 is examined only for DUAL — SINGLE ignores it and
  * the stored bytes may be anything. Inbound frames are never normalized: they
  * are rejected with 0x0012. */
-bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg);
+bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg, bool *moved);
+
+/* What the radio.conf restore path must do with the bytes it just read.
+ * Decoding, migration and validation are decided here — as one pure function of
+ * (bytes, length) — so every branch is host-testable without the hardcoded
+ * /usr/local/opc/etc path the daemon uses. The caller only logs and applies. */
+typedef enum {
+    OPCD_RADIO_RESTORE_DISCARD_SIZE = 0, /* no/!exact/!legacy layout → defaults, uncommitted */
+    OPCD_RADIO_RESTORE_DISCARD_INVALID,  /* decoded, but the SCAN list is unmigratable → as above */
+    OPCD_RADIO_RESTORE_COMMITTED,        /* exact layout, valid as stored → committed */
+    OPCD_RADIO_RESTORE_MIGRATED,         /* exact layout, a row-B list was moved to row A →
+                                          * committed, and the CALLER MUST WRITE THE CONFIG BACK:
+                                          * once migrated, the in-memory config equals the frame a
+                                          * correct VHL sends, so radio_cfg_differs() is false and
+                                          * the apply-skip branch answers OK without ever reaching
+                                          * persist_radio. Without the write-back the rejected
+                                          * bytes stay on disk forever, the migration helper can
+                                          * never be retired, and a later build that drops it
+                                          * silently discards the device's stored config at boot. */
+    OPCD_RADIO_RESTORE_LEGACY,           /* Rev1.00 layout converted → NOT committed (#102) */
+} opcd_radio_restore_t;
+
+opcd_radio_restore_t opcd_radio_conf_restore(const void *buf, size_t n,
+                                             opc_set_radio_config_req_t *out);
 
 #ifdef __cplusplus
 }

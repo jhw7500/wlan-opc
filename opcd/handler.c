@@ -439,19 +439,31 @@ static void legacy_radio_wlan_convert(const struct legacy_radio_wlan *in, opc_wl
         opc_scan_list_set_channel(out->scan_chlist, out->scan_band, ch);   /* no-op if unknown */
 }
 
-bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg)
+bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg, bool *moved)
 {
+    if (moved) *moved = false;
     if (!cfg) return false;
     const bool dual = (cfg->station_type == OPC_STATION_DUAL);
-    bool moved = opc_scan_list_normalize_rows(cfg->wlan1.scan_band, cfg->wlan1.scan_chlist);
+    bool m = opc_scan_list_normalize_rows(cfg->wlan1.scan_band, cfg->wlan1.scan_chlist);
     if (dual && opc_scan_list_normalize_rows(cfg->wlan2.scan_band, cfg->wlan2.scan_chlist))
-        moved = true;
-    if (moved)
-        fprintf(stderr, "opcd: radio.conf: stored 2.4/5 GHz SCAN list found in row B — "
-                        "migrated to row A (row order confirmed 2026-09-18)\n");
+        m = true;
+    if (moved) *moved = m;
     if (!opc_scan_list_valid(cfg->wlan1.scan_band, cfg->wlan1.scan_chlist)) return false;
     if (dual && !opc_scan_list_valid(cfg->wlan2.scan_band, cfg->wlan2.scan_chlist)) return false;
     return true;
+}
+
+opcd_radio_restore_t opcd_radio_conf_restore(const void *buf, size_t n,
+                                             opc_set_radio_config_req_t *out)
+{
+    if (!out) return OPCD_RADIO_RESTORE_DISCARD_SIZE;
+    int rc = (buf && n > 0) ? opcd_radio_conf_decode(buf, n, out) : -1;
+    if (rc < 0) return OPCD_RADIO_RESTORE_DISCARD_SIZE;
+    bool moved = false;
+    if (!opcd_radio_conf_migrate_lists(out, &moved))
+        return OPCD_RADIO_RESTORE_DISCARD_INVALID;
+    if (rc == 1) return OPCD_RADIO_RESTORE_LEGACY;
+    return moved ? OPCD_RADIO_RESTORE_MIGRATED : OPCD_RADIO_RESTORE_COMMITTED;
 }
 
 int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t *out)

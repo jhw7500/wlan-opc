@@ -176,44 +176,61 @@ static void state_load_from_disk(opcd_state_t *st)
         LOG("password load failed: %s", strerror(errno));
     }
     {
-        /* radio.conf: exact current layout, or the 16-byte Rev1.00 layout which
-         * is converted (#102). Any other size is a mismatch → defaults (the
-         * short-read acceptance of the old `<= 0` check is gone). */
+        /* radio.conf: the decode/migrate/validate decision is one pure function
+         * (opcd_radio_conf_restore) so every branch below is host-testable
+         * without this hardcoded path. Here we only log and apply it. */
         uint8_t rbuf[64];
         ssize_t rn = opc_store_read_all(st->paths.radio, rbuf, sizeof rbuf);
-        int rc = rn > 0 ? opcd_radio_conf_decode(rbuf, (size_t)rn, &st->radio) : -1;
-        /* Only an exact-layout file counts as committed. A converted Rev1.00
-         * file (rc == 1) describes what the old semantics applied (e.g. one
-         * frequency), not what the converted band/list would apply now (e.g.
-         * a whole band) — so the next matching request must run apply +
-         * persist instead of being skipped as "already there" (Codex P2). */
-        st->radio_committed = (rc == 0);
-        if (rc < 0) {
-            if (rn > 0)
-                LOG("radio.conf size mismatch (%zd vs %zu) — discarding", rn, sizeof st->radio);
-            memset(&st->radio, 0, sizeof st->radio);
-            st->radio.station_type    = st->conf.default_station_type;
-            st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
-            st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
-        } else if (rc == 1) {
-            LOG("radio.conf: legacy Rev1.00 layout converted to SCAN band/channel list — "
-                "re-send SetRadioConfig to confirm");
-        }
-        if (rc >= 0 && !opcd_radio_conf_migrate_lists(&st->radio)) {
-            /* The stored config is one the CURRENT validator rejects and could
-             * not be migrated. Leaving it committed would report frequency/CH 0
-             * through GetDeviceInfo and make the deferred best-effort revert a
-             * silent no-op (its channel enumeration would be empty), breaking
-             * the "apply failed => no net change" contract. Fall back to
-             * defaults instead, uncommitted, so the next SetRadioConfig applies
-             * and persists normally. */
-            LOG("radio.conf: stored SCAN list rejected by the current validator "
-                "and not migratable — discarding to defaults");
+        opc_set_radio_config_req_t loaded;
+        opcd_radio_restore_t rr =
+            opcd_radio_conf_restore(rn > 0 ? rbuf : NULL, rn > 0 ? (size_t)rn : 0, &loaded);
+        if (rr == OPCD_RADIO_RESTORE_DISCARD_SIZE ||
+            rr == OPCD_RADIO_RESTORE_DISCARD_INVALID) {
+            if (rr == OPCD_RADIO_RESTORE_DISCARD_SIZE) {
+                if (rn > 0)
+                    LOG("radio.conf size mismatch (%zd vs %zu) — discarding", rn, sizeof st->radio);
+            } else {
+                /* Stored bytes the CURRENT validator rejects and migration could
+                 * not rescue. Leaving them committed would report frequency/CH 0
+                 * through GetDeviceInfo and make the deferred best-effort revert a
+                 * silent no-op (its channel enumeration would be empty), breaking
+                 * the "apply failed => no net change" contract. The file is left
+                 * untouched on purpose: the config is already unusable, so there
+                 * is nothing to preserve, and keeping the bytes keeps the evidence
+                 * of what was stored. Every boot reaches this same stable state. */
+                LOG("radio.conf: stored SCAN list rejected by the current validator "
+                    "and not migratable — discarding to defaults");
+            }
             memset(&st->radio, 0, sizeof st->radio);
             st->radio.station_type    = st->conf.default_station_type;
             st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
             st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
             st->radio_committed = false;
+        } else {
+            st->radio = loaded;
+            /* Only an exact-layout file counts as committed. A converted Rev1.00
+             * file describes what the old semantics applied (e.g. one frequency),
+             * not what the converted band/list would apply now (e.g. a whole
+             * band) — so the next matching request must run apply + persist
+             * instead of being skipped as "already there" (Codex P2). */
+            st->radio_committed = (rr != OPCD_RADIO_RESTORE_LEGACY);
+            if (rr == OPCD_RADIO_RESTORE_LEGACY)
+                LOG("radio.conf: legacy Rev1.00 layout converted to SCAN band/channel list — "
+                    "re-send SetRadioConfig to confirm");
+            if (rr == OPCD_RADIO_RESTORE_MIGRATED) {
+                /* Write the normalized config back. The migrated config is now
+                 * byte-equal to the frame a correct VHL sends, so the apply-skip
+                 * branch answers OK without reaching persist_radio — nothing else
+                 * would ever rewrite the file, and the rejected bytes would stay
+                 * on disk indefinitely (the migration helper could then never be
+                 * retired without losing this device's stored config at boot). */
+                LOG("radio.conf: stored 2.4/5 GHz SCAN list found in row B — migrated to "
+                    "row A (row order confirmed 2026-09-18)");
+                if (opc_store_write_atomic(st->paths.radio, &st->radio,
+                                           sizeof st->radio, 0644) != 0)
+                    LOG("radio.conf: write-back of the migrated config failed: %s — "
+                        "the stored bytes stay in the old row-B form", strerror(errno));
+            }
         }
     }
     n = opc_store_read_all(st->paths.ip_list, &st->ip_list, sizeof st->ip_list);

@@ -2722,16 +2722,20 @@ int main(void)
         ASSERT(opcd_radio_conf_decode(legacy, 20, &out) == -1, "decode: unknown size → -1");
     }
 
-    /* 26b-2 (A-R1-001). radio.conf PERSISTED by a build that predates the row
-     *      order confirmation may carry a 2.4/5 GHz SCAN list in row B. The
-     *      strict validator now rejects that shape, so restoring it as
+    /* 26b-2 (A-R1-001 / B-R1-C006). radio.conf PERSISTED by a build that predates
+     *      the row-order confirmation may carry a 2.4/5 GHz SCAN list in row B.
+     *      The strict validator now rejects that shape, so restoring it as
      *      COMMITTED would enumerate zero channels: GetDeviceInfo would report
      *      frequency/CH 0, and the deferred best-effort revert would skip the
      *      platform apply (n1 == 0) while reporting success — breaking the
-     *      "apply failed => no net change" contract. Drive decode + migrate as
-     *      the restore path does and require a valid, non-empty result. */
+     *      "apply failed => no net change" contract.
+     *
+     *      opcd_radio_conf_restore() is the whole decode/migrate/validate
+     *      decision as a pure function of (bytes, length), so every branch the
+     *      daemon's startup path takes is exercised here without the hardcoded
+     *      /usr/local/opc/etc/radio.conf the daemon reads. */
     {
-        opc_set_radio_config_req_t stored;
+        opc_set_radio_config_req_t stored, out2;
         memset(&stored, 0, sizeof stored);
         stored.station_type    = OPC_STATION_SINGLE;
         stored.priority_ch     = OPC_PRIORITY_CH_UNSET;
@@ -2742,13 +2746,10 @@ int main(void)
         stored.wlan1.scan_chlist[7] = 0x21;
         stored.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
 
-        opc_set_radio_config_req_t out2;
-        ASSERT(opcd_radio_conf_decode(&stored, sizeof stored, &out2) == 0,
-               "A-R1-001: row-B radio.conf decodes as the exact layout (would be committed)");
-        ASSERT(!opc_scan_list_valid(out2.wlan1.scan_band, out2.wlan1.scan_chlist),
-               "A-R1-001: the decoded list is rejected by the current validator");
-        ASSERT(opcd_radio_conf_migrate_lists(&out2),
-               "A-R1-001: migration accepts the stored config");
+        /* (a) row-B stored list → MIGRATED: committed, and the caller must write back. */
+        ASSERT(opcd_radio_conf_restore(&stored, sizeof stored, &out2) ==
+                   OPCD_RADIO_RESTORE_MIGRATED,
+               "A-R1-001: row-B radio.conf restores as MIGRATED (caller writes it back)");
         ASSERT(opc_scan_list_valid(out2.wlan1.scan_band, out2.wlan1.scan_chlist),
                "A-R1-001: migrated list passes the current validator");
         {
@@ -2764,23 +2765,66 @@ int main(void)
             ASSERT(mhz == 2412 && chf == (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1),
                    "A-R1-001: GetDeviceInfo freq/CH no longer derive as 0");
         }
-        /* A list the migration cannot rescue (both rows populated) must be
-         * refused so the caller discards it instead of committing it. */
+        /* The write-back the MIGRATED verdict demands is what makes the repair
+         * permanent: the migrated config is byte-equal to the frame a correct
+         * VHL sends, so radio_cfg_differs() is false and the apply-skip branch
+         * answers OK without ever reaching persist_radio. */
+        {
+            opc_set_radio_config_req_t as_sent = stored;
+            memset(as_sent.wlan1.scan_chlist, 0, OPC_SCAN_CHLIST_LEN);
+            as_sent.wlan1.scan_chlist[2] = 0x04; as_sent.wlan1.scan_chlist[3] = 0x21;
+            ASSERT(memcmp(&out2, &as_sent, sizeof out2) == 0,
+                   "A-R1-001: migrated config equals the row-A frame a VHL sends "
+                   "(so nothing else would ever rewrite radio.conf)");
+        }
+
+        /* (b) both rows populated → DISCARD_INVALID: caller falls back to defaults. */
         opc_set_radio_config_req_t bad2 = stored;
-        bad2.wlan1.scan_chlist[3] = 0x01;        /* row A also populated */
-        ASSERT(!opcd_radio_conf_migrate_lists(&bad2),
-               "A-R1-001: an unmigratable stored list is refused (caller discards to defaults)");
-        /* A well-formed stored config is accepted untouched. */
+        bad2.wlan1.scan_chlist[3] = 0x01;
+        ASSERT(opcd_radio_conf_restore(&bad2, sizeof bad2, &out2) ==
+                   OPCD_RADIO_RESTORE_DISCARD_INVALID,
+               "B-R1-C006: an unmigratable stored list restores as DISCARD_INVALID");
+
+        /* (c) well-formed row-A stored config → COMMITTED, unchanged. */
         opc_set_radio_config_req_t good2;
         memset(&good2, 0, sizeof good2);
         good2.station_type    = OPC_STATION_SINGLE;
         good2.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
         good2.wlan1.scan_chlist[2] = 0x04; good2.wlan1.scan_chlist[3] = 0x21;
         good2.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
-        opc_set_radio_config_req_t good_copy = good2;
-        ASSERT(opcd_radio_conf_migrate_lists(&good2) &&
-               memcmp(&good2, &good_copy, sizeof good2) == 0,
-               "A-R1-001: a row-A stored config is accepted unchanged");
+        ASSERT(opcd_radio_conf_restore(&good2, sizeof good2, &out2) ==
+                   OPCD_RADIO_RESTORE_COMMITTED &&
+               memcmp(&out2, &good2, sizeof out2) == 0,
+               "A-R1-001: a row-A stored config restores as COMMITTED, unchanged");
+
+        /* (d) unknown size / absent file → DISCARD_SIZE. */
+        ASSERT(opcd_radio_conf_restore(&good2, 20, &out2) == OPCD_RADIO_RESTORE_DISCARD_SIZE,
+               "B-R1-C006: an unknown-size radio.conf restores as DISCARD_SIZE");
+        ASSERT(opcd_radio_conf_restore(NULL, 0, &out2) == OPCD_RADIO_RESTORE_DISCARD_SIZE,
+               "B-R1-C006: an absent radio.conf restores as DISCARD_SIZE");
+
+        /* (e) Rev1.00 layout → LEGACY: converted but deliberately NOT committed. */
+        {
+            uint8_t legacy16[OPCD_RADIO_CONF_LEGACY_LEN];
+            memset(legacy16, 0, sizeof legacy16);
+            legacy16[1] = OPC_STATION_SINGLE;           /* big-endian station_type */
+            legacy16[4] = (uint8_t)(5180 >> 8); legacy16[5] = (uint8_t)(5180 & 0xFF);
+            legacy16[6] = 0x02; legacy16[7] = 36;       /* 5 GHz, ch36 */
+            ASSERT(opcd_radio_conf_restore(legacy16, sizeof legacy16, &out2) ==
+                       OPCD_RADIO_RESTORE_LEGACY,
+                   "B-R1-C006: a Rev1.00-layout radio.conf restores as LEGACY (not committed)");
+        }
+
+        /* migrate_lists itself reports whether it moved a row — the signal the
+         * MIGRATED verdict and therefore the write-back is built on. */
+        {
+            opc_set_radio_config_req_t m = stored; bool moved = false;
+            ASSERT(opcd_radio_conf_migrate_lists(&m, &moved) && moved,
+                   "A-R1-001: migrate reports a row was moved");
+            opc_set_radio_config_req_t g = good2; moved = true;
+            ASSERT(opcd_radio_conf_migrate_lists(&g, &moved) && !moved,
+                   "A-R1-001: migrate reports no move for an already-valid config");
+        }
     }
 
     /* 26c(#102). The identical-request shortcut applies only to a COMMITTED
