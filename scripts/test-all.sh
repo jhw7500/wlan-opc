@@ -87,10 +87,16 @@ $VHL login --password "$PW" >/dev/null 2>&1
 sec "5. SetIpConfigList"
 # slot1은 §6에서 커밋 대상이 될 수 있으므로 ESSID/GW/NTP를 미설정(0.0.0.0 / "")으로 둔다.
 # ESSID가 비어 있지 않으면 ChangeIp 커밋이 platform_nxp.c의 run_opc_wlan_apply()로 wpa_cli에
-# 그 ESSID를 mlan0(하드코딩)에 적용해 무선을 끊는다. GW도 기본 경로를 갈아치운다.
+# 그 ESSID를 mlan0(하드코딩)에 적용해 무선을 끊는다. GW/NTP는 적용 대상이 아니지만(검증·에코만),
+# 커밋되는 슬롯이므로 함께 미설정으로 둔다.
 # (온타겟 기록: set-ip-list는 --gw 0.0.0.0 --ntp 0.0.0.0 --essid "" 형태로 쓸 것)
 chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
-chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 1
+# staging 중 change-ip는 슬롯을 보기 전에 거절된다 — handle_change_ip_address의 검사 순서가
+# armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c). 그래서 빈 슬롯을
+# 쓰면 staging 중엔 0x0012, staging이 닫힌 뒤엔 0x0011이 되어 **어느 경로로도 pending을 세우지
+# 못한다**. slot 1로 찌르면 앞의 START 프레임이 유실됐을 때(chk는 재시도 없음) 기존 slot 1이
+# OK를 받아 살아 있는 ESSID/GW를 담은 커밋을 예약해 버린다.
+chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 25
 chk "set-ip-list 비연속 netmask → NG 0x0012"  "0x0012"      $VHL set-ip-list --slot 2 --flag cont --ip 10.0.0.60 --mask 0.255.0.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip-list --slot 3 --flag start_end --ip 10.0.0.70 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
@@ -104,10 +110,30 @@ sec "6. ChangeIpAddress"
 CTRL_IF=$(vhl_ssh "ip route get '$VHLIP' 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
 chk "change-ip 빈슬롯(25) → NG 0x0011"       "0x0011"       $VHL change-ip --slot 25
 if [ "$CHANGEIP_COMMIT" = "1" ]; then
-  # 측정한 제어 경로를 위험 분기에서도 반드시 출력한다 — 스킵 분기에만 찍으면 정작 끊기는
-  # 실행에는 무엇이 끊겼는지 기록이 남지 않는다. 옵트인이 안전장치이고 이 줄은 그 증거다.
-  printf '  \033[33mWARN\033[0m  ChangeIp 커밋 — 제어경로=%s 의 IP가 바뀐다 (시리얼 콘솔 확보 전제)\n' "${CTRL_IF:-불명}"
+  printf '  \033[33mWARN\033[0m  ChangeIp 커밋 — 제어경로=%s, 관리 IP가 10.0.0.50으로 이동한다 (시리얼 콘솔 확보 전제)\n' "${CTRL_IF:-불명}"
+  vhl_ssh "ip -4 -o addr show" 2>/dev/null | sed 's/^/        before: /'
   chk "change-ip slot1 (armed) → OK"         "OK"           $VHL change-ip --slot 1
+  # change-ip는 예약만 한다. 커밋은 Logout이 arm해야 일어난다(handler.c: handle_logout이
+  # ip_change_commit_armed를 세우고 opcd_apply_pending_ip_change가 그 플래그에만 반응).
+  # 여기서 logout하지 않으면 §8의 Reset이 데몬을 내리며 pending을 버려 커밋이 영영 일어나지
+  # 않고, 이 옵트인은 ACK만 확인하는 빈 검사가 된다.
+  $VHL logout >/dev/null 2>&1 || true
+  sleep 3
+  # 커밋의 외부 관측 가능한 효과는 하나뿐이다 — 옛 관리 주소가 더는 OPC에 응답하지 않는다.
+  cmt=$($VHL basic-info 2>&1 || true)
+  if printf '%s' "$cmt" | grep -q vendor_code; then
+    printf '  \033[31mFAIL\033[0m  ChangeIp 커밋 — 옛 주소(%s)가 여전히 응답한다 = IP 미이동\n' "$TEST_OPC_HOST"
+    fail=$((fail+1)); FAILED="${FAILED}\n  - ChangeIp 커밋 미적용"
+  else
+    printf '  PASS  ChangeIp 커밋 — 옛 주소(%s) 무응답 = 관리 IP 이동\n' "$TEST_OPC_HOST"
+    pass=$((pass+1))
+  fi
+  echo "  제어 경로가 이동해 이후 섹션은 수행 불가. 시리얼 콘솔에서 복구:"
+  echo "    ip addr del 10.0.0.50/24 dev ${CTRL_IF:-<iface>}; ip addr add <원래주소> dev ${CTRL_IF:-<iface>}"
+  echo "    mv /usr/local/opc/etc.testbak /usr/local/opc/etc; systemctl restart opcd"
+  printf '\n합계: PASS %d / FAIL %d / SKIP %d (ChangeIp 커밋에서 종료)\n' "$pass" "$fail" "$skip"
+  [ "$fail" -gt 0 ] && exit 1
+  exit 0
 else
   skipn "change-ip slot1 (armed→Logout 커밋)" \
         "CHANGEIP_COMMIT=1 필요 — 제어경로=${CTRL_IF:-불명}, 커밋 시 관리 IF의 IP가 바뀌어 자기절단 위험"
