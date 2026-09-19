@@ -81,16 +81,40 @@ $VHL login --password "$PW" >/dev/null 2>&1
 
 # ============ 5. SetIpConfigList (백업/복원) ============
 sec "5. SetIpConfigList"
-chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
-chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 1
+# slot1은 §6의 ChangeIp 커밋 대상이 될 수 있는 슬롯이므로 ESSID/GW/NTP를 미설정으로 둔다.
+# ESSID가 비어 있지 않으면 커밋이 platform_nxp.c의 `slot->essid[0] != '\\0'` 게이트를 통과해
+# run_opc_wlan_apply()로 그 ESSID를 mlan0(하드코딩)에 적용하고 무선을 끊는다. GW/NTP는 적용
+# 대상이 아니지만(검증·에코만) 같은 이유로 함께 비운다.
+chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
+# staging 중 change-ip는 슬롯을 보기 전에 거절된다 — handle_change_ip_address의 검사 순서가
+# armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c).
+#
+# 슬롯 번호를 **범위 밖(0)** 으로 두는 것이 핵심이다. 범위 검사가 staging 검사 뒤에 있으므로
+# staging이 열려 있으면 기대대로 0x0012지만, 앞의 START 프레임이 유실돼 staging이 안 열렸다면
+# 0x0010(범위 밖)이 되어 present 분기에 **도달 자체를 못 한다** — 타겟에 그 슬롯이 채워져
+# 있는지와 무관하게 커밋 예약이 구조적으로 불가능하다. (`vhlctl`은 --slot 을 검증 없이
+# 그대로 싣는다: vhlctl.c의 `(uint16_t)atoi(slot_s)`.)
+#
+# 기존처럼 slot 1로 찌르면 그 경우 기존 slot 1이 OK를 받아 살아 있는 ESSID/GW를 담은 커밋이
+# 예약되고 teardown의 Logout이 그것을 커밋한다. 비어 있을 법한 슬롯(25)을 쓰는 것도 "그 보드에
+# 25가 비어 있다"는 타겟 상태에 기대는 조건부 보장일 뿐이다.
+chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 0
 chk "set-ip-list 비연속 netmask → NG 0x0012"  "0x0012"      $VHL set-ip-list --slot 2 --flag cont --ip 10.0.0.60 --mask 0.255.0.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
-chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
+chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip-list --slot 3 --flag start_end --ip 10.0.0.70 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 
-# ============ 6. ChangeIpAddress (eth0 DOWN → 우리 경로 무관, 안전) ============
+# ============ 6. ChangeIpAddress ============
+# 과거 주석은 "eth0 DOWN → 우리 경로 무관, 안전"이었으나 그것은 제어 경로가 eth0(유선)이던 시절의
+# 전제였다. 커밋 대상은 opcd가 고른다 — mgmt_ip_iface_idx(): peer_route면 mlan0, 아니면 opc.conf의
+# device_ip_iface(기본 eth0). 제어 경로와 같을 수도 다를 수도 있어 "안전"을 전제할 수 없다.
+# NG 경로는 커밋이 없어 항상 안전하므로 여기서 수행한다.
 sec "6. ChangeIpAddress"
 chk "change-ip 빈슬롯(25) → NG 0x0011"       "0x0011"       $VHL change-ip --slot 25
-chk "change-ip slot1 (armed) → OK"           "OK"           $VHL change-ip --slot 1
+# 커밋(armed change-ip → Logout)은 이 스위트에서 수행하지 않는다. 하니스는 결과를 판정할 수도
+# (커밋 순간 제어 평면이 죽을 수 있다) 복구할 수도(콘솔+리부트 필요) 없다. 절차는 문서에 있다:
+# docs/testing/ontarget-protocol-verification-plan.md
+skipn "change-ip slot1 (armed→Logout 커밋)" \
+      "파괴적·비가역 — 시리얼 콘솔 필요. 수동 절차는 docs/testing/ontarget-protocol-verification-plan.md"
 
 # ============ 7. SetRadioConfig ============
 sec "7. SetRadioConfig"
