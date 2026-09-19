@@ -98,6 +98,11 @@ chk "set-radio mode 99 → NG 0x0013"          "0x0013"       $VHL set-radio --s
 chk "set-radio bw 99 → NG 0x0014"            "0x0014"       $VHL set-radio --station single --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 99
 chk "set-radio 6G band → NG 0x0011"          "0x0011"       $VHL set-radio --station single --w1-band 6 --w1-chlist 1 --w1-mode 11 --w1-bw 2
 chk "set-radio 5G bit25(표 밖) → NG 0x0012"  "0x0012"       $VHL set-radio --station single --w1-band 5 --w1-chlist-hex 0200000000000000 --w1-mode 11 --w1-bw 2
+# D1 (회신 2026-09-18): 행 순서 확정 — 2.4/5GHz 리스트가 row B(뒤 4Byte)에 실리면 부정 프레임
+chk "set-radio 2.4G 리스트 row B → NG 0x0012" "0x0012"      $VHL set-radio --station single --w1-band 2.4 --w1-chlist-hex 0000000000000421 --w1-mode 11 --w1-bw 2
+# Rev1.02 §4.3.8: Priority CH 오류는 SCAN 오류(0x0011/0x0012)와 분리된 0x0015/0x0016
+chk "set-radio Dual priority 6G대역 → NG 0x0015" "0x0015"   $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x06FF
+chk "set-radio Dual priority 5G ch38(표 밖) → NG 0x0016" "0x0016" $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x0226
 if [ "$RADIO_APPLY" = "1" ]; then
   # Rev1.01: band + channel list. Same config re-sent → apply skipped (OK), so use ch40+ch36 first.
   chk "set-radio OK 실적용(5G ch40,36 밴드락)"  "OK"           $VHL set-radio --station single --w1-band 5 --w1-chlist 40,36 --w1-mode 11 --w1-bw 2
