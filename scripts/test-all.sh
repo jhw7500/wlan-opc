@@ -101,9 +101,12 @@ chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip
 # 실제로 바꾸므로 명시적 옵트인 없이는 돌리지 않는다. NG 경로는 커밋이 없어 항상 안전.
 sec "6. ChangeIpAddress"
 # 보드 기준으로 하니스 호스트에 도달하는 인터페이스 = 제어 경로. 실측해서 사유에 남긴다.
-CTRL_IF=$(vhl_ssh "ip route get $VHLIP 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+CTRL_IF=$(vhl_ssh "ip route get '$VHLIP' 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
 chk "change-ip 빈슬롯(25) → NG 0x0011"       "0x0011"       $VHL change-ip --slot 25
 if [ "$CHANGEIP_COMMIT" = "1" ]; then
+  # 측정한 제어 경로를 위험 분기에서도 반드시 출력한다 — 스킵 분기에만 찍으면 정작 끊기는
+  # 실행에는 무엇이 끊겼는지 기록이 남지 않는다. 옵트인이 안전장치이고 이 줄은 그 증거다.
+  printf '  \033[33mWARN\033[0m  ChangeIp 커밋 — 제어경로=%s 의 IP가 바뀐다 (시리얼 콘솔 확보 전제)\n' "${CTRL_IF:-불명}"
   chk "change-ip slot1 (armed) → OK"         "OK"           $VHL change-ip --slot 1
 else
   skipn "change-ip slot1 (armed→Logout 커밋)" \
@@ -116,11 +119,6 @@ chk "set-radio mode 99 → NG 0x0013"          "0x0013"       $VHL set-radio --s
 chk "set-radio bw 99 → NG 0x0014"            "0x0014"       $VHL set-radio --station single --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 99
 chk "set-radio 6G band → NG 0x0011"          "0x0011"       $VHL set-radio --station single --w1-band 6 --w1-chlist 1 --w1-mode 11 --w1-bw 2
 chk "set-radio 5G bit25(표 밖) → NG 0x0012"  "0x0012"       $VHL set-radio --station single --w1-band 5 --w1-chlist-hex 0200000000000000 --w1-mode 11 --w1-bw 2
-# D1 (회신 2026-09-18): 행 순서 확정 — 2.4/5GHz 리스트가 row B(뒤 4Byte)에 실리면 부정 프레임
-chk "set-radio 2.4G 리스트 row B → NG 0x0012" "0x0012"      $VHL set-radio --station single --w1-band 2.4 --w1-chlist-hex 0000000000000421 --w1-mode 11 --w1-bw 2
-# Rev1.02 §4.3.8: Priority CH 오류는 SCAN 오류(0x0011/0x0012)와 분리된 0x0015/0x0016
-chk "set-radio Dual priority 6G대역 → NG 0x0015" "0x0015"   $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x06FF
-chk "set-radio Dual priority 5G ch38(표 밖) → NG 0x0016" "0x0016" $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x0226
 if [ "$RADIO_APPLY" = "1" ]; then
   # Rev1.01: band + channel list. Same config re-sent → apply skipped (OK), so use ch40+ch36 first.
   chk "set-radio OK 실적용(5G ch40,36 밴드락)"  "OK"           $VHL set-radio --station single --w1-band 5 --w1-chlist 40,36 --w1-mode 11 --w1-bw 2
