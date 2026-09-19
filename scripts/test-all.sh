@@ -106,8 +106,16 @@ chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip
 # 전제였고, 제어가 mlan0인 구성에서는 거짓이다. 커밋(armed→Logout)은 관리 인터페이스의 IP를
 # 실제로 바꾸므로 명시적 옵트인 없이는 돌리지 않는다. NG 경로는 커밋이 없어 항상 안전.
 sec "6. ChangeIpAddress"
-# 보드 기준으로 하니스 호스트에 도달하는 인터페이스 = 제어 경로. 실측해서 사유에 남긴다.
-CTRL_IF=$(vhl_ssh "ip route get '$VHLIP' 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+# 보드 기준으로 하니스 호스트에 도달하는 인터페이스. 이것은 **제어 경로**이지 ChangeIp의 적용
+# 대상이 아니다 — 적용 대상은 데몬이 고른다(handler.c mgmt_ip_iface_idx: peer_route면 무조건
+# mlan0, 아니면 opc.conf device_ip_iface). 두 값은 구성에 따라 갈릴 수 있으므로 그대로 "제어
+# 경로"라고만 표기한다.
+# VHLIP는 설정 파일 값이고 아래에서 타겟 root 셸 명령 문자열에 들어간다 — dotted-quad가 아니면
+# 원격 실행에 쓰지 않는다(따옴표 탈출로 임의 명령이 되는 것을 구조적으로 막는다).
+case "$VHLIP" in
+  *[!0-9.]*|"") CTRL_IF="" ;;
+  *) CTRL_IF=$(vhl_ssh "ip route get '$VHLIP' 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1) ;;
+esac
 chk "change-ip 빈슬롯(25) → NG 0x0011"       "0x0011"       $VHL change-ip --slot 25
 if [ "$CHANGEIP_COMMIT" = "1" ]; then
   printf '  \033[33mWARN\033[0m  ChangeIp 커밋 — 제어경로=%s, 관리 IP가 10.0.0.50으로 이동한다 (시리얼 콘솔 확보 전제)\n' "${CTRL_IF:-불명}"
@@ -119,19 +127,33 @@ if [ "$CHANGEIP_COMMIT" = "1" ]; then
   # 않고, 이 옵트인은 ACK만 확인하는 빈 검사가 된다.
   $VHL logout >/dev/null 2>&1 || true
   sleep 3
-  # 커밋의 외부 관측 가능한 효과는 하나뿐이다 — 옛 관리 주소가 더는 OPC에 응답하지 않는다.
-  cmt=$($VHL basic-info 2>&1 || true)
-  if printf '%s' "$cmt" | grep -q vendor_code; then
-    printf '  \033[31mFAIL\033[0m  ChangeIp 커밋 — 옛 주소(%s)가 여전히 응답한다 = IP 미이동\n' "$TEST_OPC_HOST"
-    fail=$((fail+1)); FAILED="${FAILED}\n  - ChangeIp 커밋 미적용"
+  # 판정은 **양성 증거**로만 한다. "옛 주소가 응답하지 않는다"는 IP 이동 말고도 프레임 유실·
+  # opcd 사망·보드 행이 똑같이 만들어내므로 그것만으로 PASS를 주면 fail-open이다.
+  # 보드에 닿을 수 있으면 새 주소가 실제로 올라왔는지 직접 읽고, 닿지 못하면 PASS가 아니라
+  # 판정 불가로 보고한다(콘솔에서 확인할 몫).
+  after=$(vhl_ssh "ip -4 -o addr show" 2>/dev/null)
+  if [ -z "$after" ]; then
+    skipn "ChangeIp 커밋 적용 확인" \
+          "커밋 후 보드에 닿지 못함 — 이동/장애를 하니스에서 구분 불가. 콘솔에서 확인할 것"
+  elif printf '%s' "$after" | grep -q '10\.0\.0\.50'; then
+    printf '  PASS  ChangeIp 커밋 — 새 주소 10.0.0.50 확인\n'; pass=$((pass+1))
+    printf '%s' "$after" | sed 's/^/        after: /'
   else
-    printf '  PASS  ChangeIp 커밋 — 옛 주소(%s) 무응답 = 관리 IP 이동\n' "$TEST_OPC_HOST"
-    pass=$((pass+1))
+    printf '  \033[31mFAIL\033[0m  ChangeIp 커밋 — 보드에 닿지만 10.0.0.50이 없다 = 미적용\n'
+    fail=$((fail+1)); FAILED="${FAILED}\n  - ChangeIp 커밋 미적용"
+    printf '%s' "$after" | sed 's/^/        after: /'
   fi
+  # teardown 트랩을 해제한다. restore()는 ssh 경유라 방금 끊긴 경로 위에서 rm -rf를 시도하게
+  # 되고, 성공하면 아래 수동 절차가 쓸 백업을 먼저 먹어치워 두 안내가 서로 모순된다.
+  trap - EXIT
+  echo
   echo "  제어 경로가 이동해 이후 섹션은 수행 불가. 시리얼 콘솔에서 복구:"
-  echo "    ip addr del 10.0.0.50/24 dev ${CTRL_IF:-<iface>}; ip addr add <원래주소> dev ${CTRL_IF:-<iface>}"
-  echo "    mv /usr/local/opc/etc.testbak /usr/local/opc/etc; systemctl restart opcd"
-  printf '\n합계: PASS %d / FAIL %d / SKIP %d (ChangeIp 커밋에서 종료)\n' "$pass" "$fail" "$skip"
+  echo "    rm -rf /usr/local/opc/etc && mv /usr/local/opc/etc.testbak /usr/local/opc/etc"
+  echo "    reboot"
+  echo "  (etc를 먼저 지우지 않으면 mv가 백업을 etc 안으로 넣어 테스트 설정이 live로 남는다."
+  echo "   주소 적용은 runtime-only라 리부트가 .network 값을 되살린다 — peer_route의 eth0 /32"
+  echo "   미러와 라우팅 table 100도 같이 복구되므로 ip addr del/add로 때우지 말 것.)"
+  printf '\n합계: PASS %d / FAIL %d / SKIP %d (ChangeIp 커밋에서 종료 — teardown 미실행)\n' "$pass" "$fail" "$skip"
   [ "$fail" -gt 0 ] && exit 1
   exit 0
 else
