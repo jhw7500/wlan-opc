@@ -165,8 +165,9 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
     while (fgets(line, sizeof line, f)) {
         char key[48], val[64];
         /* accepts both "key=value" and "key = value"; '#' comment lines
-         * fail the key match and are skipped. Unknown keys (e.g. a future
-         * udp_port) are ignored. Lines beyond 159 chars are split by fgets
+         * fail the key match and are skipped. Keys owned by other modules
+         * (udp_port, roam_notify_port, device_ip_iface, …) are ignored here.
+         * Lines beyond 159 chars are split by fgets
          * — far above any congestion_* key=value pair, so no recovery. */
         if (sscanf(line, " %47[A-Za-z0-9_] = %63s", key, val) != 2) continue;
         if (strcmp(key, "congestion_threshold_pct") == 0) {
@@ -214,6 +215,16 @@ bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s)
     if (p->probe_countdown_s < interval) return false;
     p->probe_countdown_s = 0;
     return true;
+}
+
+void opcd_fault_probe_rearm(opcd_fault_probe_t *p, opcd_fault_res_t res)
+{
+    if (!p) return;
+    switch (res) {
+    case OPCD_FAULT_RES_CPU:  p->cpu_congested  = false; break;
+    case OPCD_FAULT_RES_DISK: p->disk_congested = false; break;
+    case OPCD_FAULT_RES_NET:  p->net_congested  = false; break;
+    }
 }
 
 void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)

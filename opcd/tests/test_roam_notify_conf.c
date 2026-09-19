@@ -97,6 +97,47 @@ int main(void)
                "over-long line tail not parsed -> default");
     }
 
+    /* ---- D6 (2026-09-18): the generic key parser, used for `udp_port`.
+     *      §4.1.2 requires the control port to be settable from Config data —
+     *      "고정 설정값은 NG" per the vendor reply — so opcd now reads
+     *      opc.conf::udp_port through opcd_conf_port_parse(). `rejected` lets
+     *      the caller warn instead of falling back silently. ---- */
+    {
+        int bad = -1;
+        write_conf("udp_port = 50700\n");
+        ASSERT(opcd_conf_port_parse(g_path, "udp_port", 50607, &bad) == 50700 && bad == 0,
+               "D6: udp_port valid value, not rejected");
+
+        bad = -1;
+        ASSERT(opcd_conf_port_parse(g_path, "roam_notify_port", 50608, &bad) == 50608 &&
+               bad == 0,
+               "D6: a different key is untouched by udp_port's line");
+
+        bad = -1;
+        write_conf("udp_port = 0\n");
+        ASSERT(opcd_conf_port_parse(g_path, "udp_port", 50607, &bad) == 50607 && bad == 1,
+               "D6: out-of-range udp_port falls back AND reports rejected");
+
+        bad = -1;
+        write_conf("udp_port = notanumber\n");
+        ASSERT(opcd_conf_port_parse(g_path, "udp_port", 50607, &bad) == 50607 && bad == 1,
+               "D6: non-numeric udp_port falls back AND reports rejected");
+
+        bad = -1;
+        write_conf("# udp_port = 50700\n");
+        ASSERT(opcd_conf_port_parse(g_path, "udp_port", 50607, &bad) == 50607 && bad == 0,
+               "D6: absent key is not a rejection");
+
+        /* A later valid occurrence wins and clears the rejection. */
+        bad = -1;
+        write_conf("udp_port = 0\nudp_port = 50800\n");
+        ASSERT(opcd_conf_port_parse(g_path, "udp_port", 50607, &bad) == 50800 && bad == 0,
+               "D6: last valid occurrence wins, rejection cleared");
+
+        ASSERT(opcd_conf_port_parse(g_path, NULL, 50607, &bad) == 50607,
+               "D6: NULL key -> default");
+    }
+
     unlink(g_path);
 
     if (failures == 0) { printf("all roam_notify_conf tests passed\n"); return 0; }

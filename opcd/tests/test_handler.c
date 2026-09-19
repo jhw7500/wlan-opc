@@ -1060,23 +1060,30 @@ int main(void)
         bad.wlan1.scan_chlist[0] = 0x02;              /* row A bit25: unassigned in 5 GHz */
         bad.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
         r = do_set_radio_req(&st, CIP, &bad);
-        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_SCAN_CH,
                "5 GHz list bit25 (unassigned) → 0x0012");
         bad.wlan1.scan_band = OPC_SCAN_BAND_UNSET;   /* unset band but channels listed */
         bad.wlan1.scan_chlist[0] = 0;
         bad.wlan1.scan_chlist[3] = 0x01;
         r = do_set_radio_req(&st, CIP, &bad);
-        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_SCAN_CH,
                "unset band with a channel list → 0x0012");
         memset(bad.wlan1.scan_chlist, 0, sizeof bad.wlan1.scan_chlist);
         r = do_set_radio_req(&st, CIP, &bad);
         ASSERT(r == OPC_RESULT_OK, "unset band + empty list (no band lock) → OK");
+        /* D1 (vendor reply 2026-09-18): the row order is now CONFIRMED — frame
+         * offset 312/72 carries Bit31~Bit0, 316/76 carries Bit63~Bit32. A
+         * 2.4/5 GHz list placed in row B is therefore a malformed frame, not a
+         * row-order variant to tolerate. The old leniency (single_row) made
+         * opcd answer OK to input the spec says is 0x0012, hiding the peer's
+         * bug; it is gone. */
         memset(bad.wlan1.scan_chlist, 0, sizeof bad.wlan1.scan_chlist);
-        bad.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;  /* list carried in row B (bytes 4..7) */
+        bad.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;  /* list wrongly carried in row B (bytes 4..7) */
         bad.wlan1.scan_chlist[6] = 0x04;
         bad.wlan1.scan_chlist[7] = 0x21;
         r = do_set_radio_req(&st, CIP, &bad);
-        ASSERT(r == OPC_RESULT_OK, "2.4 GHz list in row B tolerated (lenient row order) → OK");
+        ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_SCAN_CH,
+               "D1: 2.4 GHz list in row B rejected (row order confirmed) → 0x0012");
     }
     r = do_set_radio(&st, CIP, 2412, (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1));
     ASSERT(r == OPC_RESULT_OK, "valid 2.4 GHz band + ch1 accepted");
@@ -1105,12 +1112,12 @@ int main(void)
         rreq.wlan2.scan_band = OPC_SCAN_BAND_2_4GHZ;
         rreq.priority_ch     = (uint16_t)((OPC_BAND_6GHZ << 8) | 1);
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
-               "A21: DUAL priority_ch 6 GHz → 0x0012");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_PRIO_BAND,
+               "Rev1.02: DUAL priority_ch 6 GHz band → 0x0015 (not the SCAN 0x0012)");
         rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 38);   /* not in the 5 GHz table */
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_CH,
-               "DUAL priority_ch 5 GHz ch38 → 0x0012");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_PRIO_CH,
+               "Rev1.02: DUAL priority_ch 5 GHz ch38 → 0x0016 (not the SCAN 0x0012)");
         rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 36);
         rr = do_set_radio_req(&st, CIP, &rreq);
         ASSERT(rr == OPC_RESULT_OK, "DUAL 5 GHz/2.4 GHz bands, priority ch36 → OK");
@@ -1580,11 +1587,15 @@ int main(void)
 
         /* 21c. Retry classification must compare the WHOLE payload, not the
          *      apply-relevant fields. radio_cfg_differs() ignores priority_ch /
-         *      WLAN#2 for SINGLE, but a request that differs there is a DISTINCT
-         *      wire frame, not a retransmission — dropping it would answer the
-         *      original SN and time the client out (Codex, PR #113). Original
-         *      A(SN=93) in flight, then B(SN=94): same WLAN#1, different
-         *      priority_ch → B must be processed and answered with ITS OWN SN. */
+         *      WLAN#2 for SINGLE. Under the Request-ID rule (vendor reply
+         *      2026-09-18, inquiry Q5: "응답 전에 다음 요청을 받으면 파기") the
+         *      payload no longer matters: B is discarded and A's ORIGINAL SN
+         *      answers. This INVERTS the PR #113 reading ("a distinct wire
+         *      frame must be answered on its own SN"), which was our own
+         *      judgement and the reply superseded.
+         *      B also keeps priority_ch = 0x1234 (an unsupported band byte) on
+         *      a SINGLE request — it must still reach the retransmission test,
+         *      i.e. the 0x0015/0x0016 split must stay DUAL-gated. */
         stub_apply_radio_reset_calls();
         opc_set_radio_config_req_t rqA = a19r;   /* SINGLE, {5200/40} */
         legacy_to_scan(5220, 44, &rqA.wlan1);    /* differ from committed → deferred */
@@ -1598,20 +1609,52 @@ int main(void)
         fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 94, &rqB);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "A19 payload: distinct B(SN=94) not answered inline");
+        ASSERT(drc == 0 && rlen == 0, "A19 payload: distinct B(SN=94) discarded, no inline answer");
         ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "A19 payload: completion signalled");
         opcd_store_async_on_ready(&st);
-        if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
-            opcd_store_async_on_ready(&st);
         ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 payload: an ack arrived");
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 94 &&
+               ahdr.sequence_number == 93 &&
                opc_set_radio_config_ack_unpack(rx_buf, (size_t)rn, &rack) == 0 &&
                rack.result == OPC_RESULT_OK,
-               "A19 payload: distinct request answered with its OWN SN (94), not dropped as a retry");
+               "A19 payload: B discarded, ORIGINAL SN (93) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "A19 payload: exactly one ack");
+        ASSERT(stub_apply_radio_calls() == 1, "A19 payload: B never started a second apply");
+
+        /* 21c-2 (A-R1-002). The Request-ID gate runs BEFORE value validation, as
+         *      it does in set_password / set_ip_config_list. A frame that fails
+         *      VALUE validation inside the in-flight window must therefore be
+         *      discarded too — answering it NG on its own SN while the original's
+         *      deferred ack answers on the original SN would emit two responses
+         *      where the vendor rule prescribes one.
+         *      Scope: frames rejected earlier by the per-command unpack
+         *      (OPC_ERR_PACKET_SIZE) never reach this gate and are outside the
+         *      guarantee — see the note at the gate in handler.c. */
+        stub_apply_radio_reset_calls();
+        opc_set_radio_config_req_t rqC = a19r;
+        legacy_to_scan(5240, 48, &rqC.wlan1);
+        rqC.priority_ch = 0x0000;
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 98, &rqC);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "A19 gate: original C(SN=98) deferred");
+        opc_set_radio_config_req_t rqD = rqC;
+        rqD.wlan1.mode = 99;                       /* invalid — would NG 0x0013 */
+        fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 99, &rqD);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0,
+               "A-R1-002: an in-window frame failing VALUE validation is discarded by the gate, not NG'd on its own SN");
+        ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "A19 gate: completion signalled");
+        opcd_store_async_on_ready(&st);
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "A19 gate: an ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 98,
+               "A-R1-002: only the ORIGINAL SN (98) answers — one response for an unpackable in-window frame");
+        ASSERT(wait_fd_readable(cli, 300) != 0, "A-R1-002: no second ack for the invalid frame");
 
         /* 21d. A retry must be matched against THIS port's pending request, not
          *      the global st->radio. Session ownership is IP-scoped but pending
@@ -1721,11 +1764,11 @@ int main(void)
                pack_ack.error_cause == OPC_ERR_PASSWORD_MISMATCH,
                "pw cross: crossed retransmission processed as a new request on its own SN (102)");
 
-        /* 21g. A DIFFERENT same-command request while A is in flight is a new
-         *      request (rapid reconfigure), not a retransmission: B is
-         *      processed and answered on ITS OWN SN; A's superseded ack is
-         *      dropped (one ack total). B ends at the default password so the
-         *      following cases start from a known state. */
+        /* 21g. Request-ID rule: a DIFFERENT same-command request while A is in
+         *      flight is discarded like any re-send — A's ORIGINAL SN answers
+         *      and B is never applied. (Inverts the old "rapid reconfigure"
+         *      reading; see 21c.) A restore step then returns the password to
+         *      the default so the following cases start from a known state. */
         memset(&preq, 0, sizeof preq);
         strncpy(preq.old_password, "RetxSecret1", sizeof preq.old_password - 1);
         strncpy(preq.new_password, "RetxSecretA", sizeof preq.new_password - 1);
@@ -1739,9 +1782,9 @@ int main(void)
         fn   = opc_set_password_req_pack(frame, sizeof frame, 104, &preq);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "pw payload: distinct B(SN=104) deferred, not dropped as a retry");
-        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
-               "pw payload: distinct B applied");
+        ASSERT(drc == 0 && rlen == 0, "pw payload: distinct B(SN=104) discarded, no inline answer");
+        ASSERT(strcmp(st.password, "RetxSecretA") == 0,
+               "pw payload: B never applied — A's value stands");
         for (int d = 0; d < 3; d++) {
             if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
             opcd_store_async_on_ready(&st);
@@ -1750,11 +1793,31 @@ int main(void)
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 104 &&
+               ahdr.sequence_number == 103 &&
                opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
                pack_ack.result == OPC_RESULT_OK,
-               "pw payload: distinct request answered with its OWN SN (104)");
+               "pw payload: B discarded, ORIGINAL SN (103) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "pw payload: exactly one ack");
+        /* Restore the default password for the cases below: the slot is free
+         * now that A completed, so this is an ordinary deferred write. */
+        memset(&preq, 0, sizeof preq);
+        strncpy(preq.old_password, "RetxSecretA", sizeof preq.old_password - 1);
+        strncpy(preq.new_password, OPC_PASSWORD_DEFAULT, sizeof preq.new_password - 1);
+        fn   = opc_set_password_req_pack(frame, sizeof frame, 194, &preq);
+        rlen = -1;
+        drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
+        ASSERT(drc == 0 && rlen == 0, "pw payload: restore(SN=194) deferred");
+        for (int d = 0; d < 3; d++) {
+            if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
+            opcd_store_async_on_ready(&st);
+        }
+        ASSERT(wait_fd_readable(cli, 5000) == 0, "pw payload: restore ack arrived");
+        rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+        ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+               ahdr.sequence_number == 194,
+               "pw payload: restore answered on its own SN (194)");
+        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+               "pw payload: default password restored");
 
         /* 21h. Multiport: the retransmission is matched against THIS port's
          *      pending request. P1's X (default→PwX) in flight, P2 sends a
@@ -1878,9 +1941,10 @@ int main(void)
                iack.result == OPC_RESULT_OK,
                "ip cross: crossed retransmission answered with its own SN (112)");
 
-        /* 21k. A DIFFERENT list request while A is in flight is a new request:
-         *      B is committed and answered on ITS OWN SN; A's superseded ack
-         *      is dropped (one ack total). */
+        /* 21k. Request-ID rule: a DIFFERENT list request while A is in flight is
+         *      discarded like any re-send — it is never committed and A's
+         *      ORIGINAL SN answers (one ack total). Inverts the old
+         *      "rapid reconfigure" reading; see 21c. */
         opc_set_ip_config_list_req_t irA = ireq, irB = ireq;
         irA.entries[0].ip_address  = 0xC0A8070Bu;   /* 192.168.7.11 */
         irB.entries[0].list_number = 8;
@@ -1892,9 +1956,9 @@ int main(void)
         fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 114, &irB);
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
-        ASSERT(drc == 0 && rlen == 0, "ip payload: distinct B(SN=114) deferred, not dropped as a retry");
-        ASSERT(st.ip_list.present[7] && st.ip_list.slots[7].ip_address == 0xC0A80714u,
-               "ip payload: distinct B committed");
+        ASSERT(drc == 0 && rlen == 0, "ip payload: distinct B(SN=114) discarded, no inline answer");
+        ASSERT(!st.ip_list.present[7],
+               "ip payload: B never committed — slot 8 untouched");
         for (int d = 0; d < 3; d++) {
             if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
             opcd_store_async_on_ready(&st);
@@ -1903,10 +1967,10 @@ int main(void)
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 &&
                opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-               ahdr.sequence_number == 114 &&
+               ahdr.sequence_number == 113 &&
                opc_set_ip_config_list_ack_unpack(rx_buf, (size_t)rn, &iack) == 0 &&
                iack.result == OPC_RESULT_OK,
-               "ip payload: distinct request answered with its OWN SN (114)");
+               "ip payload: B discarded, ORIGINAL SN (113) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "ip payload: exactly one ack");
 
         /* 21l. Multiport: P1's X in flight, P2 sends a distinct Y, P1 re-sends
@@ -2117,6 +2181,46 @@ int main(void)
                    fdi.congestion_id == OPC_CONGESTION_CPU,
                    "T6: re-entry frame is FaultDetect CPU, exactly one");
             ASSERT(wait_fd_readable(cli, 200) != 0, "T6: no second frame for the same entry");
+
+            /* 23-b2. D4(ii): an entry staged inside a period is WITHDRAWN when
+             *        the congestion clears before the period end. §4.3.9 notifies
+             *        "the last state change at the end of the period"; when entry
+             *        and clear both fall in one period the last change is the
+             *        clear, and a clear is not notified (vendor reply 2026-09-18,
+             *        inquiry Q3). Flushing the stale entry instead would leave the
+             *        peer believing a finished congestion is still running, since
+             *        no clear notification exists to correct it.
+             *        State-neutral: stages and withdraws without ticking. */
+            {
+                const int cpu_slot = OPC_CONGESTION_CPU - 1;
+                ASSERT(st.indication_period_s > 0, "D4(ii): precondition — period > 0");
+                ASSERT(opcd_ind_fault_detect(&st, OPC_CONGESTION_CPU, 90) == 0,
+                       "D4(ii): entry staged, not sent (period > 0)");
+                ASSERT(st.indication_coalesce[0].fault_pending[cpu_slot],
+                       "D4(ii): staged entry is pending before the clear");
+                opcd_ind_fault_clear(&st, OPC_CONGESTION_CPU);
+                ASSERT(!st.indication_coalesce[0].fault_pending[cpu_slot],
+                       "D4(ii): a clear inside the period withdraws the staged entry");
+                ASSERT(wait_fd_readable(cli, 200) != 0,
+                       "D4(ii): nothing was emitted by the withdrawal itself");
+
+                /* B-R1-C007. At Period 0 there is nothing staged to withdraw —
+                 * the entry was already sent on arrival — so the withdrawal is
+                 * a no-op and must not disturb coalesce state or emit a frame.
+                 * Exercised here rather than left to static reading. */
+                {
+                    uint32_t saved = st.indication_period_s;
+                    st.indication_period_s = 0;
+                    st.indication_coalesce[0].fault_pending[cpu_slot] = true;  /* stale marker */
+                    opcd_ind_fault_clear(&st, OPC_CONGESTION_CPU);
+                    ASSERT(st.indication_coalesce[0].fault_pending[cpu_slot],
+                           "B-R1-C007: period 0 withdrawal is a no-op (staged flag untouched)");
+                    ASSERT(wait_fd_readable(cli, 200) != 0,
+                           "B-R1-C007: period 0 withdrawal emits no frame");
+                    st.indication_coalesce[0].fault_pending[cpu_slot] = false;
+                    st.indication_period_s = saved;
+                }
+            }
 
             /* 23-c. A new recipient (SetIndicationConfig) must learn of an ONGOING
              *       congestion: the latch is reset with the coalesce state, so
@@ -2616,6 +2720,218 @@ int main(void)
         ASSERT(out.wlan2.scan_band == OPC_SCAN_BAND_UNSET && opc_scan_list_empty(out.wlan2.scan_chlist),
                "decode: legacy wlan2 (freq 0) → unset band, empty list");
         ASSERT(opcd_radio_conf_decode(legacy, 20, &out) == -1, "decode: unknown size → -1");
+    }
+
+    /* 26b-2 (A-R1-001 / B-R1-C006). radio.conf PERSISTED by a build that predates
+     *      the row-order confirmation may carry a 2.4/5 GHz SCAN list in row B.
+     *      The strict validator now rejects that shape, so restoring it as
+     *      COMMITTED would enumerate zero channels: GetDeviceInfo would report
+     *      frequency/CH 0, and the deferred best-effort revert would skip the
+     *      platform apply (n1 == 0) while reporting success — breaking the
+     *      "apply failed => no net change" contract.
+     *
+     *      opcd_radio_conf_restore() is the whole decode/migrate/validate
+     *      decision as a pure function of (bytes, length), so every branch the
+     *      daemon's startup path takes is exercised here without the hardcoded
+     *      /usr/local/opc/etc/radio.conf the daemon reads. */
+    {
+        opc_set_radio_config_req_t stored, out2;
+        memset(&stored, 0, sizeof stored);
+        stored.station_type    = OPC_STATION_SINGLE;
+        stored.priority_ch     = OPC_PRIORITY_CH_UNSET;
+        stored.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        stored.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        stored.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        stored.wlan1.scan_chlist[6] = 0x04;      /* ch1/6/11 written into row B */
+        stored.wlan1.scan_chlist[7] = 0x21;
+        stored.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+
+        /* (a) row-B stored list → MIGRATED: committed, and the caller must write back. */
+        ASSERT(opcd_radio_conf_restore(&stored, sizeof stored, &out2) ==
+                   OPCD_RADIO_RESTORE_MIGRATED,
+               "A-R1-001: row-B radio.conf restores as MIGRATED (caller writes it back)");
+        ASSERT(opc_scan_list_valid(out2.wlan1.scan_band, out2.wlan1.scan_chlist),
+               "A-R1-001: migrated list passes the current validator");
+        {
+            uint8_t chs[8];
+            size_t n2 = opc_scan_list_channels(OPC_SCAN_BAND_2_4GHZ, out2.wlan1.scan_chlist,
+                                               chs, sizeof chs);
+            ASSERT(n2 == 3 && chs[0] == 1 && chs[1] == 6 && chs[2] == 11,
+                   "A-R1-001: migrated list enumerates 1/6/11, not an empty set");
+        }
+        {
+            uint16_t mhz = 0, chf = 0;
+            opc_scan_derive_freq_ch(out2.wlan1.scan_band, out2.wlan1.scan_chlist, &mhz, &chf);
+            ASSERT(mhz == 2412 && chf == (uint16_t)((OPC_BAND_2_4GHZ << 8) | 1),
+                   "A-R1-001: GetDeviceInfo freq/CH no longer derive as 0");
+        }
+        /* The write-back the MIGRATED verdict demands is what makes the repair
+         * permanent: the migrated config is byte-equal to the frame a correct
+         * VHL sends, so radio_cfg_differs() is false and the apply-skip branch
+         * answers OK without ever reaching persist_radio. */
+        {
+            opc_set_radio_config_req_t as_sent = stored;
+            memset(as_sent.wlan1.scan_chlist, 0, OPC_SCAN_CHLIST_LEN);
+            as_sent.wlan1.scan_chlist[2] = 0x04; as_sent.wlan1.scan_chlist[3] = 0x21;
+            ASSERT(memcmp(&out2, &as_sent, sizeof out2) == 0,
+                   "A-R1-001: migrated config equals the row-A frame a VHL sends "
+                   "(so nothing else would ever rewrite radio.conf)");
+        }
+
+        /* (b) both rows populated → DISCARD_INVALID: caller falls back to defaults. */
+        opc_set_radio_config_req_t bad2 = stored;
+        bad2.wlan1.scan_chlist[3] = 0x01;
+        ASSERT(opcd_radio_conf_restore(&bad2, sizeof bad2, &out2) ==
+                   OPCD_RADIO_RESTORE_DISCARD_INVALID,
+               "B-R1-C006: an unmigratable stored list restores as DISCARD_INVALID");
+
+        /* (c) well-formed row-A stored config → COMMITTED, unchanged. */
+        opc_set_radio_config_req_t good2;
+        memset(&good2, 0, sizeof good2);
+        good2.station_type    = OPC_STATION_SINGLE;
+        good2.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        good2.wlan1.scan_chlist[2] = 0x04; good2.wlan1.scan_chlist[3] = 0x21;
+        good2.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        ASSERT(opcd_radio_conf_restore(&good2, sizeof good2, &out2) ==
+                   OPCD_RADIO_RESTORE_COMMITTED &&
+               memcmp(&out2, &good2, sizeof out2) == 0,
+               "A-R1-001: a row-A stored config restores as COMMITTED, unchanged");
+
+        /* (d) unknown size / absent file → DISCARD_SIZE. */
+        ASSERT(opcd_radio_conf_restore(&good2, 20, &out2) == OPCD_RADIO_RESTORE_DISCARD_SIZE,
+               "B-R1-C006: an unknown-size radio.conf restores as DISCARD_SIZE");
+        ASSERT(opcd_radio_conf_restore(NULL, 0, &out2) == OPCD_RADIO_RESTORE_DISCARD_SIZE,
+               "B-R1-C006: an absent radio.conf restores as DISCARD_SIZE");
+
+        /* (e) Rev1.00 layout → LEGACY: converted but deliberately NOT committed. */
+        {
+            uint8_t legacy16[OPCD_RADIO_CONF_LEGACY_LEN];
+            memset(legacy16, 0, sizeof legacy16);
+            legacy16[1] = OPC_STATION_SINGLE;           /* big-endian station_type */
+            legacy16[4] = (uint8_t)(5180 >> 8); legacy16[5] = (uint8_t)(5180 & 0xFF);
+            legacy16[6] = 0x02; legacy16[7] = 36;       /* 5 GHz, ch36 */
+            ASSERT(opcd_radio_conf_restore(legacy16, sizeof legacy16, &out2) ==
+                       OPCD_RADIO_RESTORE_LEGACY,
+                   "B-R1-C006: a Rev1.00-layout radio.conf restores as LEGACY (not committed)");
+        }
+
+        /* migrate_lists itself reports whether it moved a row — the signal the
+         * MIGRATED verdict and therefore the write-back is built on. */
+        {
+            opc_set_radio_config_req_t m = stored; bool moved = false;
+            ASSERT(opcd_radio_conf_migrate_lists(&m, &moved) && moved,
+                   "A-R1-001: migrate reports a row was moved");
+            opc_set_radio_config_req_t g = good2; moved = true;
+            ASSERT(opcd_radio_conf_migrate_lists(&g, &moved) && !moved,
+                   "A-R1-001: migrate reports no move for an already-valid config");
+        }
+    }
+
+    /* 26b-3 (B-R1-C014). The startup path END-TO-END through st->paths.radio:
+     *      load, decide, and — on MIGRATED — actually rewrite the file. The
+     *      write-back is what makes the repair permanent: once migrated, the
+     *      in-memory config equals the frame a correct VHL sends, so
+     *      radio_cfg_differs() is false and the apply-skip branch answers OK
+     *      without ever reaching persist_radio. The decisive assertion is that
+     *      a SECOND load of the rewritten file returns COMMITTED rather than
+     *      MIGRATED again — revert the write-back and it stays MIGRATED forever,
+     *      which is exactly the latent boot-time trap this closes. */
+    {
+        static opcd_state_t ls;
+        char rpath[160];
+        snprintf(rpath, sizeof rpath, "/tmp/test_radioconf_%d.bin", (int)getpid());
+        unlink(rpath);
+        memset(&ls, 0, sizeof ls);
+        ls.paths.radio = rpath;
+        ls.conf.default_station_type = OPC_STATION_SINGLE;
+
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_DISCARD_SIZE &&
+               !ls.radio_committed,
+               "B-R1-C014: an absent radio.conf loads as defaults, uncommitted");
+
+        opc_set_radio_config_req_t onwire;
+        memset(&onwire, 0, sizeof onwire);
+        onwire.station_type    = OPC_STATION_SINGLE;
+        onwire.priority_ch     = OPC_PRIORITY_CH_UNSET;
+        onwire.wlan1.mode      = OPC_WLAN_MODE_11AX;
+        onwire.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        onwire.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+        onwire.wlan1.scan_chlist[6] = 0x04;      /* ch1/6/11 stored in row B */
+        onwire.wlan1.scan_chlist[7] = 0x21;
+        onwire.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        ASSERT(opc_store_write_atomic(rpath, &onwire, sizeof onwire, 0644) == 0,
+               "B-R1-C014: fixture — row-B radio.conf written");
+
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_MIGRATED && ls.radio_committed,
+               "B-R1-C014: a row-B radio.conf loads as MIGRATED and stays committed");
+        ASSERT(opc_scan_list_valid(ls.radio.wlan1.scan_band, ls.radio.wlan1.scan_chlist),
+               "B-R1-C014: the in-memory config now passes the current validator");
+        {
+            opc_set_radio_config_req_t ondisk;
+            memset(&ondisk, 0, sizeof ondisk);
+            ASSERT(opc_store_read_all(rpath, &ondisk, sizeof ondisk) == (ssize_t)sizeof ondisk &&
+                   memcmp(&ondisk, &ls.radio, sizeof ondisk) == 0,
+                   "B-R1-C014: the FILE was rewritten to match the migrated config");
+            ASSERT(opc_scan_list_valid(ondisk.wlan1.scan_band, ondisk.wlan1.scan_chlist) &&
+                   ondisk.wlan1.scan_chlist[2] == 0x04 && ondisk.wlan1.scan_chlist[3] == 0x21 &&
+                   ondisk.wlan1.scan_chlist[6] == 0 && ondisk.wlan1.scan_chlist[7] == 0,
+                   "B-R1-C014: the stored list now lives in row A, not row B");
+        }
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_COMMITTED,
+               "B-R1-C014: reloading the rewritten file yields COMMITTED — the repair stuck");
+
+        /* An unmigratable stored config falls back to defaults, uncommitted, and
+         * the file is deliberately left untouched (evidence of what was stored). */
+        onwire.wlan1.scan_chlist[6] = 0x04; onwire.wlan1.scan_chlist[7] = 0x21;
+        onwire.wlan1.scan_chlist[3] = 0x01;      /* both rows populated */
+        ASSERT(opc_store_write_atomic(rpath, &onwire, sizeof onwire, 0644) == 0,
+               "B-R1-C014: fixture — unmigratable radio.conf written");
+        ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_DISCARD_INVALID &&
+               !ls.radio_committed &&
+               ls.radio.wlan1.scan_band == OPC_SCAN_BAND_UNSET,
+               "B-R1-C014: an unmigratable radio.conf falls back to defaults, uncommitted");
+        {
+            opc_set_radio_config_req_t ondisk;
+            memset(&ondisk, 0, sizeof ondisk);
+            ASSERT(opc_store_read_all(rpath, &ondisk, sizeof ondisk) == (ssize_t)sizeof ondisk &&
+                   memcmp(&ondisk, &onwire, sizeof ondisk) == 0,
+                   "B-R1-C014: the rejected file is left untouched");
+        }
+        /* A-R1-001 (round 5). A FAILED write-back must leave the config
+         * UNCOMMITTED. Otherwise the failure is permanent, not transient: the
+         * migrated config equals the frame a correct VHL sends, so the next
+         * matching SetRadioConfig takes the apply-skip branch and never reaches
+         * persist_radio — the rejected bytes would survive even after the
+         * filesystem became writable again. Made unwritable by dropping write
+         * permission on the containing directory (root ignores that, so the
+         * case is skipped there rather than asserted falsely). */
+        if (geteuid() != 0) {
+            char rdir[160], rp2[200];
+            snprintf(rdir, sizeof rdir, "/tmp/test_radioconf_ro_%d", (int)getpid());
+            snprintf(rp2, sizeof rp2, "%s/radio.conf", rdir);
+            (void)unlink(rp2); (void)rmdir(rdir);
+            ASSERT(mkdir(rdir, 0755) == 0, "A-R1-001: fixture — ro dir created");
+            ASSERT(opc_store_write_atomic(rp2, &onwire, sizeof onwire, 0644) == 0,
+                   "A-R1-001: fixture — row-B radio.conf written before lockdown");
+            /* onwire currently holds the unmigratable both-rows form; rewrite the
+             * migratable row-B-only form for this case. */
+            onwire.wlan1.scan_chlist[3] = 0;
+            ASSERT(opc_store_write_atomic(rp2, &onwire, sizeof onwire, 0644) == 0,
+                   "A-R1-001: fixture — migratable row-B form written");
+            ASSERT(chmod(rdir, 0555) == 0, "A-R1-001: fixture — directory made read-only");
+            ls.paths.radio = rp2;
+            ls.radio_committed = true;
+            opcd_radio_restore_t rr2 = opcd_radio_conf_load(&ls);
+            ASSERT(rr2 == OPCD_RADIO_RESTORE_MIGRATED,
+                   "A-R1-001: an unwritable destination still reports MIGRATED");
+            ASSERT(!ls.radio_committed,
+                   "A-R1-001: a FAILED write-back leaves the config UNCOMMITTED "
+                   "(so the next SetRadioConfig applies + persists and repairs the file)");
+            ASSERT(opc_scan_list_valid(ls.radio.wlan1.scan_band, ls.radio.wlan1.scan_chlist),
+                   "A-R1-001: the in-memory config is still the migrated, valid one");
+            (void)chmod(rdir, 0755); (void)unlink(rp2); (void)rmdir(rdir);
+        }
+        unlink(rpath);
     }
 
     /* 26c(#102). The identical-request shortcut applies only to a COMMITTED

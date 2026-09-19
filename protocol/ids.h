@@ -102,10 +102,15 @@
  *            | LOGIN_PW_CHAR (Login) | OLD_PW_CHAR (SetPassword)
  *   0x0012 = IP_CHANGE_CONFLICT (ChangeIp) | IND_RECIPIENT_IP (SetIndication)
  *            | PW_NUL (Login/SetPassword) | IPCFG_NETMASK (SetIpConfigList)
- *            | RADIO_CH (SetRadio)
+ *            | RADIO_SCAN_CH (SetRadio)
  *   0x0013 = RADIO_MODE (SetRadio) | IPCFG_GW (SetIpConfigList) | NEW_PW_CHAR (SetPassword)
  *            [IND_OTHER_IP (SetIndication) removed 2026-06-29 — DFK confirmed it a typo]
  *   0x0014 = RADIO_BW (SetRadio) | NEW_PW_NUL (SetPassword) | IPCFG_NTP (SetIpConfigList)
+ *   0x0015 = IPCFG_ESSID_CHAR (SetIpConfigList) | RADIO_PRIO_BAND (SetRadio)
+ *   0x0016 = IPCFG_ESSID_NUL (SetIpConfigList) | RADIO_PRIO_CH (SetRadio)
+ * The 0x0015/0x0016 overload is the SPEC's own: Rev1.02 §4.3.8 introduced the
+ * Priority CH pair on values §4.3.6 already used for ESSID (rev102 회신,
+ * 2026-09-18). Command scoping keeps them apart exactly like 0x0011–0x0014.
  * Each handler must use only its own command's names, and a single switch must
  * never mix two same-valued names — that is a duplicate-case compile error.
  * vhlctl's value→label map therefore uses literal cases with combined labels. */
@@ -114,6 +119,19 @@
                                                        * no longer maps here — it is a runtime fault, not
                                                        * a bad input, so it carries its own code
                                                        * OPC_ERR_RADIO_APPLY (D9). */
+#define OPC_ERR_RADIO_SCAN_CH                 0x0012  /* SetRadioConfig: a SCAN Channel List bit outside the
+                                                       * band's table, or a list with no band (incl. 6 GHz
+                                                       * — A21). Rev1.02 §4.3.8 narrowed 0x0011/0x0012 to
+                                                       * the SCAN pair explicitly; Priority CH errors moved
+                                                       * to 0x0015/0x0016 below (was OPC_ERR_RADIO_CH). */
+#define OPC_ERR_RADIO_PRIO_BAND               0x0015  /* SetRadioConfig: Priority CH names an unsupported
+                                                       * frequency band (Rev1.02 §4.3.8
+                                                       * "Priority CH 指定周波数帯異常"). DUAL only — SINGLE
+                                                       * ignores Priority CH and the wire may carry an
+                                                       * invalid value there. */
+#define OPC_ERR_RADIO_PRIO_CH                 0x0016  /* SetRadioConfig: Priority CH names a channel that is
+                                                       * not in its band's table (Rev1.02 §4.3.8
+                                                       * "Priority CH 指定 CH 異常"). DUAL only, as above. */
 #define OPC_ERR_IND_RECIPIENT_IP              0x0012  /* SetIndicationConfig: recipient IP invalid
                                                        * (non-unicast) — spec "IP 주소 이상" (D10) */
 /* OPC_ERR_IND_OTHER_IP (0x0013) removed 2026-06-29: DFK's written answer (PPTX
@@ -163,7 +181,6 @@
                                                        * DFK 2026-06-29 — A-Z a-z 0-9 . - _ + / : = ~ @) */
 #define OPC_ERR_IPCFG_ESSID_NUL               0x0016  /* SetIpConfigList: ESSID not NUL-terminated */
 #define OPC_ERR_IPCFG_LIST_SIZE               0x0017  /* SetIpConfigList: Length is not 56 + 64*n */
-#define OPC_ERR_RADIO_CH                      0x0012  /* SetRadioConfig: unsupported CH/band (incl. 6 GHz — A21) */
 #define OPC_ERR_IND_BITS                      0x0010  /* SetIndicationConfig: unassigned info bit set */
 
 /* Indication info bits (§3.4): 0x40 is the only unassigned/reserved bit —

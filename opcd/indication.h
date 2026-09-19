@@ -17,6 +17,14 @@ int opcd_ind_roaming       (opcd_state_t *st, int8_t snr, int8_t rssi,
 int opcd_ind_ap_disconnect (opcd_state_t *st, uint16_t msg_id, uint16_t reason,
                             const uint8_t ap_mac[6]);
 int opcd_ind_fault_detect  (opcd_state_t *st, uint16_t cong_id, uint16_t val);
+/* Withdraw a staged (not-yet-flushed) FaultDetect entry for `cong_id` (D4(ii),
+ * 2026-09-18). §4.3.9 notifies "the LAST state change at the end of the period";
+ * when a congestion entered and then cleared inside one period the last change
+ * is the clear, and the vendor reply of 2026-09-18 says a clear is not notified
+ * — so nothing must go out. Without this the flush would emit the entry's stale
+ * current_val and, since no clear notification exists, the peer would believe
+ * the congestion is still running forever. No-op at Period 0 (already sent). */
+void opcd_ind_fault_clear (opcd_state_t *st, uint16_t cong_id);
 int opcd_ind_reset_notice  (opcd_state_t *st, uint32_t cause);
 int opcd_ind_keep_alive    (opcd_state_t *st, const char *timestamp);
 

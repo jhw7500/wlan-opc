@@ -100,6 +100,22 @@ bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s);
  * (opcd_ind_coalesce_reset). Counter baselines are kept. */
 void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p);
 
+/* Re-arm ONE resource's entry latch (D4(i), 2026-09-18). The latch is committed
+ * inside opcd_fault_probe_sample(), i.e. before the caller has tried to send the
+ * notification; when that send fails at Indication Period 0 there is no staging
+ * buffer to retry from, so the "notify once on entry" rule would silently become
+ * "never notify". Re-arming makes the next due sample report the still-standing
+ * congestion as a fresh ENTRY. The resource is named by this module's own enum
+ * so the probe stays free of protocol headers (it is host-unit-tested alone);
+ * indication.c maps OPC_CONGESTION_* onto it. */
+typedef enum {
+    OPCD_FAULT_RES_CPU = 0,
+    OPCD_FAULT_RES_DISK,
+    OPCD_FAULT_RES_NET,
+} opcd_fault_res_t;
+
+void opcd_fault_probe_rearm(opcd_fault_probe_t *p, opcd_fault_res_t res);
+
 /* Sample the sources and evaluate utilisation since the previous call.
  * The first call only primes the counters (*out zeroed, returns 0). An
  * unreadable source leaves its resource un-flagged. */

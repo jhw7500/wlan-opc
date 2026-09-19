@@ -87,9 +87,14 @@ static const char *err_str(uint16_t e)
      * literals with combined labels. Interpret by the issuing command. */
     case 0x0010:                     return "0x0010 (indication-violation/pw-mismatch/slot-range/station-type)";
     case 0x0011:                     return "0x0011 (slot-empty/radio-freq/ipcfg-ip/pw-char)";
-    case 0x0012:                     return "0x0012 (ip-change-conflict/ind-recipient-ip)";
+    case 0x0012:                     return "0x0012 (ip-change-conflict/ind-recipient-ip/pw-nul/ipcfg-netmask/radio-scan-ch)";
     case 0x0013:                     return "0x0013 (radio-mode/ipcfg-gw/new-pw-char)";
-    case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw)";
+    case OPC_ERR_RADIO_BW:           return "0x0014 (radio-bw/new-pw-nul/ipcfg-ntp)";
+    /* 0x0015/0x0016: the spec itself reuses the pair — §4.3.6 ESSID errors and,
+     * since Rev1.02 §4.3.8, the Priority CH band/CH errors. Literal cases for
+     * the same reason as 0x0010..0x0014. */
+    case 0x0015:                     return "0x0015 (ipcfg-essid-char/radio-priority-band)";
+    case 0x0016:                     return "0x0016 (ipcfg-essid-nul/radio-priority-ch)";
     case OPC_ERR_LIST_SEQUENCE:      return "0x0018 (list-sequence)";
     /* 0x0050 is the in-house extension value (spec defines no such code;
      * pending 발주처 confirmation, #35) and is command-overloaded like
@@ -484,7 +489,8 @@ static int cmd_set_radio(int argc, char **argv)
     req.wlan1.scan_band = parse_scan_band(w1_band_s);
     /* --priority auto (default): Single → 0xFFFF (unset, per spec); Dual →
      * WLAN#1's band, band-only (CH 0xFF) — a Dual request must carry a valid
-     * priority band or the device answers 0x0012. Explicit HEX is taken as is. */
+     * priority band or the device answers 0x0015 (Rev1.02 §4.3.8; it was the
+     * SCAN-list 0x0012 before the split). Explicit HEX is taken as is. */
     if (!strcmp(prio_s, "auto"))
         req.priority_ch = (req.station_type == OPC_STATION_DUAL)
                           ? (uint16_t)(((req.wlan1.scan_band & 0xFFu) << 8) | 0xFFu)

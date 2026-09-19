@@ -102,14 +102,17 @@ bool opc_scan_list_empty(const uint8_t list[OPC_SCAN_CHLIST_LEN])
     return true;
 }
 
-/* Row that carries a 2.4/5 GHz list: A, or B when A is empty (lenient order).
- * -1 when both rows are populated — those bands define one row only. */
-static int single_row(const uint8_t list[OPC_SCAN_CHLIST_LEN])
+bool opc_scan_list_normalize_rows(uint16_t band, uint8_t list[OPC_SCAN_CHLIST_LEN])
 {
+    if (band != OPC_SCAN_BAND_2_4GHZ && band != OPC_SCAN_BAND_5GHZ) return false;
     uint32_t a = opc_scan_row_word(list, OPC_SCAN_ROW_A);
     uint32_t b = opc_scan_row_word(list, OPC_SCAN_ROW_B);
-    if (a != 0 && b != 0) return -1;
-    return (a != 0 || b == 0) ? OPC_SCAN_ROW_A : OPC_SCAN_ROW_B;
+    if (a != 0 || b == 0) return false;      /* nothing to move, or ambiguous */
+    size_t ao = OPC_SCAN_ROW_A_FIRST ? 0u : 4u;
+    size_t bo = OPC_SCAN_ROW_A_FIRST ? 4u : 0u;
+    memcpy(&list[ao], &list[bo], 4);
+    memset(&list[bo], 0, 4);
+    return true;
 }
 
 bool opc_scan_list_valid(uint16_t band, const uint8_t list[OPC_SCAN_CHLIST_LEN])
@@ -123,9 +126,13 @@ bool opc_scan_list_valid(uint16_t band, const uint8_t list[OPC_SCAN_CHLIST_LEN])
         }
         return true;
     }
-    int row = single_row(list);
-    if (row < 0) return false;
-    uint32_t w = opc_scan_row_word(list, row);
+    /* 2.4/5 GHz assign row A only, and the row order is CONFIRMED (vendor reply
+     * 2026-09-18, §4.3.4/§4.3.8): offset 312/72 carries Bit31~Bit0, 316/76
+     * carries Bit63~Bit32. Any bit in row B is therefore a malformed list, not
+     * a row-order variant — the former leniency answered OK to input the spec
+     * rates 0x0012 and hid the peer's bug. */
+    if (opc_scan_row_word(list, OPC_SCAN_ROW_B) != 0) return false;
+    uint32_t w = opc_scan_row_word(list, OPC_SCAN_ROW_A);
     for (int b = 0; b < 32; b++)
         if (((w >> b) & 1u) && opc_scan_row_channel(band, OPC_SCAN_ROW_A, b) == 0) return false;
     return true;
@@ -153,9 +160,8 @@ size_t opc_scan_list_channels(uint16_t band, const uint8_t list[OPC_SCAN_CHLIST_
         return count;
     }
 
-    int row = single_row(list);
-    if (row < 0) return 0;
-    uint32_t w = opc_scan_row_word(list, row);
+    /* Row A only — see opc_scan_list_valid: row B is not a 2.4/5 GHz carrier. */
+    uint32_t w = opc_scan_row_word(list, OPC_SCAN_ROW_A);
     for (int b = 0; b < 32; b++) {
         uint8_t ch = opc_scan_row_channel(band, OPC_SCAN_ROW_A, b);
         if (ch == 0) continue;

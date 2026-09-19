@@ -212,6 +212,27 @@ int main(void)
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && r.cpu_entered,
            "latch: reset_latch makes an ongoing congestion a fresh ENTRY (new recipient)");
 
+    /* 8a-2. D4(i): opcd_fault_probe_rearm re-arms ONE resource's latch. The
+     *       latch is committed inside sample(), i.e. before the caller has had
+     *       a chance to send; when that send fails at Indication Period 0 there
+     *       is no staging buffer to retry from, so "notify once on entry" would
+     *       become "never notify". Re-arming restores the entry for the next
+     *       due sample, and is one-shot — the sample commits it again. */
+    write_file(fstat, "cpu  4500 0 0 2500 0 0 0 0\n");         /* still 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && !r.cpu_entered,
+           "rearm: baseline — an ongoing congestion is not re-entered on its own");
+    opcd_fault_probe_rearm(&p, OPCD_FAULT_RES_CPU);
+    write_file(fstat, "cpu  5400 0 0 2600 0 0 0 0\n");         /* still 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && r.cpu_entered &&
+           !r.cpu_cleared,
+           "D4(i) rearm: the still-standing congestion is reported as a fresh ENTRY");
+    write_file(fstat, "cpu  6300 0 0 2700 0 0 0 0\n");         /* still 90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_over && !r.cpu_entered,
+           "D4(i) rearm: one-shot — that sample committed the latch again");
+
     /* 8b. #121 a transient source read failure is UNKNOWN, not "below
      *     threshold": the latch must hold, so the recovered over-sample is
      *     not a duplicate ENTRY. cpu over → stat unreadable → stat readable

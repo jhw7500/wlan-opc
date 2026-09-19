@@ -68,6 +68,58 @@ void opcd_store_async_on_ready(opcd_state_t *st);
 #define OPCD_RADIO_CONF_LEGACY_LEN 16
 int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t *out);
 
+/* Migrate a config just restored from radio.conf so the CURRENT SCAN-list
+ * validator accepts it, and report whether it does.
+ *
+ * radio.conf written before the row order was confirmed (vendor reply
+ * 2026-09-18) may carry a 2.4/5 GHz SCAN list in row B, which the strict
+ * decoder now rejects and enumerates as zero channels. Restoring such a config
+ * as COMMITTED would report frequency/CH 0 through GetDeviceInfo and make the
+ * deferred best-effort revert a silent no-op — its channel enumeration would be
+ * empty, so the platform apply is skipped while the revert reports success,
+ * breaking the "apply failed => no net change" contract.
+ *
+ * Moves a row-B 2.4/5 GHz list to row A in place (logging that it did) and
+ * returns true when the resulting config passes validation. Returns false when
+ * it still does not; the caller must then discard it to defaults rather than
+ * leave it committed. WLAN#2 is examined only for DUAL — SINGLE ignores it and
+ * the stored bytes may be anything. Inbound frames are never normalized: they
+ * are rejected with 0x0012. */
+bool opcd_radio_conf_migrate_lists(opc_set_radio_config_req_t *cfg, bool *moved);
+
+/* What the radio.conf restore path must do with the bytes it just read.
+ * Decoding, migration and validation are decided here — as one pure function of
+ * (bytes, length) — so every branch is host-testable without the hardcoded
+ * /usr/local/opc/etc path the daemon uses. The caller only logs and applies. */
+typedef enum {
+    OPCD_RADIO_RESTORE_DISCARD_SIZE = 0, /* no/!exact/!legacy layout → defaults, uncommitted */
+    OPCD_RADIO_RESTORE_DISCARD_INVALID,  /* decoded, but the SCAN list is unmigratable → as above */
+    OPCD_RADIO_RESTORE_COMMITTED,        /* exact layout, valid as stored → committed */
+    OPCD_RADIO_RESTORE_MIGRATED,         /* exact layout, a row-B list was moved to row A →
+                                          * committed, and the CALLER MUST WRITE THE CONFIG BACK:
+                                          * once migrated, the in-memory config equals the frame a
+                                          * correct VHL sends, so radio_cfg_differs() is false and
+                                          * the apply-skip branch answers OK without ever reaching
+                                          * persist_radio. Without the write-back the rejected
+                                          * bytes stay on disk forever, the migration helper can
+                                          * never be retired, and a later build that drops it
+                                          * silently discards the device's stored config at boot. */
+    OPCD_RADIO_RESTORE_LEGACY,           /* Rev1.00 layout converted → NOT committed (#102) */
+} opcd_radio_restore_t;
+
+opcd_radio_restore_t opcd_radio_conf_restore(const void *buf, size_t n,
+                                             opc_set_radio_config_req_t *out);
+
+/* Read st->paths.radio, apply the verdict above to st->radio /
+ * st->radio_committed, log it, and — on MIGRATED — write the normalized config
+ * back to that same path. Returns the verdict taken.
+ *
+ * Lives here rather than in opcd.c's main() translation unit so the whole
+ * startup behaviour, including the write-back, is host-testable: the path is
+ * already a field (st->paths.radio), so a test points it at a temporary file.
+ * No new configuration input is introduced. */
+opcd_radio_restore_t opcd_radio_conf_load(opcd_state_t *st);
+
 #ifdef __cplusplus
 }
 #endif

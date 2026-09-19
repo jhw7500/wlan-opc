@@ -2,7 +2,8 @@
  * opcd — OPC-side UDP/IP control daemon for the VHL ↔ wireless-board protocol.
  *
  * Single-threaded epoll loop driving:
- *   - UDP socket on /usr/local/opc/etc/opc.conf::udp_port  (default 50607)
+ *   - UDP socket on opc.conf::udp_port (default 50607, CLI -p overrides) —
+ *     §4.1.2 requires the control port to be settable from Config data
  *   - signalfd  for SIGINT / SIGTERM      → graceful shutdown
  *   - timerfd   1 s tick                  → indication period & idle check
  *   - eventfd   async NVRAM completions   → deferred Set* acks (PERF-001)
@@ -174,31 +175,9 @@ static void state_load_from_disk(opcd_state_t *st)
     } else if (n < 0 && errno != ENOENT) {
         LOG("password load failed: %s", strerror(errno));
     }
-    {
-        /* radio.conf: exact current layout, or the 16-byte Rev1.00 layout which
-         * is converted (#102). Any other size is a mismatch → defaults (the
-         * short-read acceptance of the old `<= 0` check is gone). */
-        uint8_t rbuf[64];
-        ssize_t rn = opc_store_read_all(st->paths.radio, rbuf, sizeof rbuf);
-        int rc = rn > 0 ? opcd_radio_conf_decode(rbuf, (size_t)rn, &st->radio) : -1;
-        /* Only an exact-layout file counts as committed. A converted Rev1.00
-         * file (rc == 1) describes what the old semantics applied (e.g. one
-         * frequency), not what the converted band/list would apply now (e.g.
-         * a whole band) — so the next matching request must run apply +
-         * persist instead of being skipped as "already there" (Codex P2). */
-        st->radio_committed = (rc == 0);
-        if (rc < 0) {
-            if (rn > 0)
-                LOG("radio.conf size mismatch (%zd vs %zu) — discarding", rn, sizeof st->radio);
-            memset(&st->radio, 0, sizeof st->radio);
-            st->radio.station_type    = st->conf.default_station_type;
-            st->radio.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
-            st->radio.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
-        } else if (rc == 1) {
-            LOG("radio.conf: legacy Rev1.00 layout converted to SCAN band/channel list — "
-                "re-send SetRadioConfig to confirm");
-        }
-    }
+    /* radio.conf: read, decide and (on migration) write back — all in handler.c
+     * so the whole startup behaviour is host-testable via st->paths.radio. */
+    (void)opcd_radio_conf_load(st);
     n = opc_store_read_all(st->paths.ip_list, &st->ip_list, sizeof st->ip_list);
     if (n > 0 && (size_t)n != sizeof st->ip_list) {
         LOG("iplist size mismatch (%zd vs %zu) — discarding", n, sizeof st->ip_list);
@@ -304,10 +283,23 @@ int main(int argc, char **argv)
         case 'h': default: usage(); return (opt == 'h') ? 0 : 2;
         }
     }
+    /* §4.1.2 "제어용 통신에 사용되는 포트 번호는 무선 기판의 Config 데이터에서
+     * 지정할 수 있도록 한다" — restated by the vendor on 2026-09-18 ("고정
+     * 설정값은 NG"): the control port must be changeable from configuration, not
+     * only from the command line. Parsed BEFORE the CLI override so -p still
+     * wins for benches. An invalid value falls back to the current value and
+     * says so, rather than failing silently. */
+    {
+        int bad = 0;
+        st.conf.udp_port = opcd_conf_port_parse(st.paths.conf, "udp_port",
+                                                st.conf.udp_port, &bad);
+        if (bad)
+            fprintf(stderr, "opcd: opc.conf udp_port invalid (want 1..65535) — "
+                            "using %u\n", (unsigned)st.conf.udp_port);
+    }
     if (port_override > 0) st.conf.udp_port     = (uint16_t)port_override;
     if (idle_override > 0) st.conf.login_idle_s = (uint32_t)idle_override;
-    /* opc.conf currently carries only the congestion_* overrides (T6 interim
-     * thresholds); other settings still come from defaults / CLI options. */
+    /* Remaining opc.conf keys. */
     opcd_fault_probe_conf(&st.fault_probe, st.paths.conf);
     st.conf.device_info_freq_source = opcd_freq_source_parse(st.paths.conf);
     st.conf.device_ip_iface         = opcd_ip_iface_parse(st.paths.conf);
