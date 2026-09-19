@@ -87,11 +87,18 @@ sec "5. SetIpConfigList"
 # 대상이 아니지만(검증·에코만) 같은 이유로 함께 비운다.
 chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 # staging 중 change-ip는 슬롯을 보기 전에 거절된다 — handle_change_ip_address의 검사 순서가
-# armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c). 빈 슬롯을 쓰면
-# staging 중엔 0x0012, 닫힌 뒤엔 0x0011이라 **어느 경로로도 커밋을 예약하지 못한다**. slot 1로
-# 찌르면 앞의 START 프레임이 유실됐을 때(chk는 재시도 없음) 기존 slot 1이 OK를 받아 살아 있는
-# ESSID/GW를 담은 커밋이 예약되고, teardown의 Logout이 그것을 커밋해 버린다.
-chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 25
+# armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c).
+#
+# 슬롯 번호를 **범위 밖(0)** 으로 두는 것이 핵심이다. 범위 검사가 staging 검사 뒤에 있으므로
+# staging이 열려 있으면 기대대로 0x0012지만, 앞의 START 프레임이 유실돼 staging이 안 열렸다면
+# 0x0010(범위 밖)이 되어 present 분기에 **도달 자체를 못 한다** — 타겟에 그 슬롯이 채워져
+# 있는지와 무관하게 커밋 예약이 구조적으로 불가능하다. (`vhlctl`은 --slot 을 검증 없이
+# 그대로 싣는다: vhlctl.c의 `(uint16_t)atoi(slot_s)`.)
+#
+# 기존처럼 slot 1로 찌르면 그 경우 기존 slot 1이 OK를 받아 살아 있는 ESSID/GW를 담은 커밋이
+# 예약되고 teardown의 Logout이 그것을 커밋한다. 비어 있을 법한 슬롯(25)을 쓰는 것도 "그 보드에
+# 25가 비어 있다"는 타겟 상태에 기대는 조건부 보장일 뿐이다.
+chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 0
 chk "set-ip-list 비연속 netmask → NG 0x0012"  "0x0012"      $VHL set-ip-list --slot 2 --flag cont --ip 10.0.0.60 --mask 0.255.0.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip-list --slot 3 --flag start_end --ip 10.0.0.70 --mask 255.255.255.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
