@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # 전체 OPC 프로토콜 명령 자동 검증 스위트 (test-env.sh 재사용).
 #
-#   bash scripts/test-all.sh                     # 안전 전체 (실적용/커밋 제외)
-#   RADIO_APPLY=1 bash scripts/test-all.sh       # set-radio OK 실적용까지 (동일 freq 재적용/자기복구) ⚠️콘솔권장
-#   CHANGEIP_COMMIT=1 bash scripts/test-all.sh   # ChangeIp 커밋(§6)까지 ⚠️⚠️콘솔필수 — 관리 IF의 IP가 바뀐다
+#   bash scripts/test-all.sh                 # 안전 전체 (set-radio 실적용 제외)
+#   RADIO_APPLY=1 bash scripts/test-all.sh   # set-radio OK 실적용까지 (동일 freq 재적용/자기복구) ⚠️콘솔권장
 #
 # 안전장치: 시작 시 타겟 /usr/local/opc/etc 를 스냅샷, 종료(정상/중단) 시 복원 + opcd 재시작.
 # 링크위험(자기절단)으로 스킵: WlanStatusChange/ApDisconnect/FaultDetect (사유 출력).
@@ -13,9 +12,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/test-env.sh" >/dev/null || { echo "loader 로드 실패"; exit 1; }
 
 RADIO_APPLY="${RADIO_APPLY:-0}"
-# ChangeIp 커밋은 관리 인터페이스의 IP를 실제로 바꾸므로 기본 비활성. 제어 경로가 그 인터페이스면
-# 하니스가 스스로 연결을 끊고, 복원 트랩도 ssh 경유라 함께 실패한다(시리얼 콘솔 없이 복구 불가).
-CHANGEIP_COMMIT="${CHANGEIP_COMMIT:-0}"
 LOG="${LOG:-${TMPDIR:-/tmp}/opc-test-all.$$.log}"
 pass=0; fail=0; skip=0; FAILED=""
 
@@ -85,17 +81,16 @@ $VHL login --password "$PW" >/dev/null 2>&1
 
 # ============ 5. SetIpConfigList (백업/복원) ============
 sec "5. SetIpConfigList"
-# slot1은 §6에서 커밋 대상이 될 수 있으므로 ESSID/GW/NTP를 미설정(0.0.0.0 / "")으로 둔다.
-# ESSID가 비어 있지 않으면 ChangeIp 커밋이 platform_nxp.c의 run_opc_wlan_apply()로 wpa_cli에
-# 그 ESSID를 mlan0(하드코딩)에 적용해 무선을 끊는다. GW/NTP는 적용 대상이 아니지만(검증·에코만),
-# 커밋되는 슬롯이므로 함께 미설정으로 둔다.
-# (온타겟 기록: set-ip-list는 --gw 0.0.0.0 --ntp 0.0.0.0 --essid "" 형태로 쓸 것)
+# slot1은 §6의 ChangeIp 커밋 대상이 될 수 있는 슬롯이므로 ESSID/GW/NTP를 미설정으로 둔다.
+# ESSID가 비어 있지 않으면 커밋이 platform_nxp.c의 `slot->essid[0] != '\\0'` 게이트를 통과해
+# run_opc_wlan_apply()로 그 ESSID를 mlan0(하드코딩)에 적용하고 무선을 끊는다. GW/NTP는 적용
+# 대상이 아니지만(검증·에코만) 같은 이유로 함께 비운다.
 chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 # staging 중 change-ip는 슬롯을 보기 전에 거절된다 — handle_change_ip_address의 검사 순서가
-# armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c). 그래서 빈 슬롯을
-# 쓰면 staging 중엔 0x0012, staging이 닫힌 뒤엔 0x0011이 되어 **어느 경로로도 pending을 세우지
-# 못한다**. slot 1로 찌르면 앞의 START 프레임이 유실됐을 때(chk는 재시도 없음) 기존 slot 1이
-# OK를 받아 살아 있는 ESSID/GW를 담은 커밋을 예약해 버린다.
+# armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c). 빈 슬롯을 쓰면
+# staging 중엔 0x0012, 닫힌 뒤엔 0x0011이라 **어느 경로로도 커밋을 예약하지 못한다**. slot 1로
+# 찌르면 앞의 START 프레임이 유실됐을 때(chk는 재시도 없음) 기존 slot 1이 OK를 받아 살아 있는
+# ESSID/GW를 담은 커밋이 예약되고, teardown의 Logout이 그것을 커밋해 버린다.
 chk "change-ip (END 전) → NG 0x0012 conflict" "0x0012"      $VHL change-ip --slot 25
 chk "set-ip-list 비연속 netmask → NG 0x0012"  "0x0012"      $VHL set-ip-list --slot 2 --flag cont --ip 10.0.0.60 --mask 0.255.0.0 --gw 10.0.0.1 --ntp 10.0.0.2 --essid testnet
 chk "set-ip-list END(slot1) → OK commit"      "OK"          $VHL set-ip-list --slot 1 --flag end --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
@@ -103,63 +98,16 @@ chk "set-ip-list start_end(slot3) 단일프레임 → OK" "OK"       $VHL set-ip
 
 # ============ 6. ChangeIpAddress ============
 # 과거 주석은 "eth0 DOWN → 우리 경로 무관, 안전"이었으나 그것은 제어 경로가 eth0(유선)이던 시절의
-# 전제였고, 제어가 mlan0인 구성에서는 거짓이다. 커밋(armed→Logout)은 관리 인터페이스의 IP를
-# 실제로 바꾸므로 명시적 옵트인 없이는 돌리지 않는다. NG 경로는 커밋이 없어 항상 안전.
+# 전제였다. 커밋 대상은 opcd가 고른다 — mgmt_ip_iface_idx(): peer_route면 mlan0, 아니면 opc.conf의
+# device_ip_iface(기본 eth0). 제어 경로와 같을 수도 다를 수도 있어 "안전"을 전제할 수 없다.
+# NG 경로는 커밋이 없어 항상 안전하므로 여기서 수행한다.
 sec "6. ChangeIpAddress"
-# 보드 기준으로 하니스 호스트에 도달하는 인터페이스. 이것은 **제어 경로**이지 ChangeIp의 적용
-# 대상이 아니다 — 적용 대상은 데몬이 고른다(handler.c mgmt_ip_iface_idx: peer_route면 무조건
-# mlan0, 아니면 opc.conf device_ip_iface). 두 값은 구성에 따라 갈릴 수 있으므로 그대로 "제어
-# 경로"라고만 표기한다.
-# VHLIP는 설정 파일 값이고 아래에서 타겟 root 셸 명령 문자열에 들어간다 — dotted-quad가 아니면
-# 원격 실행에 쓰지 않는다(따옴표 탈출로 임의 명령이 되는 것을 구조적으로 막는다).
-case "$VHLIP" in
-  *[!0-9.]*|"") CTRL_IF="" ;;
-  *) CTRL_IF=$(vhl_ssh "ip route get '$VHLIP' 2>/dev/null" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1) ;;
-esac
 chk "change-ip 빈슬롯(25) → NG 0x0011"       "0x0011"       $VHL change-ip --slot 25
-if [ "$CHANGEIP_COMMIT" = "1" ]; then
-  printf '  \033[33mWARN\033[0m  ChangeIp 커밋 — 제어경로=%s, 관리 IP가 10.0.0.50으로 이동한다 (시리얼 콘솔 확보 전제)\n' "${CTRL_IF:-불명}"
-  vhl_ssh "ip -4 -o addr show" 2>/dev/null | sed 's/^/        before: /'
-  chk "change-ip slot1 (armed) → OK"         "OK"           $VHL change-ip --slot 1
-  # change-ip는 예약만 한다. 커밋은 Logout이 arm해야 일어난다(handler.c: handle_logout이
-  # ip_change_commit_armed를 세우고 opcd_apply_pending_ip_change가 그 플래그에만 반응).
-  # 여기서 logout하지 않으면 §8의 Reset이 데몬을 내리며 pending을 버려 커밋이 영영 일어나지
-  # 않고, 이 옵트인은 ACK만 확인하는 빈 검사가 된다.
-  $VHL logout >/dev/null 2>&1 || true
-  sleep 3
-  # 판정은 **양성 증거**로만 한다. "옛 주소가 응답하지 않는다"는 IP 이동 말고도 프레임 유실·
-  # opcd 사망·보드 행이 똑같이 만들어내므로 그것만으로 PASS를 주면 fail-open이다.
-  # 보드에 닿을 수 있으면 새 주소가 실제로 올라왔는지 직접 읽고, 닿지 못하면 PASS가 아니라
-  # 판정 불가로 보고한다(콘솔에서 확인할 몫).
-  after=$(vhl_ssh "ip -4 -o addr show" 2>/dev/null)
-  if [ -z "$after" ]; then
-    skipn "ChangeIp 커밋 적용 확인" \
-          "커밋 후 보드에 닿지 못함 — 이동/장애를 하니스에서 구분 불가. 콘솔에서 확인할 것"
-  elif printf '%s' "$after" | grep -q '10\.0\.0\.50'; then
-    printf '  PASS  ChangeIp 커밋 — 새 주소 10.0.0.50 확인\n'; pass=$((pass+1))
-    printf '%s' "$after" | sed 's/^/        after: /'
-  else
-    printf '  \033[31mFAIL\033[0m  ChangeIp 커밋 — 보드에 닿지만 10.0.0.50이 없다 = 미적용\n'
-    fail=$((fail+1)); FAILED="${FAILED}\n  - ChangeIp 커밋 미적용"
-    printf '%s' "$after" | sed 's/^/        after: /'
-  fi
-  # teardown 트랩을 해제한다. restore()는 ssh 경유라 방금 끊긴 경로 위에서 rm -rf를 시도하게
-  # 되고, 성공하면 아래 수동 절차가 쓸 백업을 먼저 먹어치워 두 안내가 서로 모순된다.
-  trap - EXIT
-  echo
-  echo "  제어 경로가 이동해 이후 섹션은 수행 불가. 시리얼 콘솔에서 복구:"
-  echo "    rm -rf /usr/local/opc/etc && mv /usr/local/opc/etc.testbak /usr/local/opc/etc"
-  echo "    reboot"
-  echo "  (etc를 먼저 지우지 않으면 mv가 백업을 etc 안으로 넣어 테스트 설정이 live로 남는다."
-  echo "   주소 적용은 runtime-only라 리부트가 .network 값을 되살린다 — peer_route의 eth0 /32"
-  echo "   미러와 라우팅 table 100도 같이 복구되므로 ip addr del/add로 때우지 말 것.)"
-  printf '\n합계: PASS %d / FAIL %d / SKIP %d (ChangeIp 커밋에서 종료 — teardown 미실행)\n' "$pass" "$fail" "$skip"
-  [ "$fail" -gt 0 ] && exit 1
-  exit 0
-else
-  skipn "change-ip slot1 (armed→Logout 커밋)" \
-        "CHANGEIP_COMMIT=1 필요 — 제어경로=${CTRL_IF:-불명}, 커밋 시 관리 IF의 IP가 바뀌어 자기절단 위험"
-fi
+# 커밋(armed change-ip → Logout)은 이 스위트에서 수행하지 않는다. 하니스는 결과를 판정할 수도
+# (커밋 순간 제어 평면이 죽을 수 있다) 복구할 수도(콘솔+리부트 필요) 없다. 절차는 문서에 있다:
+# docs/testing/ontarget-protocol-verification-plan.md
+skipn "change-ip slot1 (armed→Logout 커밋)" \
+      "파괴적·비가역 — 시리얼 콘솔 필요. 수동 절차는 docs/testing/ontarget-protocol-verification-plan.md"
 
 # ============ 7. SetRadioConfig ============
 sec "7. SetRadioConfig"
