@@ -72,15 +72,23 @@ struct opc_store_async;
  * One slot per queued store_async job; the job token is the slot index.
  * The ack is packed and sent from opcd_store_async_on_ready() once the
  * worker reports the write result. */
-/* Kept at 4 (D3(a) re-decided 2026-09-18). The Request-ID retransmission rule
- * did shrink this slot — radio_req and req_body[OPC_PAYLOAD_MAX] are gone — but
- * the binding constraint is the async store's job queue, not this array:
+/* Raised 4 -> 16 (#140, 2026-09-21), tracking OPC_STORE_ASYNC_QUEUE_DEPTH.
+ *
+ * The binding constraint is the async store's job queue, not this array:
  * handler.c static_asserts OPCD_PENDING_ACK_MAX <= OPC_STORE_ASYNC_QUEUE_DEPTH
  * (intended equality), and each store job carries its own
- * OPC_STORE_ASYNC_DATA_MAX (8 KiB) buffer. Raising both to 16 would add ~96 KiB
- * of heap for a saturation path a spec-compliant VHL cannot reach — §4.1.3.1
- * makes it wait for each response before sending the next. */
-#define OPCD_PENDING_ACK_MAX 4
+ * OPC_STORE_ASYNC_DATA_MAX (8 KiB) buffer, so the queue is what costs memory
+ * (this array is 40 B/slot: 160 B -> 640 B).
+ *
+ * The D3(a) decision of 2026-09-18 kept both at 4 on the grounds that +96 KiB
+ * "is not negligible on an embedded target". That was never measured and is
+ * false for this target: the board reports MemTotal 1,961,704 kB (1.87 GiB)
+ * with opcd at VmRSS 1,536 kB, so the ~108 KiB this costs is 0.0055 % of
+ * system RAM (measured on cts-wlan, NXP i.MX93, aarch64, 2026-09-21).
+ *
+ * Depth does not eliminate saturation — see store_async.h for the compliant
+ * client that reaches it — it only makes it 4x harder to reach. */
+#define OPCD_PENDING_ACK_MAX 16
 typedef struct opcd_pending_ack {
     bool     in_use;
     uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */

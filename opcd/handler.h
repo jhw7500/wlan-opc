@@ -58,8 +58,13 @@ void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport);
 
 /* Drain finished async NVRAM writes (PERF-001) and transmit the deferred
- * Set* acks they correspond to. Call when st->store_async's event fd is
- * readable. No-op when no async store is attached. */
+ * Set* acks they correspond to. Safe to call at any time: the completion
+ * eventfd is EFD_NONBLOCK, so a read with nothing pending returns EAGAIN
+ * instead of blocking, and the job scan then finds nothing to harvest. The
+ * main loop calls it when the event fd is readable; persist_blob and
+ * persist_no_ack also call it unconditionally on first slot saturation, to
+ * reclaim slots held by jobs that finished mid-dispatch (#140). No-op when
+ * no async store is attached. */
 void opcd_store_async_on_ready(opcd_state_t *st);
 
 /* radio.conf decoder (#102): `n == sizeof *out` → copied as-is (0);

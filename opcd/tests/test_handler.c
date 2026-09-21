@@ -1429,7 +1429,8 @@ int main(void)
 
         /* 19. burst pressure: with every async-store job slot pre-filled by
          *     no-ack writes, a deferred Set* must still queue — persist_blob
-         *     blocks on a bounded wait until a slot frees — and produce
+         *     first harvests already-landed completions, then falls back to a
+         *     bounded wait until a slot frees (#140) — and produce
          *     exactly one OK ack. Re-init to a known password so this case
          *     does not depend on the 15-16 chain (test 16 leaves memory at
          *     "Another1" with disk unchanged — the no-rollback semantics). */
