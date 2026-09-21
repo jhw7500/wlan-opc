@@ -123,6 +123,35 @@ int main(void)
     ASSERT(opc_store_async_submit(sa, path_a, big, sizeof big, 0644, 0) == -1 &&
            errno == E2BIG, "oversized blob rejected E2BIG");
 
+    /* 5b. Saturation contract (#140). A slot stays occupied from submit until
+     *     drain (JOB_QUEUED and JOB_DONE both hold it), so submitting exactly
+     *     OPC_STORE_ASYNC_QUEUE_DEPTH times without draining must be accepted
+     *     in full and the next submit must fail EAGAIN — the EAGAIN edge the
+     *     handler's bounded wait exists to absorb, previously untested.
+     *
+     *     The depth floor is asserted as a literal on purpose: every other
+     *     reference uses the symbol and would re-scale silently, so a revert
+     *     to the pre-#140 depth of 4 would go unnoticed. Depth is what keeps a
+     *     saturating-but-spec-compliant client (store_async.h) from driving
+     *     opcd's dispatch loop into the wait in handler.c persist_blob. */
+    ASSERT(OPC_STORE_ASYNC_QUEUE_DEPTH >= 16,
+           "queue depth floor is 16 in-flight writes");
+    {
+        int accepted = 0;
+        for (int i = 0; i < OPC_STORE_ASYNC_QUEUE_DEPTH; i++)
+            if (opc_store_async_submit(sa, path_a, "sat", 3, 0644,
+                                       (uint64_t)(100 + i)) == 0)
+                accepted++;
+        ASSERT(accepted == OPC_STORE_ASYNC_QUEUE_DEPTH,
+               "every slot accepts a submit before any drain");
+        ASSERT(opc_store_async_submit(sa, path_a, "sat", 3, 0644, 999u) == -1 &&
+               errno == EAGAIN,
+               "submit past the last slot fails EAGAIN");
+        size_t sat = drain_n(sa, done, OPC_STORE_ASYNC_QUEUE_DEPTH);
+        ASSERT(sat == (size_t)OPC_STORE_ASYNC_QUEUE_DEPTH,
+               "saturated queue drains every completion");
+    }
+
     /* 6. destroy() completes queued jobs before joining (durability). */
     ASSERT(opc_store_async_submit(sa, path_a, "final", 5, 0644, 9u) == 0,
            "submit before destroy ok");

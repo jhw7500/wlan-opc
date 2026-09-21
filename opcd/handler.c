@@ -220,18 +220,38 @@ static_assert(OPCD_PENDING_ACK_MAX <= OPC_STORE_ASYNC_QUEUE_DEPTH,
 #define OPCD_STORE_TOKEN_NO_ACK UINT64_MAX
 
 /* Upper bound on waiting for an in-flight NVRAM write when every slot is
- * busy. Only a client violating the spec response timer can fill the queue,
- * and a healthy fsync finishes orders of magnitude sooner; an unbounded
- * wait here would re-create the loop stall (and outlast SIGTERM, which is
- * blocked for signalfd and thus cannot interrupt poll).
+ * busy. An unbounded wait here would re-create the loop stall (and outlast
+ * SIGTERM, which is blocked for signalfd and thus cannot interrupt poll).
  *
  * Side effect: when slot saturation does occur, the dispatch thread is
  * suspended inside wait_one_completion for up to this duration, pausing UDP
  * reception, indication ticks, and the idle-logout timer for that window.
- * This is a bounded residual of PERF-001's stall, reachable only by a
- * non-compliant client; the spec-compliant one-ack-at-a-time flow never
- * fills more than one slot. */
-#define OPCD_PERSIST_WAIT_MS 2000
+ * wait_one_completion returns on the FIRST completion, so the typical stall
+ * is one fsync, not this bound; the bound is only reached when the writer is
+ * genuinely stuck — and then OPC_ERR_NVRAM ("비휘발성 메모리의 소거·재기록
+ * 이상", §4.3.6/§4.3.8) is the accurate answer.
+ *
+ * Lowered 2000 -> 500 (#140) so the worst-case stall stays under the 1 s
+ * indication tick (opcd.c) instead of spanning two of them. Answering NG
+ * sooner than this was considered and rejected: §4.1.3.1 triggers a VHL
+ * retransmission on TIMEOUT only, so an NG is a delivered final answer — a
+ * transient queue-full would become a permanent configuration failure, and
+ * for SetRadioConfig it would leave wpa_supplicant.conf (already applied) ahead
+ * of radio.conf with no boot-time re-apply to reconcile them.
+ *
+ * Measured on the target (cts-wlan, NXP i.MX93, eMMC /dev/mmcblk0p2 ext4,
+ * opcd running), timing the real opc_store_write_atomic() against the real
+ * OPC_PATH_BASE directory: for the largest persisted blob
+ * (sizeof(opcd_ip_list_t) = 6784 B) p50 3.7 ms, p99 6.7 ms, worst 18.2 ms
+ * over 200 writes, and worst 18.1 ms over 1000 sustained writes; 8192 B
+ * (OPC_STORE_ASYNC_DATA_MAX) measures the same. So this bound leaves ~27x
+ * margin over the worst single write actually observed on the target. */
+#define OPCD_PERSIST_WAIT_MS 500
+/* The worst-case stall must fit inside one indication tick (opcd.c arms a 1 s
+ * timerfd). The pre-#140 value of 2000 spanned two ticks; this assert makes a
+ * regression to it a build failure rather than a silent latency change. */
+static_assert(OPCD_PERSIST_WAIT_MS < 1000,
+              "persist wait must stay under the 1 s indication tick");
 
 static int pending_ack_alloc(const opcd_state_t *st)
 {
@@ -310,12 +330,15 @@ static int wait_one_completion(opcd_state_t *st, int ms)
  * that cannot be queued surfaces as OPC_ERR_NVRAM instead of falling back
  * to a synchronous write.
  *
- * Slot exhaustion means Set* commands arrived faster than NVRAM completes. A
- * spec-compliant VHL cannot cause it — §4.1.3.1 makes it wait for each response
- * before sending the next, and a repeat of the SAME command on this socket is
- * discarded as a retransmission — so it takes several DIFFERENT Set* commands
- * in flight at once, i.e. a non-compliant client or a scripted tool. Waiting is
- * bounded by OPCD_PERSIST_WAIT_MS either way. */
+ * Slot exhaustion means Set* writes arrived faster than NVRAM completes. The
+ * earlier claim here — that a spec-compliant VHL cannot cause it — was wrong
+ * (#140): §4.1.3.1 makes the VHL wait for a RESPONSE, not for the write that
+ * response left behind, so the no-ack path (see persist_no_ack) lets a fully
+ * compliant client fill the queue by sending partially-failing
+ * SetIpConfigList frames back to back. Before paying the bounded wait this
+ * harvests completions that already landed — the eventfd is level-triggered
+ * and drained by the main loop, so a job that finished while this handler was
+ * running still holds its slot. Waiting is bounded by OPCD_PERSIST_WAIT_MS. */
 static int persist_blob(opcd_state_t *st, const char *path,
                         const void *data, size_t len, mode_t mode,
                         uint16_t req_id, uint32_t ip, uint16_t port,
@@ -330,7 +353,7 @@ static int persist_blob(opcd_state_t *st, const char *path,
     if (!st->store_async)
         return opc_store_write_atomic(path, data, len, mode);
 
-    for (;;) {
+    for (int attempt = 0;; attempt++) {
         int slot = pending_ack_alloc(st);
         if (slot >= 0) {
             if (opc_store_async_submit(st->store_async, path, data, len, mode,
@@ -361,7 +384,15 @@ static int persist_blob(opcd_state_t *st, const char *path,
                 return -1;
             }
             /* EAGAIN: a no-ack job holds the last queue slot — fall through
-             * and wait for a completion to free it. */
+             * and free one before retrying. */
+        }
+        /* First saturation hit: drain completions that are already finished
+         * but not yet harvested by the main loop. Costs no wait — the drain
+         * read() is on an EFD_NONBLOCK eventfd — and clears the common
+         * transient case with zero stall. */
+        if (attempt == 0) {
+            opcd_store_async_on_ready(st);
+            continue;
         }
         if (wait_one_completion(st, OPCD_PERSIST_WAIT_MS) != 0) {
             errno = ETIMEDOUT;
@@ -385,10 +416,16 @@ static void persist_no_ack(opcd_state_t *st, const char *path,
                     path, strerror(errno));
         return;
     }
-    for (;;) {
+    for (int attempt = 0;; attempt++) {
         if (opc_store_async_submit(st->store_async, path, data, len, mode,
                                    OPCD_STORE_TOKEN_NO_ACK) == 0)
             return;
+        /* Harvest already-landed completions before paying a wait (see
+         * persist_blob); only then block. */
+        if (errno == EAGAIN && attempt == 0) {
+            opcd_store_async_on_ready(st);
+            continue;
+        }
         if (errno != EAGAIN ||
             wait_one_completion(st, OPCD_PERSIST_WAIT_MS) != 0) {
             fprintf(stderr, "opcd: NVRAM write dropped (%s): %s\n",
