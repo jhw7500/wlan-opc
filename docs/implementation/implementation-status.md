@@ -18,7 +18,7 @@
 - **현황(2026-06-17 갱신, #56 → wlan-package PR #49 반영)**: `nxp_apply_ip_change`는 IP/netmask를 `ip addr`(휘발)로 적용하고, **essid는 `run_opc_wlan_apply`(opc_wlan_apply.sh ssid → conf 직접편집 → `wpa_cli reconfigure`, 비휘발)로 적용 구현**(실타겟 검증, best-effort — 실패는 로그만, IP 결과 반환). ntp는 읽기(`nxp_get_ntp_server`)만 있고 write/재시작 apply 없음(잔존).
 - **파일**: `platform_nxp.c:875-940` (주석 886-890 "essid/ntp remain V3 on-target work (wifi_init.sh routing / wpa_supplicant)")
 - **막힘**: essid = wpa_supplicant conf 재구성 시 활성 링크 드롭 정책 미정 / ntp = timesyncd.conf write+재시작 on-target 검증 대기
-- **비고**: essid **읽기** fallback(device-info용, nl80211 GET_INTERFACE)은 2026-06-16 구현됨(V4 별개). 여기는 **쓰기**(change-ip가 SSID를 실제로 바꾸는 것). set-ip-list의 essid 필드는 iplist.cfg에 저장되나 apply 시 무시됨.
+- **비고**: essid **읽기** 커널 fallback(device-info용, nl80211 GET_INTERFACE)은 2026-06-16 도입됐다가 **2026-09-21 #142에서 제거됨** — managed STA의 SSID는 인터페이스 상태가 아니어서 GET_INTERFACE 응답에 실리지 않으므로 그 fallback은 실행될 수 없었다(실기 확인: 연결 상태의 `iw mlan0 info`에 ssid 줄 없음, `wpa_cli status`에는 있음). **읽기 원천은 link.json의 `info.ssid` 단일**이며 로거가 wpa_supplicant에서 채운다(wlan-package #336). 여기 1.2 항목은 **쓰기**(change-ip가 SSID를 실제로 바꾸는 것)로 읽기와 별개다. set-ip-list의 essid 필드는 iplist.cfg에 저장되나 apply 시 무시됨.
 
 ### 1.3 Protocol Version 협상 + EEPROM identity — V7 · code-absent · **M**
 - **현황**: codec이 protocol version을 read/write만, **버전 검증/협상 전무**. static identity(vendor/product/serial/hw)는 `device_info.json` 로드뿐 — **EEPROM/hostcmd 직접 읽기 미구현**.
@@ -28,7 +28,7 @@
 ### 1.4 AP_DISCONNECT 구분 / EHT 매핑 / 스텔스 빈SSID — code-absent · **M/S**
 - **(a) Disassoc/Deauth 구분 불가**: nl80211 CMD_DISCONNECT에서 raw 802.11 프레임 미디코드 → 항상 Deauthentication(0x000C)으로 보고. `platform_nxp.c:1147-1169`
 - **(b) EHT(802.11be) 모드 매핑 부재**: `parse_bitrate_to_mode`가 EHT-MCS tx_bitrate에 -EINVAL, OPC enum 없음(11ax까지만 매핑). `:138-152`
-- **(c) 스텔스 빈SSID NULL 처리 미작성**(V4): 빈 SSID 분기 없음 (essid 읽기 fallback과 별개)
+- **(c) 스텔스 빈SSID NULL 처리 미작성**(V4): 빈 SSID 분기 없음 (읽기 경로는 link.json `info.ssid` 단일 원천 — 1.2 비고 참조)
 
 ---
 
