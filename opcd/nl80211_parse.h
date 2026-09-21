@@ -42,7 +42,13 @@ typedef struct opcd_nl_evt {
     uint16_t reason_code;   /* NL80211_ATTR_REASON_CODE (DISCONNECT)       */
     uint16_t status_code;   /* NL80211_ATTR_STATUS_CODE (CONNECT)          */
     bool     by_ap;         /* NL80211_ATTR_DISCONNECTED_BY_AP (DISCONNECT) */
-    char     ssid[33];      /* NL80211_ATTR_SSID, NUL-terminated; "" if absent (max 32B) */
+    /* NL80211_ATTR_SSID, NUL-terminated; "" if absent (max 32B). Decoded
+     * generically like every other attribute, but NO production caller reads
+     * it: the commands this parser handles never carry SSID for a managed
+     * station. In particular a GET_INTERFACE reply omits it (verified
+     * on-target while associated, #142) — do not build an essid fallback on
+     * this field. Exercised by test_nl80211_parse.c with synthetic frames. */
+    char     ssid[33];
     bool     ssid_present;
 } opcd_nl_evt_t;
 
