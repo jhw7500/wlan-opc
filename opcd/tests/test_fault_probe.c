@@ -296,6 +296,218 @@ int main(void)
     ASSERT(p.probe_interval_s == 10, "interval: >3600 rejected, default kept");
     unlink(conf);
 
+    /* 10. #141 hysteresis band: ENTRY at threshold_pct, release only below
+     *     clear_pct. A resource hovering at the entry level (81/79/81 ...)
+     *     must latch ONCE. Before #141 the single level made every dip a
+     *     CLEAR and every rise a fresh ENTRY, so a noisy ~80% load notified
+     *     on every sample. Exercised on cpu AND disk — the rule lives in one
+     *     helper shared by all three resources. */
+    opcd_fault_probe_init(&p);
+    ASSERT(p.threshold_pct == 80 && p.clear_pct == 70 &&
+           OPCD_FAULT_CLEAR_PCT_DEFAULT == 70,
+           "hysteresis: defaults are 80 entry / 70 clear");
+    write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
+    write_file(frx, "0\n"); write_file(ftx, "0\n");
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+
+    write_file(fstat, "cpu  1081 0 0 1019 0 0 0 0\n");           /* 81% */
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 850 0\n");   /* ~85% */
+    p.mono_ms -= 1000;
+    /* cpu_pct is a busy/total ratio and is exact; disk and net divide by the
+     * measured elapsed time, which carries the sample's own file-I/O cost, so
+     * those resources are driven well clear of the 80/70 edges and asserted on
+     * the transition rather than on an exact percentage. */
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 &&
+           r.cpu_pct == 81 && r.cpu_entered &&
+           r.disk_over && r.disk_entered,
+           "hysteresis: entry (cpu 81% exact, disk ~85%)");
+
+    write_file(fstat, "cpu  1160 0 0 1040 0 0 0 0\n");           /* 79% */
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 1600 0\n");   /* ~75% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_pct == 79 &&
+           r.cpu_over  && !r.cpu_cleared  && !r.cpu_entered &&
+           r.disk_over && !r.disk_cleared && !r.disk_entered,
+           "hysteresis: a dip inside the band (cpu 79%) is NOT a clear");
+
+    write_file(fstat, "cpu  1241 0 0 1059 0 0 0 0\n");           /* 81% */
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 2450 0\n");   /* ~85% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_pct == 81 &&
+           !r.cpu_entered && !r.disk_entered,
+           "hysteresis: rising back to 81% is NOT a second entry");
+
+    write_file(fstat, "cpu  1310 0 0 1090 0 0 0 0\n");           /* 69% */
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 3100 0\n");   /* ~65% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_pct == 69 &&
+           !r.cpu_over  && r.cpu_cleared &&
+           !r.disk_over && r.disk_cleared,
+           "hysteresis: falling below clear_pct IS the clear (cpu+disk)");
+
+    /* 10b. clear_pct 0 turns the band off — the same dip that 10 held through
+     *      is a clear again, i.e. exactly the pre-#141 single-level rule. */
+    opcd_fault_probe_init(&p);
+    p.clear_pct = 0;
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+    write_file(fstat, "cpu  1081 0 0 1019 0 0 0 0\n");           /* 81% */
+    p.mono_ms -= 1000;
+    (void)opcd_fault_probe_sample(&p, &r);                       /* entry */
+    write_file(fstat, "cpu  1160 0 0 1040 0 0 0 0\n");           /* 79% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.cpu_over && r.cpu_cleared,
+           "hysteresis off (clear_pct 0): 79% clears at the entry level");
+
+    /* 10c. congestion_clear_pct parsing, and the clear <= threshold invariant
+     *      restored after the loop so key order cannot leave a clear above the
+     *      entry level (which would latch and never release). */
+    write_file(conf, "congestion_clear_pct = 60\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 60, "hysteresis/conf: clear_pct override");
+    write_file(conf, "congestion_clear_pct = 95\ncongestion_threshold_pct = 80\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 80,
+           "hysteresis/conf: clear above threshold clamped (clear key first)");
+    write_file(conf, "congestion_threshold_pct = 50\ncongestion_clear_pct = 90\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 50 && p.clear_pct == 50,
+           "hysteresis/conf: clamp holds when clear key comes last");
+    write_file(conf, "congestion_clear_pct = 101\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 70, "hysteresis/conf: >100 rejected, default kept");
+    write_file(conf, "congestion_clear_pct = 0\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 70, "hysteresis/conf: 0 rejected, default kept");
+    write_file(conf, "congestion_clear_pct = abc\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 70,
+           "hysteresis/conf: unparseable rejected (endptr), default kept");
+    write_file(conf, "congestion_clear_pct = 7O\n");   /* letter O, not zero */
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 70,
+           "hysteresis/conf: trailing garbage rejected, default kept");
+    write_file(conf, "congestion_clear_pct = 80\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.clear_pct == 80 && p.threshold_pct == 80,
+           "hysteresis/conf: clear == threshold is the documented band-off form");
+
+    /* 10d. The band width follows a configured entry threshold. Pinning init's
+     *      70 would give a zero-width band for every threshold <= 70 — the
+     *      pre-#141 storm, silently (reviewer A). */
+    write_file(conf, "congestion_threshold_pct = 60\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 60 && p.clear_pct == 50,
+           "hysteresis/conf: lowering only the threshold keeps a band (60/50)");
+    write_file(conf, "congestion_threshold_pct = 50\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 50 && p.clear_pct == 40,
+           "hysteresis/conf: threshold 50 keeps a band (50/40)");
+    /* The derived width is capped at half the entry level, so a low threshold
+     * keeps a proportional band instead of one that swallows the whole range
+     * (a flat -10 would make threshold 10 release only below 1%). */
+    write_file(conf, "congestion_threshold_pct = 20\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 20 && p.clear_pct == 10,
+           "hysteresis/conf: threshold 20 keeps the full 10-point band (20/10)");
+    write_file(conf, "congestion_threshold_pct = 10\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 10 && p.clear_pct == 5,
+           "hysteresis/conf: threshold 10 halves the band (10/5), not 10/1");
+    write_file(conf, "congestion_threshold_pct = 5\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 5 && p.clear_pct == 3,
+           "hysteresis/conf: threshold 5 halves the band (5/3)");
+    write_file(conf, "congestion_threshold_pct = 1\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 1 && p.clear_pct == 1,
+           "hysteresis/conf: threshold 1 degenerates to a zero-width band, not 0");
+    write_file(conf, "congestion_threshold_pct = 60\ncongestion_clear_pct = 55\n");
+    opcd_fault_probe_init(&p); opcd_fault_probe_conf(&p, conf);
+    ASSERT(p.threshold_pct == 60 && p.clear_pct == 55,
+           "hysteresis/conf: an explicit clear is not overwritten by the derivation");
+    unlink(conf);
+
+    /* 10e. #141 + D4(i): rearm and reset_latch must clear ONLY the notify
+     *      latch. Before the split they cleared the band state too, so a
+     *      congestion that had settled inside [clear_pct, threshold_pct) was
+     *      neither an entry nor a clear on the next sample — the notification
+     *      rearm exists to save was lost for good (reviewer A, HIGH). */
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
+    write_file(frx, "0\n"); write_file(ftx, "0\n");
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+    write_file(fstat, "cpu  1085 0 0 1015 0 0 0 0\n");           /* 85% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_entered,
+           "rearm/band: 85% is the entry (send then fails at Period 0)");
+    opcd_fault_probe_rearm(&p, OPCD_FAULT_RES_CPU);
+    write_file(fstat, "cpu  1160 0 0 1040 0 0 0 0\n");           /* 75%, in band */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_pct == 75 &&
+           r.cpu_over && r.cpu_entered && !r.cpu_cleared,
+           "rearm/band: a congestion resting inside the band re-enters after rearm");
+
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+    write_file(fstat, "cpu  1085 0 0 1015 0 0 0 0\n");           /* 85% */
+    p.mono_ms -= 1000;
+    (void)opcd_fault_probe_sample(&p, &r);                       /* entry */
+    write_file(fstat, "cpu  1160 0 0 1040 0 0 0 0\n");           /* 75%, in band */
+    p.mono_ms -= 1000;
+    (void)opcd_fault_probe_sample(&p, &r);                       /* still congested */
+    opcd_fault_probe_reset_latch(&p);                            /* new recipient */
+    write_file(fstat, "cpu  1235 0 0 1065 0 0 0 0\n");           /* 75%, in band */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.cpu_pct == 75 && r.cpu_entered,
+           "reset_latch/band: a new recipient is told about a congestion inside the band");
+
+    /* 10f. The band applies to the network resource too — the rule is one
+     *      shared helper, but nothing exercised net through the sampler. */
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
+    snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    write_file(fspd, "100\n");                     /* link 100 Mbit/s is the
+                                                    * authoritative source; it
+                                                    * overrides net_capacity_mbps.
+                                                    * pct = bytes*8 / (ms*10*mbps)
+                                                    * → 1% == 125000 B per 1000 ms */
+    write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
+    write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
+    write_file(frx, "0\n"); write_file(ftx, "0\n");
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+    write_file(frx, "11250000\n");                               /* ~90% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_over && r.net_entered,
+           "hysteresis/net: above the entry level is an ENTRY");
+    write_file(frx, "20625000\n");                               /* +9375000 → ~75% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 &&
+           r.net_over && !r.net_cleared && !r.net_entered,
+           "hysteresis/net: a dip inside the band is NOT a clear");
+    write_file(frx, "28750000\n");                               /* +8125000 → ~65% */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.net_over && r.net_cleared,
+           "hysteresis/net: falling below clear_pct IS the clear");
+
     unlink(fstat); unlink(fdisk); unlink(frx); unlink(ftx); unlink(fspd);
     rmdir(sub); rmdir(d);
 

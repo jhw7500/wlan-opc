@@ -13,9 +13,10 @@ extern "C" {
  *
  * Operator decision 2026-06-12; every figure below is provisional pending
  * the vendor inquiry tracked in issue #35 / proto-todo T6:
- *   - threshold: 80% for every resource, overridable via opc.conf
- *     (congestion_threshold_pct / congestion_net_if / congestion_disk_dev /
- *      congestion_net_capacity_mbps)
+ *   - threshold: entry 80% for every resource, cleared at 70% — a
+ *     hysteresis band, not one level (#141). Both overridable via opc.conf
+ *     (congestion_threshold_pct / congestion_clear_pct / congestion_net_if /
+ *      congestion_disk_dev / congestion_net_capacity_mbps)
  *   - sampling: on a DEVICE-INTERNAL interval (congestion_probe_interval_s,
  *     default 10 s), independent of the Indication Period (#121 — the spec
  *     leaves the resource watch period to the vendor, like Reset Cause)
@@ -23,8 +24,20 @@ extern "C" {
  *     (below→above threshold transition), per resource; a persisting
  *     congestion is not re-notified. Period 0 → immediate, Period ≥ 1 →
  *     staged in the coalesce slot and flushed at the period end (#105).
- *     A drop below threshold clears the latch; whether/how to notify the
- *     clear is inquiry Q6 — hook only, nothing emitted.
+ *     The latch clears when utilisation drops below clear_pct, which is at
+ *     or under threshold_pct — so a resource hovering at the entry level
+ *     (79/81/79/81 ...) latches ONCE instead of re-entering on every sample
+ *     (#141). Whether/how to notify the clear is inquiry Q6 — hook only,
+ *     nothing emitted.
+ *
+ *     WIRE CONSEQUENCE of the band: a re-announced congestion (after
+ *     SetIndicationConfig / logout / a failed Period-0 send) reports the
+ *     utilisation measured at that moment, which for a resource resting
+ *     inside the band is BELOW threshold_pct — as low as clear_pct. So a
+ *     FaultDetect current_val of 75 with an 80% entry threshold is correct,
+ *     not a contradiction: the resource is still congested by the band rule
+ *     that governs release. Before #141 the same situation emitted no frame
+ *     at all (reviewer A).
  *   - CPU (0x0001):  /proc/stat busy ratio over the interval, current_val = %
  *   - Memory (0x0002): NOT emitted — the target runs swapless, so the spec's
  *     paging-based definition cannot occur; flash pressure is covered by
@@ -40,22 +53,50 @@ extern "C" {
  */
 
 #define OPCD_FAULT_THRESHOLD_PCT_DEFAULT 80
+#define OPCD_FAULT_CLEAR_BAND_PCT        10   /* default band width below the
+                                              * entry threshold (#141) */
+#define OPCD_FAULT_CLEAR_PCT_DEFAULT \
+    (OPCD_FAULT_THRESHOLD_PCT_DEFAULT - OPCD_FAULT_CLEAR_BAND_PCT)
 #define OPCD_FAULT_NET_CAPACITY_DEFAULT  1000   /* Mbps, when sysfs speed is absent */
 #define OPCD_FAULT_PROBE_INTERVAL_DEFAULT 10    /* s, device-internal watch period (#121) */
 #define OPCD_FAULT_PROBE_INTERVAL_MAX     3600
 
 typedef struct opcd_fault_probe {
     /* config */
-    unsigned threshold_pct;         /* NG threshold, percent (1..100) */
+    unsigned threshold_pct;         /* NG entry threshold, percent (1..100) */
+    unsigned clear_pct;             /* band releases below this, percent (1..100).
+                                     * Invariant clear_pct <= threshold_pct,
+                                     * enforced by _conf() after parsing (keys
+                                     * may appear in any order) and again in
+                                     * fault_over(), so a hand-built probe
+                                     * cannot latch forever. Set it EQUAL to
+                                     * threshold_pct to turn the band off; there
+                                     * is no sentinel value. When opc.conf does
+                                     * not set it, _conf() re-derives it from
+                                     * the configured threshold so lowering the
+                                     * entry level never silently collapses the
+                                     * band (reviewer A, #141). */
     unsigned net_capacity_mbps;     /* fallback when <net_dir>/speed unusable */
     char     disk_dev[33];          /* /proc/diskstats device name —
                                      * kernel DISK_NAME_LEN(32) + NUL */
     unsigned probe_interval_s;      /* watch period, 1..OPCD_FAULT_PROBE_INTERVAL_MAX */
     uint32_t probe_countdown_s;     /* seconds accumulated toward the next sample */
-    /* entry latch (#121): true while the resource is over threshold as of the
-     * last sample. A sample flips it and reports the transition in
-     * opcd_fault_report_t.*_entered / *_cleared. */
+    /* Two flags per resource, separate since #141 — before the hysteresis band
+     * they always coincided and one flag carried both meanings.
+     *
+     *   *_congested : BAND state. True while the resource counts as congested,
+     *                 which with a band means "entered at threshold_pct and has
+     *                 not yet fallen below clear_pct". fault_over() reads it.
+     *   *_notified  : NOTIFY-ONCE latch (#121). True once an ENTRY has been
+     *                 reported for the current congestion.
+     *
+     * opcd_fault_probe_rearm / _reset_latch clear ONLY *_notified. Clearing
+     * *_congested too would tell the next sample the resource is not congested,
+     * and a utilisation sitting inside [clear_pct, threshold_pct) would then be
+     * neither an entry nor a clear — losing the one notification the spec
+     * allows, which is exactly what rearm exists to prevent (reviewer A, #141). */
     bool     cpu_congested, disk_congested, net_congested;
+    bool     cpu_notified,  disk_notified,  net_notified;
     /* source paths (overridable for tests) */
     char     path_proc_stat[96];
     char     path_diskstats[96];
@@ -77,8 +118,15 @@ typedef struct opcd_fault_report {
     bool     cpu_over;  uint16_t cpu_pct;
     bool     disk_over; uint16_t disk_pct;
     bool     net_over;  uint16_t net_pct;
-    /* transitions since the previous sample (#121): entered = below→above
-     * (notify once), cleared = above→below (Q6 hook, not notified). */
+    /* Transitions since the previous sample (#121). Both are derived from the
+     * NOTIFY latch, not from the band state: entered = the resource counts as
+     * congested and no entry has been announced yet; cleared = it no longer
+     * counts as congested and an entry HAD been announced. The difference
+     * shows only inside a rearm/reset window, where the notify latch is open
+     * while the band state still stands — a release there reports neither
+     * transition, which is right because there is no announced entry left to
+     * withdraw (opcd_ind_fault_clear's only job). cleared stays a Q6 hook:
+     * nothing is emitted. */
     bool     cpu_entered,  disk_entered,  net_entered;
     bool     cpu_cleared,  disk_cleared,  net_cleared;
 } opcd_fault_report_t;
@@ -95,9 +143,11 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path);
  * mirroring the indication tick). */
 bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s);
 
-/* Forget the entry latch so an ONGOING congestion is reported as a fresh
+/* Forget the notify-once latch so an ONGOING congestion is reported as a fresh
  * entry on the next sample — for a new indication recipient / config
- * (opcd_ind_coalesce_reset). Counter baselines are kept. */
+ * (opcd_ind_coalesce_reset). Counter baselines AND the band state are kept, so
+ * a resource resting inside [clear_pct, threshold_pct) is still congested and
+ * is re-announced rather than silently dropped (#141). */
 void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p);
 
 /* Re-arm ONE resource's entry latch (D4(i), 2026-09-18). The latch is committed
@@ -105,7 +155,9 @@ void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p);
  * notification; when that send fails at Indication Period 0 there is no staging
  * buffer to retry from, so the "notify once on entry" rule would silently become
  * "never notify". Re-arming makes the next due sample report the still-standing
- * congestion as a fresh ENTRY. The resource is named by this module's own enum
+ * congestion as a fresh ENTRY — including a congestion that has since settled
+ * inside the hysteresis band, which is why only the notify latch is cleared
+ * and the band state is left alone (#141). The resource is named by this module's own enum
  * so the probe stays free of protocol headers (it is host-unit-tested alone);
  * indication.c maps OPC_CONGESTION_* onto it. */
 typedef enum {
@@ -123,7 +175,9 @@ int  opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out);
 
 /* Pure helpers, unit-tested directly. opcd_fault_evaluate expects
  * elapsed_ms >= 1 (the sampler enforces a 1 ms floor); 0 silently skips the
- * disk and network calculations. */
+ * disk and network calculations. It reads the entry latches (*_congested) as
+ * well as the thresholds, so *_over is the HYSTERETIC state ("considered
+ * congested"), not a bare sample-vs-entry-level comparison (#141). */
 int  opcd_fault_parse_proc_stat(const char *text, uint64_t *busy, uint64_t *total);
 int  opcd_fault_parse_diskstats(const char *text, const char *dev, uint64_t *io_ms);
 void opcd_fault_evaluate(const opcd_fault_probe_t *p,
