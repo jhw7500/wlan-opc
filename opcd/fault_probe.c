@@ -100,6 +100,30 @@ int opcd_fault_parse_diskstats(const char *text, const char *dev, uint64_t *io_m
     return -1;
 }
 
+/* Hysteretic over-threshold test (#141). A resource that is NOT in the band
+ * enters at threshold_pct; one that IS in it stays congested until utilisation
+ * falls below clear_pct. clear_pct == threshold_pct is a zero-width band, i.e.
+ * the pre-#141 single-level rule.
+ *
+ * clear_pct is normalised here as well as in _conf(): a release level above the
+ * entry level (or a zeroed, hand-built probe) would latch once and never let
+ * go, so it degrades to threshold_pct instead. This is struct hygiene for a
+ * caller that did not go through _init/_conf — not a configuration feature;
+ * opc.conf rejects both 0 and out-of-range values.
+ *
+ * The band state is an input here rather than being applied in the sampler so
+ * the rule lives in one place instead of being repeated per resource. This
+ * keeps opcd_fault_evaluate a pure function — same (probe state, deltas) in,
+ * same report out — but *_over now means "considered congested", not "this
+ * sample exceeded the entry level". Nothing outside this module reads *_over;
+ * the sampler stores it and derives *_entered / *_cleared from it. */
+static bool fault_over(const opcd_fault_probe_t *p, bool in_band, uint64_t pct)
+{
+    unsigned release = p->clear_pct;
+    if (release == 0 || release > p->threshold_pct) release = p->threshold_pct;
+    return in_band ? pct >= release : pct >= p->threshold_pct;
+}
+
 void opcd_fault_evaluate(const opcd_fault_probe_t *p,
                          uint64_t d_busy, uint64_t d_total,
                          uint64_t d_disk_ms, uint64_t elapsed_ms,
@@ -111,13 +135,13 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
         uint64_t pct = d_busy * 100u / d_total;
         if (pct > 100) pct = 100;
         out->cpu_pct  = (uint16_t)pct;
-        out->cpu_over = pct >= p->threshold_pct;
+        out->cpu_over = fault_over(p, p->cpu_congested, pct);
     }
     if (elapsed_ms > 0) {
         uint64_t pct = d_disk_ms * 100u / elapsed_ms;
         if (pct > 100) pct = 100;
         out->disk_pct  = (uint16_t)pct;
-        out->disk_over = pct >= p->threshold_pct;
+        out->disk_over = fault_over(p, p->disk_congested, pct);
 
         /* bytes → Mbit/s: *8 bits, /elapsed_ms gives kbit/s, /1000 → Mbit/s.
          * Clamp before the multiply: a pathological delta (sysfs counter
@@ -139,7 +163,7 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
             uint64_t pct = denom ? (d_net_bytes * 8ULL) / denom : 0;
             if (pct > 100u) pct = 100u;
             out->net_pct  = (uint16_t)pct;
-            out->net_over = pct >= p->threshold_pct;
+            out->net_over = fault_over(p, p->net_congested, pct);
         }
     }
 }
@@ -148,6 +172,7 @@ void opcd_fault_probe_init(opcd_fault_probe_t *p)
 {
     memset(p, 0, sizeof *p);
     p->threshold_pct     = OPCD_FAULT_THRESHOLD_PCT_DEFAULT;
+    p->clear_pct         = OPCD_FAULT_CLEAR_PCT_DEFAULT;
     p->net_capacity_mbps = OPCD_FAULT_NET_CAPACITY_DEFAULT;
     p->probe_interval_s  = OPCD_FAULT_PROBE_INTERVAL_DEFAULT;
     snprintf(p->disk_dev,       sizeof p->disk_dev,       "mmcblk0");
@@ -161,6 +186,7 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
     if (!p || !conf_path) return;
     FILE *f = fopen(conf_path, "r");
     if (!f) return;                            /* no conf file → defaults */
+    bool clear_seen = false;                   /* congestion_clear_pct accepted */
     char line[160];
     while (fgets(line, sizeof line, f)) {
         char key[48], val[64];
@@ -173,6 +199,25 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
         if (strcmp(key, "congestion_threshold_pct") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             if (v >= 1 && v <= 100) p->threshold_pct = (unsigned)v;
+        } else if (strcmp(key, "congestion_clear_pct") == 0) {
+            char *end = NULL;
+            unsigned long v = strtoul(val, &end, 10);
+            /* endptr-checked like read_u64_file: without it "abc" parses as 0
+             * and would silently disable the band (reviewer A, #141). 0 is not
+             * a valid release level — set clear EQUAL to threshold to turn the
+             * band off. The clear <= threshold invariant is restored after the
+             * loop, since keys may arrive in any order. */
+            if (end && end != val && *end == '\0' && v >= 1 && v <= 100) {
+                p->clear_pct = (unsigned)v;
+                clear_seen = true;
+            } else {
+                /* Loud like the sibling string keys: a silently ignored value
+                 * here leaves a band the operator did not write, and the most
+                 * likely typo disables the fix outright (reviewer A). */
+                fprintf(stderr, "opcd: fault probe: congestion_clear_pct '%s' "
+                                "rejected (want 1..100) — derived default kept\n",
+                        val);
+            }
         } else if (strcmp(key, "congestion_probe_interval_s") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             /* out-of-range keeps the default, silently like the sibling
@@ -202,6 +247,34 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
         }
     }
     fclose(f);
+    /* When opc.conf did not set a release level, derive it from the threshold
+     * that WAS configured. Keeping _init's 70 would collapse the band to zero
+     * width for every threshold <= 70 — silently restoring the notification
+     * storm this change removes (reviewer A, #141).
+     *
+     * The width is capped at half the entry level, not just floored: a flat
+     * 10-point drop under a low threshold makes the band swallow almost the
+     * whole range (threshold 10 would release only below 1%, so a resource
+     * that once entered stays latched and its later re-entries are suppressed
+     * — the sensitive configuration becoming the least sensitive one). Half
+     * keeps the band proportional at any threshold. */
+    if (!clear_seen) {
+        unsigned band = p->threshold_pct / 2u;
+        if (band > OPCD_FAULT_CLEAR_BAND_PCT) band = OPCD_FAULT_CLEAR_BAND_PCT;
+        p->clear_pct = p->threshold_pct > band ? p->threshold_pct - band : 1;
+    }
+    /* Restore clear_pct <= threshold_pct: an explicit clear above the entry
+     * level would latch once and never release. Clamping is silent-adjacent, so
+     * say it — the clamped value equals threshold_pct, which is exactly the
+     * documented way to turn the band OFF, and an operator who wrote a larger
+     * number meant the opposite (reviewer A). */
+    if (p->clear_pct > p->threshold_pct) {
+        fprintf(stderr, "opcd: fault probe: congestion_clear_pct %u exceeds "
+                        "congestion_threshold_pct %u — clamped to %u, "
+                        "hysteresis band is now zero-width\n",
+                p->clear_pct, p->threshold_pct, p->threshold_pct);
+        p->clear_pct = p->threshold_pct;
+    }
 }
 
 bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s)
@@ -220,17 +293,21 @@ bool opcd_fault_probe_due(opcd_fault_probe_t *p, uint32_t elapsed_s)
 void opcd_fault_probe_rearm(opcd_fault_probe_t *p, opcd_fault_res_t res)
 {
     if (!p) return;
+    /* Notify latch only — the band state stays, so a congestion that has
+     * settled inside [clear_pct, threshold_pct) is still congested and the next
+     * sample reports it as a fresh ENTRY instead of vanishing (#141). */
     switch (res) {
-    case OPCD_FAULT_RES_CPU:  p->cpu_congested  = false; break;
-    case OPCD_FAULT_RES_DISK: p->disk_congested = false; break;
-    case OPCD_FAULT_RES_NET:  p->net_congested  = false; break;
+    case OPCD_FAULT_RES_CPU:  p->cpu_notified  = false; break;
+    case OPCD_FAULT_RES_DISK: p->disk_notified = false; break;
+    case OPCD_FAULT_RES_NET:  p->net_notified  = false; break;
     }
 }
 
 void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)
 {
     if (!p) return;
-    p->cpu_congested = p->disk_congested = p->net_congested = false;
+    /* Notify latch only — see opcd_fault_probe_rearm. */
+    p->cpu_notified = p->disk_notified = p->net_notified = false;
 }
 
 static int read_net_bytes(const opcd_fault_probe_t *p, uint64_t *bytes)
@@ -303,20 +380,28 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
          * UNKNOWN, not "below threshold": its latch holds, so a transient
          * read failure neither clears the congestion nor makes the recovered
          * over-sample a duplicate entry (Claude review, #121). */
+        /* *_over is the BAND state (fault_over already folded the previous
+         * band state in); *_notified is the notify-once latch. Deriving the
+         * transitions from *_notified rather than from *_congested is what
+         * makes rearm/reset_latch work inside the band: they clear only
+         * *_notified, so a still-congested resource re-enters (#141). */
         if (cpu_ok && p->cpu_primed) {
-            out->cpu_entered  =  out->cpu_over  && !p->cpu_congested;
-            out->cpu_cleared  = !out->cpu_over  &&  p->cpu_congested;
+            out->cpu_entered  =  out->cpu_over && !p->cpu_notified;
+            out->cpu_cleared  = !out->cpu_over &&  p->cpu_notified;
             p->cpu_congested  = out->cpu_over;
+            p->cpu_notified   = out->cpu_over;
         }
         if (disk_ok && p->disk_primed) {
-            out->disk_entered =  out->disk_over && !p->disk_congested;
-            out->disk_cleared = !out->disk_over &&  p->disk_congested;
+            out->disk_entered =  out->disk_over && !p->disk_notified;
+            out->disk_cleared = !out->disk_over &&  p->disk_notified;
             p->disk_congested = out->disk_over;
+            p->disk_notified  = out->disk_over;
         }
         if (net_ok && p->net_primed) {
-            out->net_entered  =  out->net_over  && !p->net_congested;
-            out->net_cleared  = !out->net_over  &&  p->net_congested;
+            out->net_entered  =  out->net_over && !p->net_notified;
+            out->net_cleared  = !out->net_over &&  p->net_notified;
             p->net_congested  = out->net_over;
+            p->net_notified   = out->net_over;
         }
     }
 

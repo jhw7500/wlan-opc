@@ -244,7 +244,9 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
 | 키 | 기본 | 의미 |
 |---|---|---|
 | `congestion_probe_interval_s` | 10 (1..3600) | 자원 사용률 측정 주기(장치 고유, Indication Period와 무관 — #121). Period 0에서도 측정·즉시 통지 |
-| `congestion_threshold_pct` | 80 | CPU/Disk/Net 공통 임계(%) |
+| `congestion_threshold_pct` | 80 | CPU/Disk/Net 공통 **진입** 임계(%) |
+| `congestion_clear_pct` | 진입 임계 − min(10, 진입 임계/2) (1..100) | **해제** 임계(%) — 사용률이 이 값 아래로 내려가야 래치가 풀린다(#141). **미지정이면 설정된 진입 임계에서 파생**되므로 `congestion_threshold_pct`만 낮춰도 밴드가 사라지지 않는다. 폭은 진입 임계의 **절반을 넘지 않는다** — 낮은 임계에서 밴드가 범위 전체를 삼켜 오히려 둔감해지는 것을 막는다(80→70, 20→10, 10→5, 5→3, 1→1). 진입 임계를 넘는 값·`0`·숫자가 아닌 값은 **거부/클램프되고 stderr에 기록**된다. 히스테리시스를 끄려면 해제 임계를 **진입 임계와 같게** 설정한다 |
+| — (참고) | | 밴드 안(해제~진입)에 머무는 자원이 `SetIndicationConfig`·로그아웃 후 재통지될 때 `current_val`은 **진입 임계보다 낮을 수 있다**(해제 임계까지). 밴드 규칙상 여전히 폭주 중이므로 모순이 아니다 |
 | `congestion_net_if` / `congestion_net_capacity_mbps` | eth0 / 1000 | 네트워크 사용률 소스·링크 속도 폴백 |
 | `congestion_disk_dev` | mmcblk0 | `/proc/diskstats` 장치명 |
 
