@@ -425,10 +425,6 @@ static int nxp_get_wlan_mac(int idx, uint8_t mac[6])
     return parse_mac_str(buf, mac);
 }
 
-/* Forward decl: kernel GET_INTERFACE SSID fallback (defined with the nl80211
- * socket helpers below) — used when the logger's link.json omits info.ssid. */
-static int nxp_get_iface_ssid(int ifindex, char *buf, size_t cap);
-
 static int nxp_get_essid(int idx, char *buf, size_t cap)
 {
     if (idx < 0 || idx >= nxp_get_wlan_count()) return -ENODEV;
@@ -439,20 +435,20 @@ static int nxp_get_essid(int idx, char *buf, size_t cap)
     if (json) {
         int rc = opc_json_string_section(json, "info", "ssid", buf, cap);
         free(json);
-        if (rc == 0 && buf[0] != '\0')
-            return 0;               /* link.json carried info.ssid */
+        if (rc != 0) buf[0] = '\0';
     }
-    /* Fallback: the logger's link.json may lack info.ssid (observed on-target —
-     * the AP broadcasts normally but the logger does not record the SSID). Query
-     * the kernel directly, the same authoritative source nxp_get_iface_freq uses
-     * for the associated channel. idx→ifindex via the interface name. */
-    buf[0] = '\0';
-    unsigned int ifidx = if_nametoindex((idx == 0) ? "mlan0" : "mlan1");
-    if (ifidx != 0 && nxp_get_iface_ssid((int)ifidx, buf, cap) == 0)
-        return 0;
-    /* Best-effort: always returns 0 after the fallback (buf may be an empty
-     * string). Callers read buf directly — a non-zero return must NOT be relied
-     * on to detect "no SSID available". */
+    /* link.json is the ONLY source (#142). There is deliberately NO kernel
+     * fallback: the SSID of a managed station is not interface state, so a
+     * NL80211_CMD_GET_INTERFACE reply never carries NL80211_ATTR_SSID. Verified
+     * on-target while associated — `iw mlan0 info` (same command) prints no
+     * ssid line, while `wpa_cli -i mlan0 status` reports ssid=<name>. The
+     * removed fallback could therefore never fire; it only made this path look
+     * defended. The logger fills info.ssid from wpa_supplicant
+     * (wlan-package #336), so if that is empty this field is empty too.
+     *
+     * Best-effort: always returns 0 with buf possibly an empty string. Callers
+     * read buf directly — a non-zero return must NOT be relied on to detect
+     * "no SSID available". */
     return 0;
 }
 
@@ -1210,12 +1206,11 @@ static void nl_coalesce_put(opcd_platform_evt_t *tab, size_t *count,
  * fills *out with the decoded NEW_INTERFACE reply on success, -1 otherwise.
  *
  * Authoritative source at association time: the kernel knows the operating freq
- * and SSID the instant CONNECT fires, whereas link.json lags (the logger polls
- * ~1 s and may omit fields — the on-target race that left the channel fallback
- * reading 0 and the essid fallback reading ""). Bounded by a 250 ms SO_RCVTIMEO
- * so a silent kernel cannot stall the caller — invoked both from the drain loop
- * (channel, via nxp_get_iface_freq) and the synchronous device-info path
- * (essid, via nxp_get_iface_ssid). */
+ * the instant CONNECT fires, whereas link.json lags (the logger polls ~1 s and
+ * may omit fields — the on-target race that left the channel fallback reading
+ * 0). Bounded by a 250 ms SO_RCVTIMEO so a silent kernel cannot stall the
+ * caller — invoked from the drain loop for the channel, via
+ * nxp_get_iface_freq. (SSID is NOT obtainable here; see nxp_get_essid.) */
 static int nxp_query_iface(int ifindex, opcd_nl_evt_t *out)
 {
     if (g_nl80211_family_id == 0 || ifindex <= 0) return -1;
@@ -1277,24 +1272,6 @@ static int nxp_get_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel
     if (nxp_query_iface(ifindex, &nev) == 0 && nev.freq_mhz != 0) {
         *freq_mhz = nev.freq_mhz;
         *channel  = nev.channel;
-        return 0;
-    }
-    return -1;
-}
-
-/* Kernel SSID query — fallback for nxp_get_essid when the logger's link.json
- * omits info.ssid. Returns 0 and writes a NUL-terminated essid into buf, -1 if
- * the interface is not associated or the query fails. */
-static int nxp_get_iface_ssid(int ifindex, char *buf, size_t cap)
-{
-    if (buf == NULL || cap == 0) return -1;
-    opcd_nl_evt_t nev;
-    if (nxp_query_iface(ifindex, &nev) == 0 && nev.ssid_present) {
-        /* ssid_present guarantees the parser NUL-terminated nev.ssid (<=32B). */
-        size_t n = strlen(nev.ssid);
-        if (n >= cap) n = cap - 1;
-        memcpy(buf, nev.ssid, n);
-        buf[n] = '\0';
         return 0;
     }
     return -1;
