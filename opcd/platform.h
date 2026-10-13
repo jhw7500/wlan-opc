@@ -17,8 +17,10 @@ extern "C" {
  * Pull API   : handler.c calls these synchronously while building Ack frames
  *              or applying NVM-staged config. All return 0 on success, -errno
  *              on failure. Output buffers are caller-provided; the platform
- *              layer must not allocate. Calls must complete well under the
- *              regulation 1-second response budget.
+ *              layer must not allocate. Calls must be bounded by the invoking
+ *              command's response timer: 1 second for reads and no-NVM
+ *              settings, or 120 seconds for settings acknowledged after NVM
+ *              persistence.
  *
  * Push API   : platform_event_fd() exposes a single edge-or-level fd that
  *              becomes readable when one or more NXP events are queued.
@@ -206,6 +208,12 @@ typedef struct opcd_platform_ops {
      * and 0 with associated=false for "interface exists but not associated". */
     int  (*get_link)(int idx, opcd_platform_link_t *out);
 
+    /* Pure hardware-capability validation. Returns 0, OPC_ERR_RADIO_MODE, or
+     * OPC_ERR_RADIO_BW and MUST have no side effects. handler.c calls this
+     * after protocol validation but before the committed-identical shortcut,
+     * so an old persisted value cannot bypass current board limitations. */
+    uint16_t (*validate_radio_config)(const opc_set_radio_config_req_t *cfg);
+
     /* Mutations. Called from handler.c right after the parsed request passes
      * validation and right before opcd writes NVM. Return 0 means the kernel
      * has accepted the change; any non-zero is mapped by opcd to the dedicated
@@ -217,10 +225,12 @@ typedef struct opcd_platform_ops {
      * The return value carries no field attribution: EVERY apply failure —
      * including a non-frequency one (e.g. a future bandwidth path) — reaches
      * the wire as 0x0050.
-     * Implementations MUST be non-blocking (no mlanutl exec/wait without a
-     * bounded short timeout) — stalling here freezes the opcd main loop and
-     * blows the regulation 1-second response budget. Long-running work must
-     * be queued and reported via an event later. */
+     * Implementations MUST bound external calls and must never wait
+     * indefinitely because this hook runs in the opcd main loop. Response
+     * timers are command-specific: reads and no-NVM settings use 1 second,
+     * while settings acknowledged after NVM persistence use 120 seconds.
+     * Operations that cannot fit their command's timer must be queued and
+     * reported via an event later. */
     int  (*apply_radio_config)(const opc_set_radio_config_req_t *cfg);
     /* iface: 0=eth0, 1=mlan0 — MUST be the same device_ip_iface selector the
      * GetDeviceInfo read path uses (ip_iface.h): a read/apply split across

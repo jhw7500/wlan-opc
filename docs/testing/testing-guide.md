@@ -195,6 +195,437 @@ vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND
 | indication ON 중 `device-info` | `NG 0x0010` |
 | `logout` 후 재로그인 → `device-info` | `OK` (teardown) |
 
+### SetRadioConfig의 NXP mode/BW 적용 범위
+
+NXP backend는 주파수 목록과 mode/BW를 실제 driver helper에 함께 전달한다. mode는
+기존 Wi-Fi CLI와 같은 최대 규격 상한, BW는 20/40/80MHz 상한이다. 따라서 낮은 규격의
+AP에 연결되면 `device-info`가 반환하는 실제 협상 규격/폭은 요청보다 낮을 수 있다.
+mlan1의 ax와 b/g의 5GHz 전용 조합은 변경 전에 0x0013, 현재 적용 helper가 구현하지
+않는 160/80+80/320MHz는 0x0014를 반환한다. 일반 enum을 수용하는 host stub 결과를
+NXP 하드웨어 지원 증거로 사용하지 않는다. Dual `priority_ch`는 실적용 정책 미결이다.
+
+AP 재접속 완료는 설정 ACK 조건이 아니다. supplicant conf와 mode/BW의 부팅 JSON을
+저장한 뒤 연결 결과를 기존 indication으로 관찰한다. 로컬 회귀 테스트는 실제 helper의
+명령/파일/복구 경로 및 NXP의 argv·선검증·process-group timeout을 실행하지만, 실제
+타겟의 성공 시간, 협상 결과, 재부팅 복원을 증명하지 않는다. helper는 Single과 Dual
+모두 인터페이스별 900ms로 제한한다. SetRadioConfig는 저장 완료 후 응답하므로
+Rev1.01 §4.1.3.1의 저장 명령 타이머(120초)를 적용한다. 저장 없는 조회/설정의
+1초 타이머와 구분한다. Dual 두 helper를 450ms씩 제한하던 경로는 실제 첫 호출이
+시간 초과되어 수정했으며, 로컬 회귀에서 각 500ms helper 두 번의 성공을 확인한다.
+타겟 검증 때는 적용 전 설정/드라이버 상태를 보존하고 성공·NG·재부팅을 각각 확인한다.
+일반 실패와 TERM에서 snapshot 복구를 시도하고, hard KILL 이후에는 완전 복구를
+보장하지 않는다. handler의 사후 last-good 재적용도 best-effort다.
+
+2026-10-13에 기존 검증 환경을 정정했다. 임시 복구 타이머에 `OnBootSec=25min`과
+`OnActiveSec=25min`이 함께 들어 있었고, 부팅 후 이미 25분 이상 지난 타겟에서
+타이머를 활성화하자 복구 service가 즉시 실행됐다. 최초 mlan0 `DISCONNECT`는
+그 복구 실행과 겹쳤으며, 제품의 mlan1 기동 문제로 분류했던 해석을 철회한다.
+[systemd 공식 매뉴얼](https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/man/systemd.timer.xml#L167)은
+이미 지난 OnBootSec 만료 시각의 즉시 발화를 설명한다. 이전 예비 시험 기록은 보존하되
+동시 복구가 개입하지 않은 통제 시험으로 사용하지 않는다.
+
+재검증은 `OnActiveSec=25min` 단독과 `AccuracySec=1s`를 사용했다. setup 전후,
+매 관측과 원복 직전에 `LastTriggerUSecMonotonic=0`을 확인하고, 시험 후 전용 복구
+service의 journal 시작 기록이 0건인지 대조했다. 타이머 활성화 기준 시각은 enabled
+timer가 다음 부팅에서 다시 활성화될 때도 새로 계산된다. 복구 service 발화가 복구
+성공 자체를 보장하는 것은 아니므로 파일/드라이버/서비스/네트워크 복구도 별도로 확인했다.
+
+같은 날 cts-wlan에서 mlan1은 비활성 상태로 두고 mlan0를 `jhw_wlan`/5200MHz
+(채널 40)에 연결했다. 독립 UDP 클라이언트로 다음 9조합의 ACK를 측정하고 실제
+`bandcfg`/`htcapinfo`/`vhtcfg`, JSON 저장값 및 `radio.conf` 존재를 대조했다.
+각 조합에서 `ping -I mlan0 -c 2 -W 1 192.168.0.1` 2/2 성공과 `mlanutl getdatarate`의
+TX 규격/폭을 확인했으며, `GetDeviceInfo`의 mode/BW/freq/status가 일치했다.
+
+| Request | Actual TX | OPC mode/BW | ACK (ms) | Ping |
+|---|---|---|---:|---|
+| n / 20 | HT20 | n / 20 | 538.679 | 2/2 |
+| n / 40 | HT20 | n / 20 | 474.368 | 2/2 |
+| n / 80 | HT20 | n / 20 | 480.598 | 2/2 |
+| ac / 20 | VHT20 | ac / 20 | 481.373 | 2/2 |
+| ac / 40 | VHT20 | ac / 20 | 497.184 | 2/2 |
+| ac / 80 | VHT20 | ac / 20 | 473.244 | 2/2 |
+| ax / 20 | VHT20 | ac / 20 | 496.591 | 2/2 |
+| ax / 40 | VHT20 | ac / 20 | 462.666 | 2/2 |
+| ax / 80 | VHT20 | ac / 20 | 478.715 | 2/2 |
+
+이 AP는 VHT IE를 광고하지만 현재 HT operation은 20MHz이고 VHT operation의
+width는 0이며, HE IE는 관측되지 않았다. 따라서 n/ac20 실제 링크와 상한 이하의
+하향 협상 증거이며 실제 ax·40/80MHz 링크 협상을 검증한 것은 아니다.
+
+160/80+80/320MHz 3건은 0x0014, b/g+5GHz 2건과 Dual mlan1 ax 1건은 0x0013으로
+사전 거절됐다. 총 6건에서 mlan0 드라이버 상한과 JSON/WPA/radio.conf 해시가 유지됐다.
+로그인/로그아웃 ACK도 OK였다. 앞선 AC/40 부팅·Dual 세 조합·mlan1 서비스 중단
+복구 자료는 보존하지만 이번 타이머 미발화 재검증을 대체하지 않는다. 이번에는
+재부팅 복원이나 hard KILL·저장장치 장애 복구를 새로 시험하지 않았다.
+
+수정한 타이머 환경에서 mlan1의 SSID/freq만 `jhw_wlan`/5200MHz로 임시 변경하고
+mlan0 `jhw_wlan_`/5180MHz와의 동시 연결을 다시 시도했다. 기존 WPA 인증 필드는
+유지했다. n/20 + n/20의 SetRadioConfig ACK는 OK(1057.843ms)였고 양 인터페이스
+드라이버 상한 및 JSON 저장값이 n/20이었다. 그러나 45초 관측에서 mlan0만 연결되고
+mlan1은 SCANNING에 머물렀다. 후속 Dual mode 조합과 60초 동시 유지 시험은 실행하지
+않았다. 이전 시험에서 mlan0가 먼저 끊겼던 현상을 이 재검증 결과와 혼동하지 않는다.
+
+타겟은 동일 SDIO 카드의 `02DF:914D`/`02DF:914E` 함수이며,
+[NXP 소스의 장치 ID 매핑](https://github.com/nxp-imx/mwifiex/blob/5ad19e194f49ed9447bee7864eb562618ccaf9b1/mlinux/moal_sdio_mmc.c#L99)에
+따르면 88W9098 Function 1/2다. 실제 드라이버/펌웨어 문자열은
+`SD9098----17.92.1.p149.115--MM6X17543.p18-GPL-(FP92)`였다.
+[NXP RN00104 Rev.20.0 §3.1.4](https://www.nxp.com/docs/en/release-note/RN00104.pdf#page=21)는
+CDW STA+STA 조합을 5GHz+2.4GHz로 설명하며,
+[NXP 기술지원의 2026-02-23 답변](https://community.nxp.com/t5/Other-NXP-Products/88W9098-Dual-STA-Concurrency-Issue-2-4GHz-5GHz-Works-5GHz-5GHz/m-p/2321440)은
+PCIe의 5GHz+5GHz 실패를 이 제약으로 설명한다. 현재 SDIO 타겟에서 발생한 모든
+끊김의 원인을 확정한 것은 아니지만, 공식 조합의 성공 시험에는 2.4GHz AP가 필요하다.
+DRCS/DMCS 모듈 설정 변경이나 드라이버 재적재는 이 시험에서 수행하지 않았다.
+
+타이머 수정 후 원래 `cantops` 프로필을 유지한 mlan1으로 허용된 2.4GHz 채널
+1~13의 passive scan-only 요청을 실행했다. 스캔 완료 이벤트와 AP 36개를 관측했으나
+`cantops`, `jhw_wlan`, `jhw_wlan_`은 없었다. mlan1 기동 및 스캔 중 mlan0의 기존
+`jhw_wlan_`/5180MHz 연결은 유지됐다. Dual 성공 시험을 이어가려면 사용할 2.4GHz
+AP의 SSID·채널과 기존 인증 정보 재사용 여부가 필요하다. 주변 다른 AP에 접속하지 않았다.
+
+Dual 두 AP 동시 연결·`priority_ch` 데이터 경로, 실제 ax·40/80MHz 링크, 재부팅 복원과
+장시간/다른 보드 운용은 이번 재검증의 잔여 범위다. 초기 단일 링크 프로그램의
+`Type:`/`BW:` 파싱 오류와 첫 스캔 프로그램의 `phy1` 이름 가정도 예비 기록에 남겼다.
+현재 스캔은 sysfs에서 실제 이름 `mwiphy1`을 얻어 사용한다. 검증 프로그램의 오류를
+제품 실패로 집계하지 않는다. 모든 시도 후 파일 SHA-256·소유권·모드와 드라이버·서비스·
+MAC·IP·IPv4/IPv6 경로를 원복했고, 원래 mlan0 AP에 재연결됐다. mlan1에 생긴
+IPv6 multicast 경로는 기존 상태에 없었음을 대조한 뒤 정확히 그 경로만 정리했다.
+이번 여섯 전용 디렉터리의 자격증명 백업·원시 trace·임시 파일과 복구 타이머를 제거했고
+primary supplicant에 남은 tracer가 없음을 확인했다. 외부 Release는 보류 상태다.
+
+2026-10-13 후속 시험은 사용자 결정에 따라 Single에 집중했다. 원래 AP
+`jhw_wlan_`/5180MHz에서 ac/40 저장 후 재부팅 1회로 boot ID 변경과 JSON/radio.conf
+해시 유지, OPCd를 시작하기 전 드라이버 상한 및 무선 ping을 확인했다. 부팅 시험의
+후보는 신호 수정 전 `66fcf9b…`이며 기존 `wifi_init.sh` 부팅 경로는 변경하지 않았다.
+
+중단 시험에서 OPCd의 `open_signalfd()`가 차단한 SIGINT/SIGTERM 마스크를 helper가
+상속하여 TERM cleanup을 실행하지 못하는 결함을 확인했다. `run_argv_bounded()`의
+자식 exec 전에 마스크를 초기화했다. 회귀 테스트는 실제 OPCd와 같은 부모 마스크에서
+수정 전 실패, 수정 후 TERM 정리·자식 회수·부모 마스크 보존 및 TERM 무시 시 KILL을
+검증했다. 전체 `make -C wlan-opc check`와 ARM64 NXP 빌드가 통과했다.
+
+수정 후보 `0ce37bc8…`의 기준은 Single ac/40·채널 36/40이었다. n/20·채널 40만
+요청하여 드라이버와 WPA 주파수 목록을 함께 변경하고 reconfigure에서 one-shot 오류를
+주입했다. 각 사례의 JSON/WPA/radio.conf 해시와 드라이버 값은 기준과 일치했고 원래
+AP 연결 및 `ping -I mlan0` 2/2 성공을 확인했다.
+
+| Injection | ACK | ACK (ms) | TERM | KILL | State/data recovery |
+|---|---|---:|---|---|---|
+| FAIL once | NG / 0x0050 | 761.192 | yes | no | PASS |
+| Delay, default TERM | NG / 0x0050 | 882.045 | yes | no | PASS |
+| Delay, ignore TERM | NG / 0x0050 | 902.307 | yes | yes | PASS |
+
+helper의 `/proc/self/status` SIGTERM 차단 비트는 0, OPCd 부모의 차단 비트는 유지됐다.
+TERM 지연 시험은 helper trap 정리가 관측됐고, TERM 무시 시험은 수신 기록과 900ms
+KILL을 함께 확인했다. FAIL 사례도 TERM 시각에 도달했으므로 순수 즉시 오류 경로나
+모든 helper trap 실행을 입증한 것으로 취급하지 않는다. KILL 이후 남은 transaction
+backup은 일반 제품 동작이 자동 삭제한 결과가 아니다. 원복 후 검증 도구가 기록된
+inode/해시와 활성 프로세스 부재를 확인해 새 파일만 제거했다.
+
+예비 시험의 잘못된 wpa_cli 경로, Python 중계 비용, 연속 기준 요청 및 내부 로그 표식
+판정 오류와 신호 기록 경합은 원본 기록에 남겼다. 신호 마스크 결함의 수정 전/후 결과를
+구분한다. 모든 시험에서 복구 타이머 미발화를 확인했고, 최종 점검으로 원본 파일 권한·
+소유권·SHA-256, 드라이버·MAC·IP·IPv4/IPv6 경로 및 서비스 활성/enable 상태를 대조했다.
+전용 원격 백업 7개와 타이머·override를 제거했다. 증거는 부모 저장소의
+`.omx/plans/opcd-single-recovery-20261013/qa-summary.json`에 있다.
+
+Dual/priority_ch는 이번 0.7.0의 후속 범위다. 최종 설치 패키지의 설치·업그레이드·재부팅,
+실제 ax·40/80MHz 링크, 저장장치 장애와 다른 보드/AP·장시간 운용은 이 시험에서
+검증하지 않았다. 강제 KILL 후 완전 복구는 보장하지 않으며 외부 Release는 보류한다.
+
+### Single 고장 부위별 통지·복구 추가 검증 (2026-10-13)
+
+사용자 방침은 자원 사용률 폭주에서는 FaultDetect만 송신하고, 실제 운용 불가 장애에서
+ResetNotice 송신을 시도한 뒤 기존 정책으로 리셋하는 것이다. 아래 표는 **검증 계획**이다.
+R1 및 통제된 R2의 실행 결과는 뒤의 실기 결과에 별도로 기록하며, 표의 모든 고장 유형이
+통과했다는 뜻이 아니다. 무선 장애만으로 유선 통지도 불가능하다고 판정하지 않는다.
+
+현재 제어 UDP 소켓은 wildcard bind(`opcd.c::open_udp_socket`)이고 ResetNotice는
+일반 `sendto`(`indication.c::send_indication_frame`)로 기존 수신 IP/port에 보낸다.
+따라서 송신 경로는 커널 라우팅에 달려 있다. 유선으로 직접 접근 가능한 수신기를 두고
+`ip route get <recipient-ip>`의 dev/src 및 정책 라우팅을 확인한 뒤, 고장 전/후의
+실제 수신 패킷과 타겟 송신 기록을 대조한다. 수신기가 무선망 뒤에만 있거나 route/src가
+실패한 무선을 계속 가리키면, eth0 링크가 살아 있어도 대체 경로가 마련된 것은 아니다.
+현재 코드에 별도의 인터페이스 자동 전환이나 보조 수신기 송신 기능은 없다.
+
+| Case | Fault | Expected notification | Recovery/check |
+|---|---|---|---|
+| R1 | AP disconnect only | WlanStatusChange when enabled | Reconnect; no new immediate board-reset rule |
+| R2 | WLAN firmware/driver unusable | ResetNotice via reachable eth0 when OPCd/kernel work | Existing recovery policy; reset only on escalation |
+| R3 | Supplicant or monitoring process exits | Verify enabled event delivery; no assumed reset notice | Verify existing service restart and link restoration |
+| R4 | OPCd exits | No pre-reset notice from the dead process | Verify service restart and receiver reconfiguration |
+| R5 | OPCd stays alive but hangs | No notice guarantee | Main-loop heartbeat; 30 s watchdog; restart OPCd only |
+| R6 | CPU/Disk/Network load congestion | FaultDetect entry when enabled | No automatic board reset from congestion alone |
+| R7 | Reset cause/log storage write fails | Verify cause handling and bounded notification attempt | Recovery must not depend on successful log/cause writes |
+| R8 | Kernel fully hangs or all receiver paths fail | No pre-reset notice guarantee | Verify watchdog configuration/recovery separately |
+
+`opcd.service`는 초기화 완료를 `READY=1`로 알린 뒤 메인 루프의 1초 timerfd에서
+`WATCHDOG=1`을 보낸다. `WatchdogSec=30s`가 만료되면 SIGKILL로 OPCd를 종료하고
+`Restart=always`/`RestartSec=2`로 서비스만 다시 시작한다. 별도 저장 worker는
+heartbeat를 보내지 않으며 보드 리셋 조건을 연결하지 않았다. 시작/종료 제한은 각각
+30초/10초다. R4/R5에서는 재기동 뒤 메모리 내 로그인/Indication 설정이 유지된다고
+가정하지 않고 수신기 재설정 절차를 확인한다. R7은 일반 사용률 폭주와 별개인 저장 실패 경로다.
+
+우선 검증은 R1/R2의 유선 수신 경로와 정상 종료 중 ResetNotice 송신 순서다. 이어
+checker/fw_watch 서비스 종료에 reboot policy 자식이 함께 종료되어 강제 리셋 fallback이
+사라지는지, OPCd보다 supplicant/네트워크가 먼저 종료되는지 확인한다. 서비스 종료 순서와
+강제 리셋 fallback의 생존성은 기존 원인 파일·통지 판정 단위 테스트만으로 입증하지 않는다.
+후속 시험에서 확인한 서비스 종료 중 생존성과 실제 강제 리셋은 아래에서 구분한다.
+
+#### R1/R2 유선 통지 실기 결과 (2026-10-13)
+
+cts-wlan의 분리 관리 IP 구성(`eth0_ip`)에서 시험 후보 `09bbc0ec…`를 일시 기동했다.
+타겟 수신기 경로는 `eth0`/`192.168.1.1`, 유선 수신기는 `192.168.1.2:50791`이었다.
+OPC 로그인·Indication 설정은 자격증명 반출 없이 타겟 loopback에서 수행하고,
+ResetNotice의 실제 UDP 수신은 외부 유선 호스트에서 관측했다. 타겟의 저장 비밀번호
+파일은 없었으며 공개 제품 기본값을 타겟 내부에서만 사용했다. Login 및 SetIndication은
+OK였고, 통지 활성 중 GetDeviceInfo의 NG/0x0010은 현재 로그인·통지 규약의 정상 응답이다.
+
+| Case | Controlled condition | Observed result |
+|---|---|---|
+| R1 | AP disconnected; mlan0 still administratively UP | Wired WlanStatusChange + KeepAlive; unchanged boot ID; original AP reconnected |
+| R2 | mlan0 administratively DOWN; supplicant INTERFACE_DISABLED | Wired KeepAlive; one 68-byte ResetNotice with cause 0x12 before graceful reboot |
+| Restore | Reboot completed | Original files/driver/MAC/IP/routes/services restored; radio ping 2/2 |
+
+R2에서는 실제 펌웨어 크래시나 드라이버 wedge를 유발하지 않았다. 무선 인터페이스를
+내린 상태에서 기존 `wlan_reboot_policy.sh`를 호출하고, `wlan_fw_watch`라는 정책 source를
+수동 지정했다. 따라서 무선 중단 중 유선 통지 경로·원인 파일 연동·정상 재부팅은 검증했지만
+실제 고장 자동 검출이나 강제 reboot/sysrq fallback까지 통과한 것으로 확대하지 않는다.
+
+수신기는 158프레임의 송신원·version/type·선언 길이를 대조했고, ResetNotice는 seq 157,
+Length 60, 전체 68바이트, cause `0x00000012`로 1회 수신했다. boot ID는
+`4667e1c0-fbac-4fab-97ff-7c27e7510f86`에서 `af6f7263-e589-4291-8137-d92eb3d6f4e2`로
+변경됐다. 타겟과 수신기의 wall clock은 달랐으므로 수신기 monotonic 기록과 boot ID를
+기준으로 구분한다. 이전 부팅의 표준 journal은 persistent 저장이 없어 조회 결과가 비었으며,
+전체 종료 순서를 journal로 독립 입증한 것은 아니다.
+
+원복 보고서와 별도의 fresh audit에서 파일 SHA-256·소유권·권한, 양 인터페이스 드라이버
+상한, MAC·IP·경로, 기록된 모든 서비스의 enabled/active 상태가 기준과 일치했다.
+원본 OPCd(`803f28e5…`)는 다시 inactive이고 `jhw_wlan_`/5180MHz에 재연결하여
+`ping -I mlan0` 2/2를 확인했다. 재부팅·MAC 원복 구간의 SSH 시간 초과는 재연결 후
+최종 상태로 대조했다. 복구 타이머의 LastTrigger는 0이었다.
+
+원본 증거는 부모 저장소 `.omx/plans/opcd-reset-notice-20261013-v6jp9i/qa-summary.json`에
+있다. 수신 파서 경계 테스트 7건과 ARM64 NXP 빌드가 통과했다. 이어 수행한 서비스 종료 중
+fallback 생존성과 OPCd 재시작 시험은 아래에 기록한다. R3/R6/R7/R8, 실제 펌웨어 고장,
+다른 양산 IP 프로파일 및 최종 설치 패키지는 이 시험의 통과 범위가 아니다.
+
+#### 재부팅 fallback 생존 / R4·R5 OPCd 재시작 결과 (2026-10-13)
+
+타겟의 systemd 254에서 기존 정책의 `do_reboot`·로그·sync·journal 경계만
+시험용 표식/no-op으로 바꾼 사본을 실행했다. 정책 인자 처리·제한·lock·원인 파일은
+그대로 사용하고 저장 경로만 전용 시험 디렉터리로 격리했다. 호출 서비스가 정지될 때
+기존 자식도 종료돼 다음 단계가 실행되지 않는 결함을 재현했다. 수정본은 전체 정책을
+`DefaultDependencies=no`인 독립 transient service에서 실행하므로 호출 서비스가
+정지돼도 다음 두 표식이 순서대로 실행됐다. 재부팅 예산은 한 번만 적용됐고, 최종 실패
+127 이후 원인 파일과 lock도 정리됐다. 실행기 시작 실패 시 호출 서비스 안에서 재부팅을
+대신 실행하지 않는다. shutdown 기본 의존성과 transient service의 독립 실행은
+[systemd v254 service](https://raw.githubusercontent.com/systemd/systemd/v254/man/systemd.service.xml)와
+[systemd-run](https://raw.githubusercontent.com/systemd/systemd/v254/man/systemd-run.xml)의 계약을 따른다.
+실제 `reboot -f`/sysrq 쓰기나 최종 shutdown의 전체 프로세스 종료는 이 시험 범위가 아니다.
+
+OPCd 시험은 실제 타겟의 systemd와 제품 unit 설정을 사용하되 별도 ARM64 **stub**
+후보(`d9c4a8ff…`)·UDP 55173/loopback 55174·전용 데이터/임시 영역에서 수행했다.
+실제 NXP 무선 드라이버 장애를 주입하지 않았다. watchdog은 실제 OPCd 메인 루프에서
+송신되며 별도 worker/thread heartbeat로 정지를 감추지 않는다.
+
+| Check | Result |
+|---|---|
+| Caller service stops | Independent policy reaches forced/sysrq marker stages |
+| Healthy OPCd for 32 s | Same PID; zero restarts; KeepAlive received |
+| R4: QA PID receives SIGKILL | New PID and UDP response in 2.582 s |
+| R5: QA PID receives SIGSTOP | Stopped state and UDP timeout; watchdog restart in 31.233 s |
+| Session after each restart | Login required; receiver silent until reconfigured; KeepAlive resumes |
+| Final restoration | Original files/services/network/AP/boot ID match; wired and WLAN ping 2/2 |
+
+R5 원인은 SIGSTOP 직전 journal cursor 이후 PID 1의 구체적인 watchdog timeout과
+`UNIT_RESULT=watchdog`로 확인했다. 재시작한 OPCd는 이전 로그인/Indication 수신기
+설정을 기억하지 않으므로 고객 클라이언트가 재로그인·SetIndicationConfig를 다시 해야 한다.
+OPCd 자체가 멈추거나 SIGKILL되는 경우에는 사전 ResetNotice를 보장하지 않는다.
+
+첫 시험에서는 `TemporaryFileSystem=/dev/shm`과 `ReadWritePaths=/dev/shm`을 함께
+지정해 호스트 임시 영역이 노출됐고 stub NG 응답 snapshot이 남아 원복 검사가 실패했다.
+별도 harmless mount probe로 원인을 확인하고 중복 쓰기 경로를 제거했다. 이후 시험은
+ExecStartPre와 실제 daemon mount의 device/inode/config hash 검사로 격리를 확인했고,
+호스트 snapshot 없이 완료됐다. 첫 결과와 검증된 시험 파일의 정리 증거는 보존했다.
+시험 중 유선 SSH가 일시 끊겨 컨트롤러가 180초 제한에 도달했으나, 복구 후 같은 boot ID에서
+이미 완료된 두 번째 결과와 정리 상태를 수집했다. 연결 중단의 원인은 확정하지 않았다.
+
+정책/호출자 관련 pytest 42건과 소스 manifest 2건, 단독 전체 `make -C wlan-opc check`,
+ARM64 NXP 빌드가 통과했다. 로컬 staging의 NXP 바이너리와 unit도 함께 갱신했다.
+타겟의 원본 OPCd 바이너리와 unit은 복원된 상태이며 새 제품 watchdog을 상시 배포한 것은 아니다.
+증거는 부모 저장소 `.omx/plans/opcd-recovery-watchdog-20261013-0s04gpcz/`에 있다.
+R6/R7의 후속 결과는 아래에 기록한다. 최종 NXP 설치 패키지 운용·R3/R8·실제 강제 리셋은
+남은 범위다.
+
+#### R6 FaultDetect / R7 저장·로그 실패 추가 결과 (2026-10-13)
+
+R6은 같은 타겟에서 ARM64 stub 후보 `d9c4a8ff…`와 제품 unit을 격리해 실행했다.
+전용 UDP 55175/loopback 55176, OPC 데이터와 `/dev/shm`, `/proc/stat`·`/proc/diskstats`·
+`/sys/class/net/eth0` 입력을 분리하고 시작 전·실제 PID의 mount device/inode를 확인했다.
+호스트 CPU·디스크·망에 실제 부하를 걸지 않고 누적 카운터를 주입했다. 진입 80%, 해제
+70%, 측정/통지 주기 각 1초이며 FaultDetect·ResetNotice·KeepAlive를 모두 설정했다.
+
+| Phase | FaultDetect count | Resource IDs | ResetNotice |
+|---|---:|---|---:|
+| Normal | 0 | - | 0 |
+| Hot entry | 3 | 1, 3, 4 | 0 |
+| Hot persists | 0 | - | 0 |
+| Clear | 0 | - | 0 |
+| Hot reentry | 3 | 1, 3, 4 | 0 |
+
+CPU(id 1)는 94%, Disk I/O(id 3)와 Network(id 4)는 100%로 통지됐다. 두 자원의 입력은
+210% 상당이며 100으로 제한된다. 각 구간 GetBasicInfo 응답, 동일 PID·재시작 0회·동일
+boot ID를 확인했다. 수신 프레임은 실제 길이·declared length·자원 ID·백분율 범위를
+검사했다. 이 결과는 공통 producer와 실제 ARM64 UDP 통지 경로의 결정적 시험이며,
+실제 자원 포화나 NXP 드라이버 고장을 주입한 결과는 아니다.
+
+R7은 최종 정책 `da2fa2e5…` 사본을 타겟 Bash/GNU timeout 9.4에서 18개 시나리오로
+실행했다. 인자 처리·거부·예산·원인 파일·종료 코드 흐름을 유지하고 경로와 외부 명령만
+전용 시험 영역으로 바꿨다. `--executor`로 실행하여 독립 service handoff는 앞 시험의
+검증에 의존한다. reboot/sysrq는 표식·파일 쓰기, logger/sync/snapshot과 설정 파일은
+전용 fixture이며 생성한 스크립트에 실제 변경 경로가 남으면 실행 전에 거부한다.
+
+| Case | Result | Elapsed (s) |
+|---|---|---:|
+| Logger ignores TERM | Reboot marker reached | 2.148 |
+| Sync ignores TERM | Reboot marker reached | 2.155 |
+| Snapshot ignores TERM | Reboot marker reached | 10.145 |
+| State / cause return ENOSPC | Reboot marker reached | 0.148 |
+| State stat/open/read blocks | Reboot marker reached | 2.119 |
+| Full stderr plus logger error | Reboot marker reached | 2.144 |
+| Cause cleanup ignores TERM | Original rc 127 preserved | 1.167 |
+| MFG read blocks | Refused with rc 13 | 1.036 |
+| Private real escalation | Reboot, reboot -f, sysrq 1/b; rc 127 | 0.223 |
+
+추가로 logger/sync 오류, cause FIFO, 정상/MFG/잘못된 제조 모드, `--force` 예외,
+uptime 거부(10)와 예산 거부(11)를 확인했다. 정상 MFG 거부는 12이며 판정 실패/시간 초과는
+스크립트 종료 코드 13으로 안전하게 거부한다. 기존 `--force`, 과열, `wifi_logger_temp`,
+`wifi_init` 예외는 제조 모드 읽기 전에 통과한다. 저장 예산 stat/open/read·쓰기와 원인
+파일 쓰기/삭제, logger/kmsg/stderr는 각 1초, snapshot은 10초, sync는 2초 제한이다.
+
+처음에는 `timeout -k 1`에서 wrapper가 TERM으로 먼저 끝나면 TERM을 무시한 손자가
+남는 결함이 마지막 정리 검사에서 발견됐다. 실제 private jq와 sleep의 PID·그룹·session·
+스크립트 해시를 확인해 정리하고 I/O helper를 `timeout -s KILL`로 수정했다. 첫 제한 시간에
+별도 프로세스 그룹을 종료하도록 한 동작은
+[GNU coreutils v9.4 timeout 소스](https://raw.githubusercontent.com/coreutils/coreutils/v9.4/src/timeout.c)를
+확인했다. 회귀는 변경 전 실패·변경 후 통과했고 최종 실기는 잔존 시험 프로세스가 없었다.
+초기 timer의 MainPID 검사 오류와 시험 경로 문자열 오탐 결과도 보존했으며 최종 정리 상태는
+별도 fresh audit으로 확인했다.
+
+이 초기 시험의 상태 파일 읽기 실패/손상 시 예산 기본값 처리는 릴리스 검토에서 수정했다.
+일반 자동 요청은 예산 디렉터리 생성, 기존 기록 파싱/읽기, 새 횟수 영속화가 실패하거나
+시간 초과하면 종료 코드 14로 거부하며 원인 파일과 재부팅을 실행하지 않는다. 기록이 없으면
+최초 요청으로 초기화한다. 새 기록은 같은 디렉터리의 임시 파일을 sync한 뒤 rename하고
+디렉터리도 sync한다. `--force`는 기존 긴급 복구 예외를 유지한다. 로컬 회귀에서 malformed/
+빈 기록, 읽기 stall, 실제 EACCES와 sync stall을 거부하고 중단된 쓰기가 이전 기록을 보존함을
+확인했다. 이 최종 수정은 보드의 실제 재부팅 시험에 적용하지 않았다.
+원인 쓰기/정리 실패 시 이전 유효 원인이 남을
+수 있으며, 파일이 없거나 잘못된 경우에만 OPCd가 SYSTEM(0x0002)으로 처리한다.
+SIGKILL로도 끝나지 않는 커널 D state·고장 난 저장장치·커널 완전 정지와 실제 강제 리셋은
+이 시험에 포함하지 않았다. 일반 제조 모드 판정 실패는 승인 전 안전 거부 분기다.
+
+최종 관련 pytest 98건, 수신/fixture 경계 10건, native fault_probe·handler·reset_cause가
+통과했다. 타겟 원본 파일·credential 메타데이터·MAC/IP/경로/AP·service enable/active·
+boot ID를 대조하고 유선/무선 ping 각각 2/2 및 모든 시험 프로세스·unit·폴더 정리를 확인했다.
+제품 변경은 로컬 staging에 있으며 타겟 원본 정책/OPCd를 상시 갱신하지 않았다.
+증거는 부모 저장소 `.omx/plans/opcd-fault-storage-20261013-hfkzjoyo/qa-summary.json`에 있다.
+외부 Release는 보류하며 R3/R8와 패키지 후보의 후속 결과는 아래에 기록한다.
+최종 설치 경로, 실제 자원 포화·강제 리셋은 남은 범위다.
+
+#### R3 서비스 재시작 / R8 Ethernet 경로 복구 결과 (2026-10-13)
+
+이번 시험은 Single 타겟에서 새 0.7.0 DEB를 추출한 ARM64 **NXP** OPCd
+`c969f0d8…`와 제품 unit을 전용 서비스·UDP 55181/55182(R3), 55183/55184(R8)에
+격리해 실행했다. `/usr/local/opc/etc`와 `/dev/shm`의 실제 daemon mount를 검사했고,
+타겟에서 생성한 임의 시험 자격증명으로 로그인했다. 원본 OPC 비밀번호를 반출하지 않았다.
+타겟의 상시 OPCd와 checker/fw_watch/policy 파일은 새 패키지로 설치하지 않았다.
+따라서 아래 R3은 **현재 설치된 서비스**의 재시작과 새 NXP OPCd의 응답을 검증한 결과다.
+
+| R3 service | SIGKILL restart (s) | AP check after restart (s) | KeepAlive count |
+|---|---:|---:|---:|
+| wpa_supplicant@mlan0 | 3.395 | 0.531 | 2 |
+| wifi_checker@mlan0 | 5.196 | 0.017 | 3 |
+| wlan_fw_watch | 5.196 | 0.017 | 3 |
+
+각 서비스의 실제 MainPID를 한 번씩 SIGKILL했고 새 PID·NRestarts 증가를 확인했다.
+fw_watch는 재시작 후 초기 60초 대기가 끝나 5초 감시 sleep으로 들어가기까지 추가
+60.279초를 관측했다. 원래 `jhw_wlan_`/5180MHz의 COMPLETED·AP ping과 NXP
+GetBasicInfo 응답이 돌아왔고, QA OPCd 재시작·ResetNotice·보드 재부팅은 없었다.
+Period 0의 이벤트 수집은 비었으며, 같은 세션을 Period 1로 바꿔 생존성을 확인한 구간에
+위 KeepAlive와 supplicant의 WlanStatusChange 2건을 받았다. supplicant 종료는 드라이버
+연결을 그대로 남길 수 있으므로 AP 주도 ApDisconnect를 발생시킨 시험은 아니다.
+
+R8에서는 유선 외부 수신기 `192.168.1.2:55183`을 준비하고 무선 SSH로 eth0를 약
+7초 DOWN했다. DOWN 직전 독립 UP 복구 타이머의 활성 상태와 잔여 시간을 확인했다.
+수신기로의 route는 ENETUNREACH가 됐지만 무선 관리와 loopback GetBasicInfo 10회는
+응답했다. DOWN 전 외부 KeepAlive 4건을 받았고 DOWN/UP 뒤에는 추가 수신이 없었다.
+
+| R8 check | Result |
+|---|---|
+| Ethernet DOWN: wired recipient route | ENETUNREACH |
+| Ethernet DOWN: local OPCd queries | 10 ACKs; same QA PID |
+| Ethernet UP: carrier / IP / routes | Returned |
+| Ethernet UP: data path within 20 s | FAIL; ARP / ping / wired SSH did not recover |
+| PHY renegotiation with ethtool -r | FAIL; data path remained unavailable |
+| Graceful recovery reboot | Wired data path returned with new boot MAC |
+| Restore pre-test runtime MAC while UP | FAIL; wired data path failed again |
+| Undo MAC change to boot MAC | Bidirectional wired ping returned |
+
+첫 실행기의 `target_preserved=true`는 파일·망 설정 문자열의 비교일 뿐 실제 도달성 성공이
+아니다. 해당 실패 결과와 종료 코드는 보존했다. 이후 관측용 `tcpdump -p`가 동작하는
+동안 유선 패킷이 오갔으나 종료 뒤 장애가 다시 나타났으며, 이 상관관계의 원인은 미확정이다.
+추가 정상 재부팅은 수동 복구이며 Ethernet 자동 복구 통과로 처리하지 않는다.
+
+재부팅 전 원본 파일·credential 메타데이터·서비스·IP/경로/AP를 대조하고 모든 R3/R8
+시험 unit·timer·폴더를 제거했다. 정상 재부팅 1회로 boot ID가
+`af6f7263-e589-4291-8137-d92eb3d6f4e2`에서 `e2d706a9-9a05-499a-be4a-a83ff72e8e13`로
+바뀌었다. eth0의 부팅 MAC은 `b2:fc:2b:23:63:6b`였고, 원래 런타임 MAC
+`ee:4f:f8:cd:83:d6`으로 복원하면 유선 통신이 실패하여 부팅 MAC으로 되돌렸다.
+영구 MAC 설정이나 출하 IP 설정은 변경하지 않았다. 최종 운영 복구 판정과 원래 런타임
+MAC의 차이는 `operational-recovery-summary.json`에 따로 기록한다.
+
+읽기 전용 sibling 드라이버 소스 `wlan-driver-v2/mlinux/moal_bridge.c`에는 초기
+peer_mac 캐시만 있고 NETDEV_CHANGEADDR 갱신이 없다. 캐시와 다른 MAC으로 받은
+ARP REPLY는 eth0 소유 IP를 향해도 WLAN 전달 분기로 갈 수 있어 MAC 변경 후 장애의
+후보다. 현재 부팅 journal의 masked peer_mac은 부팅 MAC과 일치하는 부분을 보이며
+`eth2wlan=rx_handler`를 확인했다. 설치 모듈 `543.p18`/srcversion
+`69D92F25B44159057AE055A`와 해당 소스의 동일성은 확인하지 않았다. 최초 DOWN/UP은
+MAC이 같았으므로 이 후보만으로 최초 장애나 tcpdump 효과까지 설명하지 않는다.
+
+별도 HW watchdog은 `watchdog.service`가 `/dev/watchdog`을 열고 있으며 부팅 로그에서
+실제 timeout 30초 설정을 확인했다. PID 1의 RuntimeWatchdog는 0이다. 커널의
+CONFIG_WATCHDOG_NOWAYOUT=y만으로 해당 vendor driver의 runtime nowayout을
+확정하지 않았다. 장치 open/ioctl·feeder 정지·커널 정지·강제 리셋은 수행하지 않았으며,
+실제 HW expiry 시험은 별도 승인과 물리 복구 수단이 필요한 후속 범위다.
+
+#### 진단 timeout 보완 / 최종 패키지 후보 결과 (2026-10-13)
+
+진단 helper의 TERM 처리 중 wrapper만 종료되고 손자가 남는 결함을 로컬에서 재현했다.
+`setsid`로 별도 session을 만들고 TERM trap에서 그 그룹을 KILL하도록 수정했으며,
+비동기 실행에서 사라지는 stdin은 전용 FD로 전달한다. 정상 종료 7/137과 timeout 124를
+구분한다. 실제 checker/fw_watch를 실행하는 회귀 4건으로 snapshot 10초·sync 2초
+제한과 후속 복구 정책 진입을 확인했고 helper 회귀 15건도 통과했다. 모든 진단 I/O나
+SIGKILL로 끝나지 않는 D state까지 제한한 것은 아니다. 타겟의 timeout 9.4와
+util-linux setsid/flock 2.39.2를 확인했으나 최소 외부 이미지의 도구 공급은 별도 확인한다.
+
+격리된 전체 소스 사본에서 `./build.sh --release`를 실행하여 logger 823건, scripts 349건,
+pcap 20건, FTP QA 147건의 pytest **1,339건과 subtest 144건**, shell/schema/native
+검사·ARM64 NXP 컴파일·DEB gate·source TAR fixture/실물 gate가 모두 통과했다.
+소스 TAR 안전 검사에는 manifest가 이미 허용한 FTP 문서·QA의 정확한 경로 5개를 추가했다.
+처음 실패한 git metadata 누락·sandbox loopback 거부·소스 경로 gate 결과도 보존했다.
+
+| Candidate | Version / arch | SHA-256 |
+|---|---|---|
+| wlan-proc-0.7.0.deb | 0.7.0 / arm64 | 8532bfcd76761bb45839cde41f6c575e86cab0ffa2f86a3f60501535b742066c |
+| wlan-package.tar | source | af38ac7deb7d1718790c256286cc3a54b46e3935634bd44ad8c0ac0956adb3b6 |
+
+DEB를 설치 없이 추출하여 버전·아키텍처·AArch64 ELF·NXP symbol과 주요 payload의
+바이트·권한을 검증했다. 타겟에서 새 monitor/policy를 상시 설치한 결과나 설치·업그레이드·
+postinst의 전체 검증은 아니다. Yocto/BitBake 태스크는 실행하지 않았다. 후보 아카이브와
+원본 증거는 부모 저장소 `.omx/plans/opcd-r3-r8-package-20261013-omaneagb/`에 보존한다.
+외부 Release는 보류하며 Ethernet 복구 결함 분석·설치 경로·실제 HW watchdog expiry가
+남은 검증 범위다.
+
 ### `--dump` vs `--hex` (출력 모드)
 - `--dump` — 프레임 전체 raw hexdump(16B/줄, 필드 경계 없음). TX/RX/listen 수신(IND)에 적용.
 - `--hex` — **필드 단위 분해**: `라벨 @절대오프셋 (크기): raw hex = 디코딩값`. `basic-info`/`device-info` ack와 `listen` 수신 indication에 적용. 켜면 그 명령의 디코드 출력을 대체하며, `--dump`와 독립(둘 다 켜면 둘 다 출력).
@@ -226,7 +657,13 @@ $VHL --hex device-info       # 헤더 5필드(@000~) + body 전 필드(@064~) �
 | 0x0000_0030 | wifi_init 실패 | wlan_emergency_reboot |
 | 0x0000_0040 | 공장 초기화 후 재부팅 | factory_reset |
 
-동작: 모든 자율 재부팅은 `wlan_reboot_policy.sh`/`systemctl reboot`로 수렴하고, opcd.service는 `After=network-online.target`이라 종료 시 네트워크보다 먼저 SIGTERM을 받는다. opcd는 SIGTERM에서 `systemctl is-system-running`(3 s 데드라인 — 종료 중 첫 응답이 실측 1.1 s, 운전 중 22 ms)이 `stopping`이면 `/run/opc/reset_cause`(한 줄, `0x12` 또는 10진)를 읽어 그 값으로, 없으면 0x0002로 ResetNotice를 1회 보내고 종료한다. `systemctl stop opcd`(running)나 판정 불가(타임아웃)는 통지하지 않는다. HW watchdog 타임아웃·sysrq 강제 리셋은 원리상 통지 불가. **부모 저장소 후속**: `wlan_reboot_policy.sh`가 재부팅 직전 `--source/--reason`을 위 값으로 매핑해 `/run/opc/reset_cause`에 쓰면 원인이 세분화된다(없어도 동작).
+동작: WLAN 재부팅 정책은 승인된 요청의 `--source/--reason`을 Reset Cause로 기록한 뒤
+재부팅을 시도한다. opcd는 SIGTERM에서 `systemctl is-system-running`(3초 제한)이
+`stopping`이면 `/run/opc/reset_cause`를 읽고, 파일이 없으면 0x0002로 ResetNotice를
+한 번 시도한다. `After=network-online.target`만으로 supplicant/라우팅의 생존이나
+상대 수신을 보장하지 않는다. 통지 설정과 실제 송신 경로가 살아 있어야 한다.
+단순 `systemctl stop opcd`나 종료 상태 판정 불가에서는 통지하지 않는다.
+HW watchdog·강제 리셋·커널 완전 정지에서는 사전 통지를 보장할 수 없다.
 
 실기 확인: `vhlctl set-indication --bits 0x20`(RESET_NOTICE) 후 리스너를 영속 파일로 캡처(`vhlctl --hex listen --bind 127.0.0.1:50699 > /root/reset_notice.log`)한 채 `systemctl reboot` → 재부팅 후 로그에 `reset_cause` 프레임 확인. 음성 대조군: `systemctl stop`(또는 `kill -TERM`)만으로는 프레임이 없어야 한다. 호스트는 `opcd/tests/test_reset_cause.c`(가짜 systemctl 스크립트·타임아웃·파일 파싱·판정).
 

@@ -5,8 +5,13 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart=/usr/local/opc/bin/opcd
+WatchdogSec=30s
+WatchdogSignal=SIGKILL
+TimeoutStartSec=30s
+TimeoutStopSec=10s
 Restart=always
 RestartSec=2
 

@@ -148,9 +148,11 @@
                                                        * OTHER management interface's live subnet — the
                                                        * connected-route conflict would sever the
                                                        * management plane (#90/G1). Command-scoped alias
-                                                       * of the 0x0050 in-house extension (D9 precedent:
-                                                       * the spec defines no "refused by current network
-                                                       * state" cause; 발주처 confirmation pending, #35). */
+                                                       * of the 0x0050 in-house extension. The spec defines
+                                                       * no "refused by current network state" cause.
+                                                       * User decision 2026-10-13: use this definition and
+                                                       * deliver a supplemental spec later; no vendor
+                                                       * confirmation prerequisite for this release. */
 #define OPC_ERR_RADIO_APPLY                   0x0050  /* SetRadioConfig: the platform refused / failed to
                                                        * apply an otherwise-valid request (runtime fault,
                                                        * NOT an input error — the frequency/CH/mode/bw
@@ -159,11 +161,11 @@
                                                        * a VHL operator is never told to "fix the
                                                        * frequency" for a runtime fault. On this NG the
                                                        * handler best-effort re-applies the last-good
-                                                       * config, so a partial apply leaves no net change
-                                                       * (D9, re-decided 2026-06-16).
-                                                       * FIXME(#35): wire value pending 발주처 confirmation
-                                                       * — 0x0050 is the proposal (pre-PR#34 firmware used
-                                                       * it); update when formally confirmed. */
+                                                       * config to recover a partial apply (best effort;
+                                                       * D9, re-decided 2026-06-16).
+                                                       * User decision 2026-10-13: retain in-house 0x0050
+                                                       * and document it in a supplemental spec later.
+                                                       * This is not a vendor-confirmed wire value. */
 #define OPC_ERR_PW_NUL                        0x0012  /* Login §3.3.1 / SetPassword(old) §3.3.5:
                                                        * password field not NUL-terminated */
 #define OPC_ERR_NEW_PW_NUL                    0x0014  /* SetPassword: new password not NUL-terminated */

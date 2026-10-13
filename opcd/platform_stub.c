@@ -192,6 +192,16 @@ static int s_apply_radio_fail_once = 0;
 static int s_apply_radio_calls = 0;
 static int s_apply_radio_last_w1_freq = 0;
 static int s_apply_radio_last_station = 0;
+static uint16_t s_validate_radio_error = 0;
+static int s_validate_radio_calls = 0;
+
+static uint16_t stub_validate_radio_config(const opc_set_radio_config_req_t *cfg)
+{
+    (void)cfg;
+    s_validate_radio_calls++;
+    return s_validate_radio_error;
+}
+
 static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
     /* Observability for the apply-failure revert (D9): handler.c re-applies the
@@ -235,6 +245,12 @@ void stub_apply_radio_reset_calls(void)       { s_apply_radio_calls = 0;
                                                 s_apply_radio_last_station = 0; }
 int  stub_apply_radio_last_w1_freq(void)      { return s_apply_radio_last_w1_freq; }
 int  stub_apply_radio_last_station(void)      { return s_apply_radio_last_station; }
+void stub_validate_radio_set_error(uint16_t err)
+{
+    s_validate_radio_error = err;
+    s_validate_radio_calls = 0;
+}
+int stub_validate_radio_calls(void)           { return s_validate_radio_calls; }
 
 /* Test observability: count apply_ip_change calls and record the last slot's IP
  * so the change-ip → platform wiring (deferred until logout) is verifiable from
@@ -318,6 +334,7 @@ static const opcd_platform_ops_t g_stub_ops = {
     .get_ntp_server        = stub_get_ntp_server,
     .get_wlan_count        = stub_get_wlan_count,
     .get_link              = stub_get_link,
+    .validate_radio_config = stub_validate_radio_config,
     .apply_radio_config    = stub_apply_radio_config,
     .apply_ip_change       = stub_apply_ip_change,
     .peer_route_refresh    = stub_peer_route_refresh,
