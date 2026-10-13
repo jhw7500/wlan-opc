@@ -1,0 +1,333 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "../platform.h"
+#include "../../protocol/scan_chlist.h"
+
+#define ASSERT(cond, msg) do { \
+    if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); return 1; } \
+} while (0)
+
+static char g_exec_log[128];
+static const char *g_cleanup_marker = "/tmp/test_platform_nxp_radio_cleanup";
+static const char *g_survivor_marker = "/tmp/test_platform_nxp_radio_survivor";
+static const char *g_helper_pid_marker = "/tmp/test_platform_nxp_radio_pid";
+
+static void timeout_helper_term(int sig)
+{
+    (void)sig;
+    int fd = open(g_cleanup_marker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) close(fd);
+    _exit(0);
+}
+
+static int run_timeout_helper(void)
+{
+    int pfd = open(g_helper_pid_marker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (pfd < 0) return 122;
+    dprintf(pfd, "%ld\n", (long)getpid());
+    close(pfd);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = getenv("OPCD_NXP_TIMEOUT_IGNORE_TERM") != NULL
+                  ? SIG_IGN : timeout_helper_term;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+
+    pid_t descendant = fork();
+    if (descendant < 0) return 121;
+    if (descendant == 0) {
+        struct timespec ts = { .tv_sec = 1, .tv_nsec = 200 * 1000 * 1000L };
+        nanosleep(&ts, NULL);
+        int fd = open(g_survivor_marker, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) close(fd);
+        _exit(0);
+    }
+    for (;;) pause();
+}
+
+/* run_argv_bounded remains real (fork, wait, timeout, status handling).  Only
+ * the external exec boundary is replaced so the test can observe the exact
+ * helper contract without touching target files or tools. */
+int __wrap_execv(const char *path, char *const argv[])
+{
+    if (getenv("OPCD_TEST_REAL_EXEC") != NULL) {
+        extern int __real_execv(const char *, char *const []);
+        return __real_execv(path, argv);
+    }
+    const char *delay_env = getenv("OPCD_NXP_EXEC_DELAY_MS");
+    if (delay_env != NULL) {
+        long delay_ms = strtol(delay_env, NULL, 10);
+        struct timespec delay = {
+            .tv_sec = delay_ms / 1000,
+            .tv_nsec = (delay_ms % 1000) * 1000L * 1000L,
+        };
+        nanosleep(&delay, NULL);
+    }
+    int fd = open(g_exec_log, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) _exit(120);
+    dprintf(fd, "path=%s", path);
+    for (size_t i = 0; argv[i] != NULL; i++)
+        dprintf(fd, "|%s", argv[i]);
+    dprintf(fd, "\n");
+    close(fd);
+    if (getenv("OPCD_NXP_FAIL_MLAN1") != NULL &&
+        argv[1] != NULL && strcmp(argv[1], "mlan1") == 0)
+        _exit(42);
+    _exit(0);
+}
+
+static int read_log(char *buf, size_t cap)
+{
+    int fd = open(g_exec_log, O_RDONLY);
+    if (fd < 0) return -errno;
+    ssize_t n = read(fd, buf, cap - 1);
+    close(fd);
+    if (n < 0) return -errno;
+    buf[n] = '\0';
+    return 0;
+}
+
+static pid_t read_helper_pid(void)
+{
+    char buf[32];
+    int fd = open(g_helper_pid_marker, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    return (pid_t)strtol(buf, NULL, 10);
+}
+
+static int signal_masks_equal(const sigset_t *left, const sigset_t *right)
+{
+    for (int sig = 1; sig <= SIGRTMAX; sig++) {
+        int left_member = sigismember(left, sig);
+        int right_member = sigismember(right, sig);
+        if (left_member != right_member) return 0;
+    }
+    return 1;
+}
+
+int main(int argc, char **argv)
+{
+    if (getenv("OPCD_NXP_TIMEOUT_HELPER") != NULL)
+        return run_timeout_helper();
+    (void)argc;
+    (void)argv;
+    snprintf(g_exec_log, sizeof g_exec_log, "/tmp/test_platform_nxp_radio_%ld.log",
+             (long)getpid());
+    unlink(g_exec_log);
+
+    opcd_platform_register();
+    const opcd_platform_ops_t *ops = opcd_platform();
+    ASSERT(ops != NULL, "NXP platform registered");
+
+    opc_set_radio_config_req_t cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.station_type = OPC_STATION_SINGLE;
+    cfg.priority_ch = OPC_PRIORITY_CH_UNSET;
+    cfg.wlan1.mode = OPC_WLAN_MODE_11AC;
+    cfg.wlan1.bandwidth = OPC_BANDWIDTH_80;
+    cfg.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+    opc_scan_list_set_channel(cfg.wlan1.scan_chlist, OPC_SCAN_BAND_5GHZ, 36);
+
+    ASSERT(ops->apply_radio_config(&cfg) == 0, "single radio apply succeeds");
+
+    char log[512];
+    ASSERT(read_log(log, sizeof log) == 0, "captured helper invocation");
+    ASSERT(strcmp(log,
+                  "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|5180|mode|ac|bw|80\n") == 0,
+           "NXP apply passes frequency, mode and bandwidth in one helper call");
+
+    struct mapping_case {
+        uint8_t mode;
+        uint8_t bandwidth;
+        uint16_t band;
+        uint8_t channel;
+        const char *want;
+    } mappings[] = {
+        { OPC_WLAN_MODE_11B,  OPC_BANDWIDTH_20, OPC_SCAN_BAND_2_4GHZ, 1,
+          "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|2412|mode|b|bw|20\n" },
+        { OPC_WLAN_MODE_11G,  OPC_BANDWIDTH_40, OPC_SCAN_BAND_2_4GHZ, 6,
+          "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|2437|mode|g|bw|40\n" },
+        { OPC_WLAN_MODE_11A,  OPC_BANDWIDTH_20, OPC_SCAN_BAND_5GHZ, 36,
+          "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|5180|mode|a|bw|20\n" },
+        { OPC_WLAN_MODE_11N,  OPC_BANDWIDTH_40, OPC_SCAN_BAND_2_4GHZ, 11,
+          "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|2462|mode|n|bw|40\n" },
+        { OPC_WLAN_MODE_11AC, OPC_BANDWIDTH_80, OPC_SCAN_BAND_5GHZ, 40,
+          "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|5200|mode|ac|bw|80\n" },
+        { OPC_WLAN_MODE_11AX, OPC_BANDWIDTH_80, OPC_SCAN_BAND_5GHZ, 44,
+          "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|5220|mode|ax|bw|80\n" },
+    };
+    for (size_t i = 0; i < sizeof mappings / sizeof mappings[0]; i++) {
+        unlink(g_exec_log);
+        memset(&cfg.wlan1, 0, sizeof cfg.wlan1);
+        cfg.wlan1.mode = mappings[i].mode;
+        cfg.wlan1.bandwidth = mappings[i].bandwidth;
+        cfg.wlan1.scan_band = mappings[i].band;
+        opc_scan_list_set_channel(cfg.wlan1.scan_chlist, mappings[i].band,
+                                  mappings[i].channel);
+        ASSERT(ops->apply_radio_config(&cfg) == 0, "mode/bandwidth mapping apply succeeds");
+        ASSERT(read_log(log, sizeof log) == 0, "mapping helper invocation captured");
+        ASSERT(strcmp(log, mappings[i].want) == 0,
+               "protocol mode/bandwidth maps to literal helper tokens");
+    }
+
+    /* SetRadioConfig persists before its response, so each sequential DUAL
+     * helper gets the normal bounded apply window. A 500 ms helper is valid on
+     * the target and must not be killed by splitting 900 ms between radios. */
+    unlink(g_exec_log);
+    setenv("OPCD_NXP_EXEC_DELAY_MS", "500", 1);
+    memset(&cfg, 0, sizeof cfg);
+    cfg.station_type = OPC_STATION_DUAL;
+    cfg.priority_ch = OPC_PRIORITY_CH_UNSET;
+    cfg.wlan1.mode = OPC_WLAN_MODE_11AX;
+    cfg.wlan1.bandwidth = OPC_BANDWIDTH_80;
+    cfg.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+    opc_scan_list_set_channel(cfg.wlan1.scan_chlist, OPC_SCAN_BAND_5GHZ, 40);
+    cfg.wlan2.mode = OPC_WLAN_MODE_11AC;
+    cfg.wlan2.bandwidth = OPC_BANDWIDTH_40;
+    cfg.wlan2.scan_band = OPC_SCAN_BAND_5GHZ;
+    opc_scan_list_set_channel(cfg.wlan2.scan_chlist, OPC_SCAN_BAND_5GHZ, 36);
+    ASSERT(ops->apply_radio_config(&cfg) == 0,
+           "valid dual apply allows each sequential helper its bounded window");
+    ASSERT(read_log(log, sizeof log) == 0, "captured both dual helper invocations");
+    ASSERT(strcmp(log,
+                  "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|5200|mode|ax|bw|80\n"
+                  "path=/proc/self/exe|opc_wlan_apply.sh|mlan1|freq|5180|mode|ac|bw|40\n") == 0,
+           "dual apply passes exact interface, frequency, mode and bandwidth argv");
+
+    /* A bounded secondary failure must be reached after a valid 500 ms mlan0
+     * call and returned to the handler for its existing last-good reapply. */
+    unlink(g_exec_log);
+    setenv("OPCD_NXP_FAIL_MLAN1", "1", 1);
+    ASSERT(ops->apply_radio_config(&cfg) == -EPROTO,
+           "dual secondary helper failure is returned after mlan0 succeeds");
+    unsetenv("OPCD_NXP_FAIL_MLAN1");
+    unsetenv("OPCD_NXP_EXEC_DELAY_MS");
+    ASSERT(read_log(log, sizeof log) == 0,
+           "secondary failure still records both bounded helper calls");
+    ASSERT(strcmp(log,
+                  "path=/proc/self/exe|opc_wlan_apply.sh|mlan0|freq|5200|mode|ax|bw|80\n"
+                  "path=/proc/self/exe|opc_wlan_apply.sh|mlan1|freq|5180|mode|ac|bw|40\n") == 0,
+           "dual secondary failure occurs after reaching mlan1");
+
+    /* Capability rejection is pure and must also be enforced defensively by
+     * apply itself before the first interface changes. */
+    unlink(g_exec_log);
+    cfg.wlan1.bandwidth = OPC_BANDWIDTH_160;
+    ASSERT(ops->validate_radio_config(&cfg) == OPC_ERR_RADIO_BW,
+           "NXP rejects unsupported 160 MHz with field-attributed error");
+    ASSERT(ops->apply_radio_config(&cfg) != 0,
+           "NXP apply defensively rejects unsupported bandwidth");
+    ASSERT(access(g_exec_log, F_OK) != 0,
+           "unsupported bandwidth causes no helper side effect");
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.station_type = OPC_STATION_DUAL;
+    cfg.wlan1.mode = OPC_WLAN_MODE_11AC;
+    cfg.wlan1.bandwidth = OPC_BANDWIDTH_80;
+    cfg.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+    cfg.wlan2.mode = OPC_WLAN_MODE_11AX;
+    cfg.wlan2.bandwidth = OPC_BANDWIDTH_80;
+    cfg.wlan2.scan_band = OPC_SCAN_BAND_5GHZ;
+    ASSERT(ops->validate_radio_config(&cfg) == OPC_ERR_RADIO_MODE,
+           "NXP rejects mlan1 11ax with mode error");
+    ASSERT(ops->apply_radio_config(&cfg) != 0,
+           "NXP apply defensively rejects mlan1 11ax");
+    ASSERT(access(g_exec_log, F_OK) != 0,
+           "unsupported mlan1 mode rejects before mlan0 changes");
+
+    /* A timed-out helper may have spawned a driver subprocess. The platform
+     * must signal the entire process group so the helper's TERM cleanup runs
+     * and no descendant continues mutating after the response deadline. */
+    unlink(g_cleanup_marker);
+    unlink(g_survivor_marker);
+    unlink(g_helper_pid_marker);
+    setenv("OPCD_TEST_REAL_EXEC", "1", 1);
+    setenv("OPCD_NXP_TIMEOUT_HELPER", "1", 1);
+    sigset_t opcd_signal_mask, saved_parent_mask, blocked_parent_mask;
+    sigemptyset(&opcd_signal_mask);
+    sigaddset(&opcd_signal_mask, SIGINT);
+    sigaddset(&opcd_signal_mask, SIGTERM);
+    ASSERT(sigprocmask(SIG_BLOCK, &opcd_signal_mask, &saved_parent_mask) == 0,
+           "test fixture blocks the same signals as opcd signalfd");
+    ASSERT(sigprocmask(SIG_SETMASK, NULL, &blocked_parent_mask) == 0,
+           "test fixture reads the blocked parent signal mask");
+    memset(&cfg, 0, sizeof cfg);
+    cfg.station_type = OPC_STATION_SINGLE;
+    cfg.wlan1.mode = OPC_WLAN_MODE_11AC;
+    cfg.wlan1.bandwidth = OPC_BANDWIDTH_80;
+    cfg.wlan1.scan_band = OPC_SCAN_BAND_5GHZ;
+    opc_scan_list_set_channel(cfg.wlan1.scan_chlist, OPC_SCAN_BAND_5GHZ, 36);
+    ASSERT(ops->apply_radio_config(&cfg) == -ETIMEDOUT,
+           "timed-out helper reports ETIMEDOUT");
+    sigset_t parent_mask_after_apply;
+    ASSERT(sigprocmask(SIG_SETMASK, NULL, &parent_mask_after_apply) == 0 &&
+           signal_masks_equal(&parent_mask_after_apply, &blocked_parent_mask),
+           "bounded apply leaves the parent signal mask unchanged");
+    unsetenv("OPCD_NXP_TIMEOUT_HELPER");
+    unsetenv("OPCD_TEST_REAL_EXEC");
+    ASSERT(access(g_cleanup_marker, F_OK) == 0,
+           "SIGTERM reaches helper and runs cleanup before hard deadline");
+    pid_t helper_pid = read_helper_pid();
+    int helper_status = 0;
+    errno = 0;
+    ASSERT(helper_pid > 0 && waitpid(helper_pid, &helper_status, WNOHANG) == -1 &&
+           errno == ECHILD,
+           "TERM-completed helper was already reaped before apply returned");
+    struct timespec settle = { .tv_sec = 0, .tv_nsec = 400 * 1000 * 1000L };
+    nanosleep(&settle, NULL);
+    ASSERT(access(g_survivor_marker, F_OK) != 0,
+           "timed-out helper descendant cannot outlive the process group");
+
+    /* The hard-deadline branch must contain a helper and descendant that both
+     * ignore TERM, without extending the 900 ms single-radio budget. */
+    unlink(g_cleanup_marker);
+    unlink(g_survivor_marker);
+    unlink(g_helper_pid_marker);
+    setenv("OPCD_TEST_REAL_EXEC", "1", 1);
+    setenv("OPCD_NXP_TIMEOUT_HELPER", "1", 1);
+    setenv("OPCD_NXP_TIMEOUT_IGNORE_TERM", "1", 1);
+    struct timespec before, after;
+    clock_gettime(CLOCK_MONOTONIC, &before);
+    ASSERT(ops->apply_radio_config(&cfg) == -ETIMEDOUT,
+           "TERM-ignoring helper is hard-killed at deadline");
+    clock_gettime(CLOCK_MONOTONIC, &after);
+    long elapsed_ms = (after.tv_sec - before.tv_sec) * 1000L +
+                      (after.tv_nsec - before.tv_nsec) / 1000000L;
+    unsetenv("OPCD_NXP_TIMEOUT_IGNORE_TERM");
+    unsetenv("OPCD_NXP_TIMEOUT_HELPER");
+    unsetenv("OPCD_TEST_REAL_EXEC");
+    ASSERT(elapsed_ms <= 1050,
+           "TERM grace stays inside the existing 900 ms budget plus scheduler slack");
+    helper_pid = read_helper_pid();
+    errno = 0;
+    ASSERT(helper_pid > 0 && waitpid(helper_pid, &helper_status, WNOHANG) == -1 &&
+           errno == ECHILD,
+           "hard-killed helper was reaped before apply returned");
+    nanosleep(&settle, NULL);
+    ASSERT(access(g_survivor_marker, F_OK) != 0,
+           "SIGKILL reaches TERM-ignoring descendants at hard deadline");
+    ASSERT(sigprocmask(SIG_SETMASK, &saved_parent_mask, NULL) == 0,
+           "test fixture restores the parent signal mask");
+
+    unlink(g_exec_log);
+    unlink(g_cleanup_marker);
+    unlink(g_survivor_marker);
+    unlink(g_helper_pid_marker);
+    puts("test_platform_nxp_radio: ok");
+    return 0;
+}

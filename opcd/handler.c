@@ -1361,6 +1361,25 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             result = OPC_RESULT_NG;
             err = (prio_v == PRIO_CH_BAD_BAND) ? OPC_ERR_RADIO_PRIO_BAND
                                                : OPC_ERR_RADIO_PRIO_CH;
+        } else {
+            const opcd_platform_ops_t *plat = opcd_platform();
+            if (!plat) {
+                fprintf(stderr, "opcd: BUG: opcd_platform() returned NULL in handle_set_radio_config\n");
+                abort();
+            }
+            uint16_t capability_err = plat->validate_radio_config(&req);
+            if (capability_err == OPC_ERR_RADIO_MODE || capability_err == OPC_ERR_RADIO_BW) {
+                result = OPC_RESULT_NG;
+                err = capability_err;
+            } else if (capability_err != 0) {
+                fprintf(stderr, "opcd: BUG: validate_radio_config returned invalid error 0x%04x\n",
+                        capability_err);
+                abort();
+            }
+        }
+
+        if (result != OPC_RESULT_OK) {
+            /* validation failed; the common ack path below reports it */
         } else if (st->radio_committed && !radio_cfg_differs(&req, &st->radio)) {
             /* Identical to a COMMITTED (applied + persisted) config and no ack
              * in flight (the branch above catches the in-flight case): nothing
@@ -1396,7 +1415,8 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                  * Error cause: dedicated apply-failure 0x0050, NOT 0x0011 — the
                  * frequency value was valid (it passed the D8 check above); this
                  * is a runtime fault, so the operator must not be told to change
-                 * it (D9 re-decided 2026-06-16; 0x0050 pending 발주처 confirm). */
+                 * it (D9 re-decided 2026-06-16). User decision 2026-10-13:
+                 * retain in-house 0x0050 and deliver its spec separately. */
                 if (radio_cfg_differs(&req, &st->radio)) {
                     st->radio_revert_pending = true;
                     st->radio_revert_cfg     = st->radio;

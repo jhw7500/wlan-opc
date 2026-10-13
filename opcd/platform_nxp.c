@@ -54,15 +54,18 @@
 #define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
 #define MLAN0_LINK_JSON  "/var/log/cantops/json/mlan0/link.json"
 #define MLAN1_LINK_JSON  "/var/log/cantops/json/mlan1/link.json"
-/* Shared timeout budget for opc_wlan_apply.sh calls (freq and essid paths).
- * 900 ms (not 1000) leaves ~100 ms slack for inter-call overhead in DUAL mode
- * (per-call timeout = OPC_WLAN_APPLY_TIMEOUT_MS/2 = 450 ms × 2 = 900 ms total).
+/* Per-call timeout for opc_wlan_apply.sh (freq and essid paths).
+ * Each sequential DUAL interface gets the same bounded 900 ms window. The
+ * SetRadioConfig response is returned after NVM persistence and therefore uses
+ * the protocol's 120-second settings timer, not the 1-second read/no-NVM timer.
  * The script edits wpa_supplicant.conf then runs `wpa_cli reconfigure`, which
  * returns on wpa_cli OK in ms; reconfigure reloads the conf and re-associates
  * asynchronously — it does not await association. */
 #define OPC_WLAN_APPLY_TIMEOUT_MS 900
 #define OPC_WLAN_APPLY_POLL_MS    10
+#ifndef OPC_WLAN_APPLY_SH
 #define OPC_WLAN_APPLY_SH        "/usr/local/scripts/opc_wlan_apply.sh"
+#endif
 
 /* ChangeIpAddress replaces eth0's management IP at runtime via `ip addr`.
  * Verified on-target: systemd-networkd does NOT revert the change (a .network
@@ -722,13 +725,16 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
 }
 
 /* Run argv[] (path = absolute binary, argv[0] = program name) to completion
- * with a bounded wait: poll waitpid(WNOHANG) against a monotonic deadline and
- * SIGKILL+reap on overrun, so a stalled child (SD/NFS fsync) cannot exceed the
- * OPC 1-second response budget. `label` tags diagnostics. Returns 0 on child
- * exit status 0, -errno otherwise (platform.h contract). */
+ * within timeout_ms. The helper owns a process group so timeout cleanup also
+ * reaches driver subprocesses: SIGTERM gives the shell a short in-budget
+ * cleanup window, then SIGKILL enforces the original hard deadline. */
 static int run_argv_bounded(const char *label, const char *path,
                             char *const argv[], long timeout_ms)
 {
+    /* opcd blocks INT/TERM for signalfd; helpers must receive our timeout
+     * TERM, so clear the inherited mask in the child only. */
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
     pid_t pid = fork();
     if (pid < 0) {
         int err = errno;
@@ -736,6 +742,16 @@ static int run_argv_bounded(const char *label, const char *path,
         return -err;
     }
     if (pid == 0) {
+        if (sigprocmask(SIG_SETMASK, &empty_mask, NULL) != 0) {
+            static const char msg[] = "opcd: run_argv_bounded: sigprocmask failed\n";
+            (void)!write(STDERR_FILENO, msg, sizeof msg - 1);
+            _exit(126);
+        }
+        if (setpgid(0, 0) != 0) {
+            static const char msg[] = "opcd: run_argv_bounded: setpgid failed\n";
+            (void)!write(STDERR_FILENO, msg, sizeof msg - 1);
+            _exit(126);
+        }
         execv(path, argv);
         /* execv returned: fprintf is not async-signal-safe post-fork.
          * Diagnose via write() so the parent's "status=0x7f00" is
@@ -747,49 +763,81 @@ static int run_argv_bounded(const char *label, const char *path,
         _exit(127);
     }
 
-    /* Bounded wait: poll with WNOHANG + monotonic deadline. The forked tools
-     * are normally ms-fast, but backing-store stalls (SD card / NFS fsync)
-     * could block indefinitely. platform.h's "bounded short timeout" contract
-     * requires we cap and SIGKILL on overrun. */
+    /* Close the fork/exec race: the child also calls setpgid before exec.
+     * EACCES means it already exec'd after successfully making its own group;
+     * ESRCH means it exited and waitpid below will collect it. */
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
+        int err = errno;
+        fprintf(stderr, "opcd: %s: setpgid failed: %s\n", label, strerror(err));
+        (void)kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) { }
+        return -err;
+    }
+
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     int status = 0;
+    bool leader_reaped = false;
+    bool timeout_started = false;
+    const long term_grace_ms = timeout_ms > 150 ? 150 : timeout_ms / 2;
+    const long term_at_ms = timeout_ms - term_grace_ms;
     for (;;) {
-        pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) break;
-        if (r < 0 && errno != EINTR) {
+        if (!leader_reaped) {
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            if (r == pid) {
+                leader_reaped = true;
+                if (!timeout_started) break;
+            } else if (r < 0 && errno != EINTR) {
             /* opcd installs no SIGCHLD handler / SIG_IGN, so this is
              * unreachable for our own forked pid under the current model.
-             * Still SIGKILL+reap defensively so a future signal-handling
-             * change cannot cause this branch to leak the child. */
-            int err = errno;
-            fprintf(stderr, "opcd: %s: waitpid failed: %s\n", label, strerror(err));
-            kill(pid, SIGKILL);
-            pid_t wr;
-            while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
-            if (wr < 0)
-                fprintf(stderr, "opcd: %s: defensive reap failed: %s\n", label, strerror(errno));
-            return -err;
+             * Kill the whole group defensively so descendants cannot leak. */
+                int err = errno;
+                fprintf(stderr, "opcd: %s: waitpid failed: %s\n", label, strerror(err));
+                (void)kill(-pid, SIGKILL);
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+                return -err;
+            }
         }
+
+        if (timeout_started && leader_reaped) {
+            if (kill(-pid, 0) != 0 && errno == ESRCH)
+                return -ETIMEDOUT;
+        }
+
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         long elapsed_ms = timespec_diff_ms(&now, &start);
+
+        if (!timeout_started && elapsed_ms >= term_at_ms) {
+            timeout_started = true;
+            fprintf(stderr,
+                    "opcd: %s: '%s' nearing %ldms deadline, sending SIGTERM to process group\n",
+                    label, path, timeout_ms);
+            (void)kill(-pid, SIGTERM);
+        }
+
         if (elapsed_ms >= timeout_ms) {
-            fprintf(stderr, "opcd: %s: '%s' timed out after %ldms, sending SIGKILL\n",
+            fprintf(stderr, "opcd: %s: '%s' timed out after %ldms, sending SIGKILL to process group\n",
                     label, path, elapsed_ms);
-            kill(pid, SIGKILL);
-            /* Reap so the SIGKILL'd child is not left as a zombie. */
-            pid_t wr;
-            while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
-            if (wr < 0)
-                fprintf(stderr, "opcd: %s: waitpid reap after SIGKILL failed: %s\n",
-                        label, strerror(errno));
+            /* A helper/driver that ignores TERM cannot be trusted to restore
+             * its snapshot. Hard kill is therefore bounded containment, while
+             * the handler's later last-good reapply remains best effort. */
+            (void)kill(-pid, SIGKILL);
+            if (!leader_reaped) {
+                pid_t wr;
+                while ((wr = waitpid(pid, &status, 0)) < 0 && errno == EINTR) { }
+                if (wr < 0)
+                    fprintf(stderr, "opcd: %s: waitpid reap after SIGKILL failed: %s\n",
+                            label, strerror(errno));
+            }
             return -ETIMEDOUT;
         }
-        /* Cap the sleep so the last poll never overruns the deadline.
-         * Without this, child can live up to timeout_ms + POLL_MS. */
-        long remain_ms = timeout_ms - elapsed_ms;
-        long sleep_ms  = (remain_ms < OPC_WLAN_APPLY_POLL_MS) ? remain_ms : OPC_WLAN_APPLY_POLL_MS;
+
+        long next_ms = timeout_started ? timeout_ms : term_at_ms;
+        long remain_ms = next_ms - elapsed_ms;
+        long sleep_ms = remain_ms < OPC_WLAN_APPLY_POLL_MS
+                      ? remain_ms : OPC_WLAN_APPLY_POLL_MS;
+        if (sleep_ms <= 0) continue;
         struct timespec ts = { .tv_sec = 0, .tv_nsec = sleep_ms * 1000L * 1000L };
         nanosleep(&ts, NULL);
     }
@@ -801,28 +849,35 @@ static int run_argv_bounded(const char *label, const char *path,
     return 0;
 }
 
-/* Run "opc_wlan_apply.sh <iface> [freq <mhz>] [ssid <name>]" synchronously.
- * Builds argv from the non-empty fields; freq_mhz==0 omits freq, ssid==NULL/""
- * omits ssid. The script edits wpa_supplicant.conf in place (ssid/scan_freq/
- * freq_list) then runs `wpa_cli reconfigure` to apply + persist (freq_list hard
- * band-lock survives restart); reconfigure reloads the conf and re-associates
- * asynchronously, so the bounded sync call returns within budget. freq_buf lives
- * on this frame for the duration of the call. */
+/* Run opc_wlan_apply.sh synchronously with any non-empty freq/mode/bw/ssid
+ * fields. Radio config passes freq+mode+bw in one call; the ChangeIp ESSID path
+ * remains an SSID-only call. The helper persists the profile and triggers the
+ * bounded driver/reconfigure work without awaiting association. */
 /* `freqs` is the space-separated MHz list opc_wlan_apply.sh takes for `freq`
  * (NULL/empty = no frequency change; the literal "none" = clear the band lock,
  * #111). */
 static int run_opc_wlan_apply(const char *iface, const char *freqs,
+                              const char *mode, const char *bandwidth,
                               const char *ssid, long timeout_ms)
 {
-    if ((!freqs || freqs[0] == '\0') && (!ssid || ssid[0] == '\0'))
+    if ((!freqs || freqs[0] == '\0') && (!mode || mode[0] == '\0') &&
+        (!bandwidth || bandwidth[0] == '\0') && (!ssid || ssid[0] == '\0'))
         return -EINVAL;
-    const char *argv[8];
+    const char *argv[11];
     int n = 0;
     argv[n++] = "opc_wlan_apply.sh";
     argv[n++] = iface;
     if (freqs && freqs[0] != '\0') {
         argv[n++] = "freq";
         argv[n++] = freqs;
+    }
+    if (mode && mode[0] != '\0') {
+        argv[n++] = "mode";
+        argv[n++] = mode;
+    }
+    if (bandwidth && bandwidth[0] != '\0') {
+        argv[n++] = "bw";
+        argv[n++] = bandwidth;
     }
     if (ssid && ssid[0] != '\0') {
         argv[n++] = "ssid";
@@ -831,6 +886,51 @@ static int run_opc_wlan_apply(const char *iface, const char *freqs,
     argv[n] = NULL;
     return run_argv_bounded("opc_wlan_apply", OPC_WLAN_APPLY_SH,
                             (char *const *)argv, timeout_ms);
+}
+
+static const char *radio_mode_token(uint8_t mode)
+{
+    switch (mode) {
+    case OPC_WLAN_MODE_11B:  return "b";
+    case OPC_WLAN_MODE_11G:  return "g";
+    case OPC_WLAN_MODE_11A:  return "a";
+    case OPC_WLAN_MODE_11N:  return "n";
+    case OPC_WLAN_MODE_11AC: return "ac";
+    case OPC_WLAN_MODE_11AX: return "ax";
+    default:                 return NULL;
+    }
+}
+
+static const char *radio_bw_token(uint8_t bandwidth)
+{
+    switch (bandwidth) {
+    case OPC_BANDWIDTH_20: return "20";
+    case OPC_BANDWIDTH_40: return "40";
+    case OPC_BANDWIDTH_80: return "80";
+    default:               return NULL;
+    }
+}
+
+static uint16_t validate_one_radio(const opc_wlan_radio_cfg_t *w, bool mlan1)
+{
+    if (radio_mode_token(w->mode) == NULL ||
+        (mlan1 && w->mode == OPC_WLAN_MODE_11AX) ||
+        ((w->mode == OPC_WLAN_MODE_11B || w->mode == OPC_WLAN_MODE_11G) &&
+         w->scan_band == OPC_SCAN_BAND_5GHZ))
+        return OPC_ERR_RADIO_MODE;
+    if (radio_bw_token(w->bandwidth) == NULL)
+        return OPC_ERR_RADIO_BW;
+    return 0;
+}
+
+static uint16_t nxp_validate_radio_config(const opc_set_radio_config_req_t *cfg)
+{
+    if (cfg == NULL) return OPC_ERR_RADIO_MODE;
+    uint16_t err = validate_one_radio(&cfg->wlan1, false);
+    if (err != 0) return err;
+    if (cfg->station_type == OPC_STATION_DUAL)
+        return validate_one_radio(&cfg->wlan2, true);
+    return 0;
 }
 
 /* Render one WLAN's SCAN Channel List as the MHz list opc_wlan_apply.sh takes
@@ -870,6 +970,12 @@ static size_t scan_freqs_render(const opc_wlan_radio_cfg_t *w, char *buf, size_t
 
 static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 {
+    uint16_t capability_err = nxp_validate_radio_config(cfg);
+    if (capability_err != 0) {
+        fprintf(stderr, "opcd: nxp_apply_radio_config: unsupported capability error=0x%04x\n",
+                capability_err);
+        return -EOPNOTSUPP;
+    }
     char f1[320], f2[320];
     const bool dual = cfg->station_type == OPC_STATION_DUAL;
     size_t n1 = scan_freqs_render(&cfg->wlan1, f1, sizeof f1);
@@ -884,17 +990,21 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
                 cfg->wlan2.scan_band, cfg->wlan2.mode, cfg->wlan2.bandwidth, f2);
     fprintf(stderr, "\n");
 
-    /* Share the 1s regulation budget across both apply calls in DUAL so the
-     * worst-case wall-clock stays within platform.h's contract. */
-    const long per_call_ms = dual ? OPC_WLAN_APPLY_TIMEOUT_MS / 2
-                                  : OPC_WLAN_APPLY_TIMEOUT_MS;
+    /* Bound each external helper independently. SetRadioConfig is a persisted
+     * settings command, so a valid DUAL request must not halve this window. */
+    const long per_call_ms = OPC_WLAN_APPLY_TIMEOUT_MS;
+
+    const char *m1 = radio_mode_token(cfg->wlan1.mode);
+    const char *b1 = radio_bw_token(cfg->wlan1.bandwidth);
+    const char *m2 = dual ? radio_mode_token(cfg->wlan2.mode) : NULL;
+    const char *b2 = dual ? radio_bw_token(cfg->wlan2.bandwidth) : NULL;
 
     /* n == 0 only for an unsupported band (rejected upstream). An unset band
      * renders the "none" sentinel (n==1) so opc_wlan_apply.sh clears freq_list
-     * entirely — no band lock (#111). Mode / bandwidth mapping is still
-     * deferred; only the freq list is wired. */
+     * entirely — no band lock (#111). Priority CH remains protocol state only;
+     * its DUAL steering semantics are not part of this apply operation. */
     if (n1 > 0) {
-        int rc = run_opc_wlan_apply("mlan0", f1, NULL, per_call_ms);
+        int rc = run_opc_wlan_apply("mlan0", f1, m1, b1, NULL, per_call_ms);
         if (rc != 0) return rc;
     }
     if (dual && n2 > 0) {
@@ -915,7 +1025,7 @@ static int nxp_apply_radio_config(const opc_set_radio_config_req_t *cfg)
          * so the confs reconverge to the pre-change state ("apply fails ⇒ no net
          * change") without the failure ack waiting on a second apply. End-to-end
          * idempotency across reconnect remains the reconnect PR's job. */
-        int rc = run_opc_wlan_apply("mlan1", f2, NULL, per_call_ms);
+        int rc = run_opc_wlan_apply("mlan1", f2, m2, b2, NULL, per_call_ms);
         if (rc != 0) return rc;
     }
     return 0;
@@ -1040,7 +1150,8 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
         char essid_buf[OPC_ESSID_FIELD_LEN + 1];
         snprintf(essid_buf, sizeof essid_buf, "%.*s",
                  (int)sizeof slot->essid, slot->essid);
-        int erc = run_opc_wlan_apply("mlan0", NULL, essid_buf, OPC_WLAN_APPLY_TIMEOUT_MS);
+        int erc = run_opc_wlan_apply("mlan0", NULL, NULL, NULL, essid_buf,
+                                     OPC_WLAN_APPLY_TIMEOUT_MS);
         fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply%s\n",
                 essid_buf, erc == 0 ? " (wpa_cli)" : " FAILED");
     }
@@ -1518,6 +1629,7 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .get_ntp_server        = nxp_get_ntp_server,
     .get_wlan_count        = nxp_get_wlan_count,
     .get_link              = nxp_get_link,
+    .validate_radio_config = nxp_validate_radio_config,
     .apply_radio_config    = nxp_apply_radio_config,
     .apply_ip_change       = nxp_apply_ip_change,
     .peer_route_refresh    = nxp_peer_route_refresh,

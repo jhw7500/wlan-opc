@@ -56,6 +56,8 @@ extern int      stub_apply_radio_calls(void);
 extern void     stub_apply_radio_reset_calls(void);
 extern int      stub_apply_radio_last_w1_freq(void);
 extern int      stub_apply_radio_last_station(void);
+extern void     stub_validate_radio_set_error(uint16_t err);
+extern int      stub_validate_radio_calls(void);
 /* device-info live-link injection (freq-source toggle test) */
 extern void     stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch);
 extern void     stub_set_link_signal(int idx, bool rssi_valid, int8_t rssi, bool snr_valid, int8_t snr);
@@ -2957,6 +2959,35 @@ int main(void)
         ASSERT(st.radio_committed, "sync persist → committed");
         ASSERT(do_set_radio_req(&st, CIP, &req) == OPC_RESULT_OK && stub_apply_radio_calls() == 1,
                "matching committed config → skipped");
+    }
+
+    /* Platform capability validation precedes the committed-identical skip.
+     * Otherwise an unsupported config restored from an older image could be
+     * acknowledged forever without reaching the current hardware guard. */
+    {
+        opc_set_radio_config_req_t req;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        memset(&req, 0, sizeof req);
+        req.station_type = OPC_STATION_SINGLE;
+        req.wlan1.mode = OPC_WLAN_MODE_11AC;
+        req.wlan1.bandwidth = OPC_BANDWIDTH_160;
+        req.wlan1.scan_band = OPC_SCAN_BAND_UNSET;
+        req.wlan2.mode = OPC_WLAN_MODE_UNSET;
+        req.wlan2.bandwidth = OPC_BANDWIDTH_UNSET;
+        req.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+        st.radio = req;
+        st.radio_committed = true;
+        stub_apply_radio_reset_calls();
+        stub_validate_radio_set_error(OPC_ERR_RADIO_BW);
+        ASSERT(do_set_radio_req(&st, CIP, &req) == OPC_RESULT_NG &&
+               g_last_radio_err == OPC_ERR_RADIO_BW,
+               "platform capability rejects before committed-identical skip");
+        ASSERT(stub_validate_radio_calls() == 1 && stub_apply_radio_calls() == 0,
+               "capability rejection has no apply side effect");
+        ASSERT(!st.radio_revert_pending && st.radio_committed,
+               "capability rejection arms no revert and preserves committed state");
+        stub_validate_radio_set_error(0);
     }
 
     /* 26d(#102, Codex P1). A request whose NVRAM write fails is applied but NOT

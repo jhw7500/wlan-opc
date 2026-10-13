@@ -47,6 +47,7 @@
 #include "snapshot.h"
 #include "store.h"
 #include "store_async.h"
+#include "systemd_notify.h"
 
 #define LOG(fmt, ...) fprintf(stderr, "opcd: " fmt "\n", ##__VA_ARGS__)
 
@@ -471,6 +472,19 @@ int main(int argc, char **argv)
     uint8_t rx[OPC_FRAME_MAX], tx[OPC_FRAME_MAX];
 
     OLOG_INFO("start: ready — serving on UDP :%u", (unsigned)st.conf.udp_port);
+    /* READY is sent only after every fd and the optional async store worker
+     * have been prepared. In standalone runs NOTIFY_SOCKET is absent and this
+     * remains a no-op. A malformed systemd environment intentionally leaves a
+     * Type=notify unit in startup until TimeoutStartSec restarts it. */
+    opcd_systemd_notify_t systemd_notify;
+    int notify_init = opcd_systemd_notify_init(&systemd_notify);
+    if (notify_init < 0) {
+        LOG("systemd notification setup failed: %s", strerror(errno));
+        OLOG_ERR("start: systemd notification setup failed: %s", strerror(errno));
+    } else if (opcd_systemd_ready(&systemd_notify) < 0) {
+        LOG("systemd READY notification failed: %s", strerror(errno));
+        OLOG_ERR("start: systemd READY notification failed: %s", strerror(errno));
+    }
     while (!st.should_exit && !st.should_reset) {
         struct epoll_event events[8];
         int n = epoll_wait(ep, events, 8, -1);
@@ -510,8 +524,8 @@ int main(int argc, char **argv)
                  * `systemctl stop opcd` answers "running" and stays silent;
                  * an unanswerable probe (OPC_RESET_PROBE_TIMEOUT_MS, sized from
                  * the measured shutdown latency) also stays silent — a reset
-                 * is never announced on a guess. The network is still up
-                 * here (opcd is After=network-online.target). */
+                 * is never announced on a guess. ResetNotice is best effort:
+                 * it is delivered only while a usable network route remains. */
                 if (first_signo == SIGTERM) {
                     int stopping = opcd_system_stopping(OPC_PATH_SYSTEMCTL,
                                                         OPC_RESET_PROBE_TIMEOUT_MS);
@@ -542,6 +556,11 @@ int main(int argc, char **argv)
                     }
                 }
                 opcd_ind_tick_elapsed(&st, elapsed > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)elapsed);
+                /* Deliberately emitted by the main epoll loop, never by the
+                 * async store worker: if this loop is alive-but-hung, pings
+                 * stop and systemd restarts only the OPCd process. */
+                if (opcd_systemd_watchdog(&systemd_notify) < 0)
+                    LOG("systemd WATCHDOG notification failed: %s", strerror(errno));
             } else if (fd == store_fd) {
                 /* store_fd is -1 when no async writer is attached (creation or
                  * epoll_ctl failed); a real fd never equals -1, so this branch
@@ -769,6 +788,7 @@ int main(int argc, char **argv)
     close(sig_fd);
     close(timer_fd);
     close(ep);
+    opcd_systemd_notify_close(&systemd_notify);
     /* Single lifecycle stop line for both paths (symmetric): the reason arg
      * distinguishes a Reset-command restart from a signal shutdown. */
     OLOG_INFO("stop: opcd exited (%s)", st.should_reset ? "reset/restart" : "shutdown");

@@ -46,10 +46,15 @@ OPCD_OBJS_ROAMCONF  := $(OPCDOBJ)/roam_notify_conf.o
 OPCD_OBJS_ROAMDGRAM := $(OPCDOBJ)/roam_datagram.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/chan_encode.o
 # 감사 로그 순수 헬퍼(ip4str/이름표/ack peek) — no platform backend, no protocol library.
 OPCD_OBJS_OLOG      := $(OPCDOBJ)/opcd_log.o
+OPCD_OBJS_NOTIFY    := $(OPCDOBJ)/systemd_notify.o
+OPCD_OBJS_NXP_TEST  := $(TESTDIR)/platform_nxp_test.o $(OPCDOBJ)/json_util.o \
+                       $(OPCDOBJ)/ntp_parse.o $(OPCDOBJ)/nl80211_parse.o \
+                       $(OPCDOBJ)/chan_encode.o
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
          test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
-         test_freq_source test_ip_iface test_topology test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log
+         test_freq_source test_ip_iface test_topology test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log \
+         test_platform_nxp_radio test_systemd_notify
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -69,6 +74,16 @@ $(TESTDIR)/test_snapshot: $(TESTDIR)/test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(PRO
 
 $(TESTDIR)/test_handler: $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(PROTODIR)/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(LDFLAGS) $(LDLIBS)
+
+# Exercise the real NXP radio apply path while replacing only execv(2), the
+# external target boundary.  The private object avoids mixing NXP and stub
+# registries in test_handler.
+$(TESTDIR)/platform_nxp_test.o: ../platform_nxp.c | $(TESTDIR)
+	$(CC) $(CFLAGS) -DOPC_WLAN_APPLY_SH='"/proc/self/exe"' -MMD -MP -c $< -o $@
+
+$(TESTDIR)/test_platform_nxp_radio: $(TESTDIR)/test_platform_nxp_radio.o $(OPCD_OBJS_NXP_TEST) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_platform_nxp_radio.o $(OPCD_OBJS_NXP_TEST) \
+		$(LDFLAGS) -Wl,--wrap=execv $(LDLIBS)
 
 $(TESTDIR)/test_store_async: $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASYNC)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASYNC) $(LDFLAGS)
@@ -118,6 +133,9 @@ $(TESTDIR)/test_roam_datagram: $(TESTDIR)/test_roam_datagram.o $(OPCD_OBJS_ROAMD
 # opcd_log_init() 전 no-op 계약이라 테스트에서 호스트 syslog 를 오염시키지 않는다.
 $(TESTDIR)/test_opcd_log: $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
+
+$(TESTDIR)/test_systemd_notify: $(TESTDIR)/test_systemd_notify.o $(OPCD_OBJS_NOTIFY)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_systemd_notify.o $(OPCD_OBJS_NOTIFY)
 
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
