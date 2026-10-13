@@ -68,6 +68,19 @@ typedef struct opcd_ip_list {
 /* Async NVRAM writer — opaque; see store_async.h. */
 struct opc_store_async;
 
+typedef enum opcd_persist_resource {
+    OPCD_PERSIST_NONE = 0,
+    OPCD_PERSIST_PASSWORD,
+    OPCD_PERSIST_IP_LIST,
+    OPCD_PERSIST_RADIO,
+} opcd_persist_resource_t;
+
+typedef enum opcd_radio_recovery_state {
+    OPCD_RADIO_RECOVERY_HEALTHY = 0,
+    OPCD_RADIO_RECOVERY_DEGRADED_UNKNOWN_BASELINE,
+    OPCD_RADIO_RECOVERY_DEGRADED_RESTORE_FAILED,
+} opcd_radio_recovery_state_t;
+
 /* A Set* ack whose NVRAM write is still in flight (PERF-001 deferred ack).
  * One slot per queued store_async job; the job token is the slot index.
  * The ack is packed and sent from opcd_store_async_on_ready() once the
@@ -91,6 +104,8 @@ struct opc_store_async;
 #define OPCD_PENDING_ACK_MAX 16
 typedef struct opcd_pending_ack {
     bool     in_use;
+    bool     no_ack;        /* partial IP commit: preserve the earlier immediate NG */
+    opcd_persist_resource_t resource;
     uint16_t req_id;        /* OPC_REQ_* whose ack format to pack */
     uint16_t seq;           /* echoed sequence number */
     uint32_t radio_gen;     /* SET_RADIO only: st->radio generation this write
@@ -112,6 +127,7 @@ typedef struct opcd_state {
     uint32_t holder_ip;             /* host byte order */
     uint16_t holder_port;
     time_t   idle_deadline;         /* CLOCK_MONOTONIC seconds */
+    uint32_t session_generation;    /* changes at fresh login/logout boundaries */
 
     /* Persistent app state. */
     char     password[128];
@@ -121,6 +137,11 @@ typedef struct opcd_state {
      * handle_set_radio_config: a config whose persist failed must be re-done
      * on retry, not acknowledged as "already there" (#102). */
     bool     radio_committed;
+    /* A successful platform apply establishes a live baseline independently of
+     * whether its file write was durable. Startup file contents alone do not
+     * prove what every WLAN interface currently runs. */
+    bool     radio_applied_known;
+    opcd_radio_recovery_state_t radio_recovery_state;
     /* Bumped every time `radio` is assigned from a request; deferred NVRAM
      * completions carry the generation they wrote and may commit only when it
      * is still the current one (older writes never vouch for a newer config). */
@@ -135,6 +156,8 @@ typedef struct opcd_state {
      * so the failure response is never delayed by the recovery apply. */
     bool     radio_revert_pending;
     opc_set_radio_config_req_t radio_revert_cfg;
+    bool     radio_revert_committed;
+    bool     radio_persist_baseline_valid;
 
     /* SetIpConfigList staging — accumulates entries until END boundary flag. */
     opcd_ip_list_t ip_list_staging;
@@ -195,6 +218,13 @@ typedef struct opcd_state {
      * or the daemon when the writer could not be created at startup). */
     struct opc_store_async *store_async;
     opcd_pending_ack_t pending_acks[OPCD_PENDING_ACK_MAX];
+    /* One candidate per persisted resource. They are published only after the
+     * completion outcome proves either durability or a visible rename. */
+    char pending_password[128];
+    opcd_ip_list_t pending_ip_list;
+    opcd_ip_list_t pending_ip_staging;
+    bool pending_ip_staging_active;
+    uint32_t pending_ip_staging_session_generation;
 
     /* Sockets / control. */
     int      udp_fd;

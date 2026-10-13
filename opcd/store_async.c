@@ -26,6 +26,7 @@ typedef struct {
     uint64_t    token;
     int         result;
     int         saved_errno;
+    opc_store_outcome_t outcome;
 } job_t;
 
 struct opc_store_async {
@@ -34,6 +35,7 @@ struct opc_store_async {
     pthread_cond_t  cv;            /* signalled on submit and shutdown */
     int             event_fd;
     bool            shutdown;
+    bool            joined;
     job_t           jobs[OPC_STORE_ASYNC_QUEUE_DEPTH];
     /* FIFO ring of indexes into jobs[] awaiting the worker. */
     int             q[OPC_STORE_ASYNC_QUEUE_DEPTH];
@@ -78,12 +80,14 @@ static void *worker_main(void *arg)
         job_t *j = &sa->jobs[ji];
         pthread_mutex_unlock(&sa->mu);
 
-        int rc = opc_store_write_atomic(j->path, j->data, j->len, j->mode);
+        opc_store_outcome_t outcome;
+        int rc = opc_store_write_atomic_ex(j->path, j->data, j->len, j->mode, &outcome);
         int e  = (rc != 0) ? errno : 0;
 
         pthread_mutex_lock(&sa->mu);
         j->result      = rc;
         j->saved_errno = e;
+        j->outcome     = outcome;
         j->state       = JOB_DONE;
         notify_completion(sa);
     }
@@ -122,14 +126,26 @@ opc_store_async_t *opc_store_async_create(void)
     return sa;
 }
 
-void opc_store_async_destroy(opc_store_async_t *sa)
+void opc_store_async_finish(opc_store_async_t *sa)
 {
     if (!sa) return;
     pthread_mutex_lock(&sa->mu);
     sa->shutdown = true;
+    bool joined = sa->joined;
     pthread_cond_broadcast(&sa->cv);
     pthread_mutex_unlock(&sa->mu);
-    pthread_join(sa->worker, NULL);   /* worker drains the queue first */
+    if (!joined) {
+        pthread_join(sa->worker, NULL);
+        pthread_mutex_lock(&sa->mu);
+        sa->joined = true;
+        pthread_mutex_unlock(&sa->mu);
+    }
+}
+
+void opc_store_async_destroy(opc_store_async_t *sa)
+{
+    if (!sa) return;
+    opc_store_async_finish(sa);
     close(sa->event_fd);
     pthread_cond_destroy(&sa->cv);
     pthread_mutex_destroy(&sa->mu);
@@ -202,6 +218,7 @@ int opc_store_async_submit_reserved(opc_store_async_t *sa, int reservation,
     j->token = token;
     j->result = 0;
     j->saved_errno = 0;
+    j->outcome = OPC_STORE_UNCHANGED;
     j->state = JOB_QUEUED;
     sa->q[(sa->q_head + sa->q_count) % OPC_STORE_ASYNC_QUEUE_DEPTH] = reservation;
     sa->q_count++;
@@ -251,6 +268,7 @@ size_t opc_store_async_drain(opc_store_async_t *sa,
             out[n].token       = sa->jobs[i].token;
             out[n].result      = sa->jobs[i].result;
             out[n].saved_errno = sa->jobs[i].saved_errno;
+            out[n].outcome     = sa->jobs[i].outcome;
             sa->jobs[i].state  = JOB_FREE;
             n++;
         } else {

@@ -1024,6 +1024,12 @@ int main(void)
      *      reported as a bad-frequency input). The revert is DEFERRED: dispatch
      *      does ONE apply and arms the revert; the main loop (here: an explicit
      *      drain) runs it after the ack. */
+    st.radio.station_type = OPC_STATION_SINGLE;
+    st.radio.wlan1.mode = OPC_WLAN_MODE_11AX;
+    st.radio.wlan1.bandwidth = OPC_BANDWIDTH_20;
+    legacy_to_scan(2412, 1, &st.radio.wlan1);
+    st.radio_applied_known = true;  /* fixture: current SINGLE baseline is live */
+    st.radio_committed = true;
     stub_apply_radio_set_fail(1);
     stub_apply_radio_reset_calls();
     r = do_set_radio(&st, CIP, 0, 0);
@@ -1312,8 +1318,8 @@ int main(void)
         int drc = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
                                 resp, sizeof resp, &rlen);
         ASSERT(drc == 0 && rlen == 0, "async set-password: ack deferred");
-        ASSERT(strcmp(st.password, "AsyncSecret1") == 0,
-               "async set-password: in-memory password updated");
+        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+               "async set-password: candidate unpublished before completion");
 
         ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
                "async set-password: completion signalled");
@@ -1328,6 +1334,8 @@ int main(void)
         ASSERT(rn > 0 && opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
                pack_ack.result == OPC_RESULT_OK,
                "async set-password: deferred ack OK");
+        ASSERT(strcmp(st.password, "AsyncSecret1") == 0,
+               "async set-password: durable completion publishes password");
         char pwbuf[129] = {0};
         ASSERT(opc_store_read_all(g_pw_path, pwbuf, sizeof pwbuf - 1) ==
                    (ssize_t)strlen("AsyncSecret1") &&
@@ -1664,13 +1672,9 @@ int main(void)
                "A-R1-002: only the ORIGINAL SN (98) answers — one response for an unpackable in-window frame");
         ASSERT(wait_fd_readable(cli, 300) != 0, "A-R1-002: no second ack for the invalid frame");
 
-        /* 21d. A retry must be matched against THIS port's pending request, not
-         *      the global st->radio. Session ownership is IP-scoped but pending
-         *      slots are (ip,port)-scoped: a DISTINCT request Y from a second
-         *      source port overwrites st->radio while port P1's original X is
-         *      still in flight. Comparing X's retransmission against st->radio(=Y)
-         *      would misjudge it as a new request and answer P1 with the
-         *      retransmission SN — X's ORIGINAL SN must win (Codex, PR #113 r2). */
+        /* 21d. Persistence is serialized per resource across all source ports.
+         *      P2's Y is unaccepted while P1's X is in flight and therefore gets
+         *      no ack; client timeout/retry after X completes starts Y. */
         {
             uint16_t cli2_port = 0;
             int cli2 = bind_loopback_udp(&cli2_port);
@@ -1689,7 +1693,7 @@ int main(void)
             fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 96, &rqY);
             rlen = -1;
             drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
-            ASSERT(drc == 0 && rlen == 0, "A19 multiport: distinct Y(SN=96) from P2 deferred");
+            ASSERT(drc == 0 && rlen == 0, "A19 multiport: Y(SN=96) waits by timeout while X owns radio");
             /* X retransmission from P1 (new SN, identical payload to X) */
             fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 97, &rqX);
             rlen = -1;
@@ -1705,11 +1709,21 @@ int main(void)
                    ahdr.sequence_number == 95,
                    "A19 multiport: P1 answered with X's ORIGINAL SN (95), not the retransmission SN");
             ASSERT(wait_fd_readable(cli, 300) != 0, "A19 multiport: P1 exactly one ack");
-            ASSERT(wait_fd_readable(cli2, 5000) == 0, "A19 multiport: P2 ack arrived");
+            ASSERT(wait_fd_readable(cli2, 300) != 0,
+                   "A19 multiport: unaccepted P2 request gets no ack");
+            fn   = opc_set_radio_config_req_pack(frame, sizeof frame, 196, &rqY);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0,
+                   "A19 multiport: P2 retry starts after X completion");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+                   "A19 multiport: P2 retry completion signalled");
+            opcd_store_async_on_ready(&st);
+            ASSERT(wait_fd_readable(cli2, 5000) == 0, "A19 multiport: P2 retry ack arrived");
             rn = recv(cli2, rx_buf, sizeof rx_buf, 0);
             ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-                   ahdr.sequence_number == 96,
-                   "A19 multiport: P2 answered with Y's SN (96)");
+                   ahdr.sequence_number == 196,
+                   "A19 multiport: accepted retry answers with its own SN (196)");
             close(cli2);
         }
 
@@ -1739,8 +1753,8 @@ int main(void)
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
         ASSERT(drc == 0 && rlen == 0,
                "pw retx: in-flight retransmission (SN=101) gives no immediate response");
-        ASSERT(strcmp(st.password, "RetxSecret1") == 0,
-               "pw retx: in-memory password is the original's, untouched by the retransmission");
+        ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
+               "pw retx: candidate stays unpublished while original is in flight");
         ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
                "pw retx: completion signalled");
         opcd_store_async_on_ready(&st);
@@ -1756,6 +1770,8 @@ int main(void)
                "pw retx: the single ack carries the ORIGINAL SN (100), not the retransmission's");
         ASSERT(wait_fd_readable(cli, 300) != 0,
                "pw retx: no second ack for the discarded retransmission");
+        ASSERT(strcmp(st.password, "RetxSecret1") == 0,
+               "pw retx: durable original publishes after completion");
 
         /* 21f. 엇갈림(cross): the same re-send arriving AFTER the original ack
          *      went out is a NEW request answered with its OWN SN. Processed
@@ -1791,8 +1807,8 @@ int main(void)
         rlen = -1;
         drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
         ASSERT(drc == 0 && rlen == 0, "pw payload: distinct B(SN=104) discarded, no inline answer");
-        ASSERT(strcmp(st.password, "RetxSecretA") == 0,
-               "pw payload: B never applied — A's value stands");
+        ASSERT(strcmp(st.password, "RetxSecret1") == 0,
+               "pw payload: neither in-flight candidate nor discarded B is published early");
         for (int d = 0; d < 3; d++) {
             if (wait_fd_readable(opc_store_async_event_fd(sa), 2000) != 0) break;
             opcd_store_async_on_ready(&st);
@@ -1827,12 +1843,9 @@ int main(void)
         ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
                "pw payload: default password restored");
 
-        /* 21h. Multiport: the retransmission is matched against THIS port's
-         *      pending request. P1's X (default→PwX) in flight, P2 sends a
-         *      distinct valid Y (PwX→PwY), then P1 re-sends X: X's old
-         *      password no longer matches memory, yet it is a retransmission
-         *      of P1's in-flight request → discarded; P1 gets X's ORIGINAL SN,
-         *      P2 gets Y's. A final P1 request restores the default password. */
+        /* 21h. Multiport resource gate: P1's X owns password persistence. P2's
+         *      Y and P1's retry are both unaccepted until X completes. P2 then
+         *      retries Y as a new transaction and receives its own ack. */
         {
             uint16_t cli2_port = 0;
             int cli2 = bind_loopback_udp(&cli2_port);
@@ -1855,7 +1868,7 @@ int main(void)
             fn   = opc_set_password_req_pack(frame, sizeof frame, 106, &pqY);
             rlen = -1;
             drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
-            ASSERT(drc == 0 && rlen == 0, "pw multiport: distinct Y(SN=106) from P2 deferred");
+            ASSERT(drc == 0 && rlen == 0, "pw multiport: Y(SN=106) waits by timeout while X owns password");
             fn   = opc_set_password_req_pack(frame, sizeof frame, 107, &pqX);
             rlen = -1;
             drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
@@ -1871,11 +1884,21 @@ int main(void)
                    ahdr.sequence_number == 105,
                    "pw multiport: P1 answered with X's ORIGINAL SN (105), not the retransmission SN");
             ASSERT(wait_fd_readable(cli, 300) != 0, "pw multiport: P1 exactly one ack");
-            ASSERT(wait_fd_readable(cli2, 5000) == 0, "pw multiport: P2 ack arrived");
+            ASSERT(wait_fd_readable(cli2, 300) != 0,
+                   "pw multiport: unaccepted P2 request gets no ack");
+
+            fn   = opc_set_password_req_pack(frame, sizeof frame, 206, &pqY);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "pw multiport: P2 retry starts after X completion");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+                   "pw multiport: P2 retry completion signalled");
+            opcd_store_async_on_ready(&st);
+            ASSERT(wait_fd_readable(cli2, 5000) == 0, "pw multiport: P2 retry ack arrived");
             rn = recv(cli2, rx_buf, sizeof rx_buf, 0);
             ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-                   ahdr.sequence_number == 106,
-                   "pw multiport: P2 answered with Y's SN (106)");
+                   ahdr.sequence_number == 206,
+                   "pw multiport: accepted P2 retry answers with its own SN (206)");
             close(cli2);
 
             fn   = opc_set_password_req_pack(frame, sizeof frame, 108, &pqR);
@@ -1981,9 +2004,8 @@ int main(void)
                "ip payload: B discarded, ORIGINAL SN (113) answers — Request-ID rule");
         ASSERT(wait_fd_readable(cli, 300) != 0, "ip payload: exactly one ack");
 
-        /* 21l. Multiport: P1's X in flight, P2 sends a distinct Y, P1 re-sends
-         *      X → discarded against P1's pending request; P1 gets X's
-         *      ORIGINAL SN, P2 gets Y's. */
+        /* 21l. Multiport resource gate: P2's Y is unaccepted while P1's X owns
+         *      IP-list persistence, then succeeds when retried after X. */
         {
             uint16_t cli2_port = 0;
             int cli2 = bind_loopback_udp(&cli2_port);
@@ -1999,7 +2021,7 @@ int main(void)
             fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 116, &irY);
             rlen = -1;
             drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
-            ASSERT(drc == 0 && rlen == 0, "ip multiport: distinct Y(SN=116) from P2 deferred");
+            ASSERT(drc == 0 && rlen == 0, "ip multiport: Y(SN=116) waits by timeout while X owns IP list");
             fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 117, &irX);
             rlen = -1;
             drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port, resp, sizeof resp, &rlen);
@@ -2015,11 +2037,20 @@ int main(void)
                    ahdr.sequence_number == 115,
                    "ip multiport: P1 answered with X's ORIGINAL SN (115), not the retransmission SN");
             ASSERT(wait_fd_readable(cli, 300) != 0, "ip multiport: P1 exactly one ack");
-            ASSERT(wait_fd_readable(cli2, 5000) == 0, "ip multiport: P2 ack arrived");
+            ASSERT(wait_fd_readable(cli2, 300) != 0,
+                   "ip multiport: unaccepted P2 request gets no ack");
+            fn   = opc_set_ip_config_list_req_pack(frame, sizeof frame, 216, &irY);
+            rlen = -1;
+            drc  = opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli2_port, resp, sizeof resp, &rlen);
+            ASSERT(drc == 0 && rlen == 0, "ip multiport: P2 retry starts after X completion");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+                   "ip multiport: P2 retry completion signalled");
+            opcd_store_async_on_ready(&st);
+            ASSERT(wait_fd_readable(cli2, 5000) == 0, "ip multiport: P2 retry ack arrived");
             rn = recv(cli2, rx_buf, sizeof rx_buf, 0);
             ASSERT(rn > 0 && opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-                   ahdr.sequence_number == 116,
-                   "ip multiport: P2 answered with Y's SN (116)");
+                   ahdr.sequence_number == 216,
+                   "ip multiport: accepted P2 retry answers with its own SN (216)");
             close(cli2);
         }
 

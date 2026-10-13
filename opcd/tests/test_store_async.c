@@ -268,6 +268,17 @@ int main(void)
         ASSERT(opc_store_async_submit(shutdown_sa, path_a,
                                       "shutdown", 8, 0644, 400u) == 0,
                "queued shutdown write accepted beside reservation");
+        opc_store_async_finish(shutdown_sa);
+        ASSERT(opc_store_async_event_fd(shutdown_sa) >= 0,
+               "finish retains completion channel for reconciliation");
+        n = drain_n(shutdown_sa, done, 1);
+        ASSERT(n == 1 && done[0].token == 400u && done[0].result == 0 &&
+               done[0].outcome == OPC_STORE_DURABLE,
+               "finish retains submitted result and durability outcome");
+        ASSERT(opc_store_async_submit(shutdown_sa, path_a, "late", 4, 0644, 401u) == -1 &&
+               errno == ECANCELED,
+               "finished writer refuses new admission");
+        opc_store_async_finish(shutdown_sa);
         opc_store_async_destroy(shutdown_sa);
         memset(buf, 0, sizeof buf);
         ASSERT(read_file(path_a, buf, sizeof buf - 1) == 8 &&

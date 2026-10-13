@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include "store.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,11 +77,18 @@ typedef struct opc_store_async_done {
     uint64_t token;        /* caller-chosen id passed to submit() */
     int      result;       /* 0 = written, -1 = failed */
     int      saved_errno;  /* errno of the failure; 0 on success */
+    opc_store_outcome_t outcome; /* replacement vs durability, even on failure */
 } opc_store_async_done_t;
 
 /* Create the writer (worker thread + eventfd). Returns NULL on failure —
  * callers are expected to fall back to synchronous writes. */
 opc_store_async_t *opc_store_async_create(void);
+
+/* Stop admission and join the worker after its queued writes finish, but
+ * retain results/eventfd so the single lifecycle owner can harvest and
+ * reconcile before destroy. NULL-safe and repeatable by that owner; lifecycle
+ * calls must not run concurrently with one another. */
+void opc_store_async_finish(opc_store_async_t *sa);
 
 /* Complete all queued jobs, join the worker, release resources.
  * NULL-safe. Undrained completions are discarded. */

@@ -51,8 +51,8 @@ OPCD_OBJS_NXP_TEST  := $(TESTDIR)/platform_nxp_test.o $(OPCDOBJ)/json_util.o \
                        $(OPCDOBJ)/ntp_parse.o $(OPCDOBJ)/nl80211_parse.o \
                        $(OPCDOBJ)/chan_encode.o
 
-TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler test_persist_admission \
-         test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
+TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler test_persist_admission test_persist_failure \
+         test_store_async test_store_atomic test_fault_probe test_nl80211_parse test_chan_encode \
          test_freq_source test_ip_iface test_topology test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log \
          test_platform_nxp_radio test_systemd_notify
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
@@ -91,6 +91,12 @@ $(TESTDIR)/test_platform_nxp_radio: $(TESTDIR)/test_platform_nxp_radio.o $(OPCD_
 
 $(TESTDIR)/test_store_async: $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASYNC)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_store_async.o $(OPCD_OBJS_STORE_ASYNC) $(LDFLAGS)
+
+$(TESTDIR)/test_persist_failure: $(TESTDIR)/test_persist_failure.o $(OPCD_OBJS_HANDLER) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=fsync -Wl,--wrap=rename
+
+$(TESTDIR)/test_store_atomic: $(TESTDIR)/test_store_atomic.o $(OPCD_OBJS_STORE_ASYNC)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -Wl,--wrap=fsync -Wl,--wrap=rename -Wl,--wrap=close
 
 $(TESTDIR)/test_fault_probe: $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_fault_probe.o $(OPCD_OBJS_FAULT)

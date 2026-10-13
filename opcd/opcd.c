@@ -783,8 +783,12 @@ int main(int argc, char **argv)
         opcd_apply_pending_ip_change(&st);
     }
 
-    /* Completes any queued NVRAM writes before the worker joins; an ack
-     * still in flight is dropped — the client's response timer covers it. */
+    /* Stop admission and join after completing every queued write, then
+     * reconcile their outcomes while the UDP socket and platform backend are
+     * still alive. This preserves visible password/IP candidates and performs
+     * any required radio recovery before teardown. */
+    opc_store_async_finish(st.store_async);
+    opcd_store_async_on_ready(&st);
     opc_store_async_destroy(st.store_async);
     st.store_async = NULL;
 

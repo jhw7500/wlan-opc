@@ -84,6 +84,7 @@ static int mgmt_ip_iface_idx(const opcd_state_t *st)
 void opcd_session_logout(opcd_state_t *st)
 {
     opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_OUT);
+    st->session_generation++;
     st->logged_in          = false;
     st->boot_status        = OPC_DEVICE_READY;
     st->indication_enabled = false;
@@ -262,18 +263,29 @@ static bool is_request_retransmission(opcd_state_t *st, uint16_t req_id,
     return pending_slot_for(st, req_id, ip, port) != NULL;
 }
 
+static bool persist_resource_busy(const opcd_state_t *st,
+                                  opcd_persist_resource_t resource)
+{
+    for (size_t i = 0; i < OPCD_PENDING_ACK_MAX; i++) {
+        const opcd_pending_ack_t *pa = &st->pending_acks[i];
+        if (pa->in_use && pa->resource == resource) return true;
+    }
+    return false;
+}
+
 /* Reserve the validated path/length before changing memory or live radio.
  * Returns 0 admitted, 1 transient saturation, -1 invalid/shutdown failure.
  * Harvest once without waiting. On saturation the request is UNACCEPTED:
  * no mutation and no NG; the protocol's timeout/retransmission retries it.
  * This may cost the client's NVRAM timer (120s); there is no server-side
  * pending request queue, so shutdown owns only submitted worker jobs. */
-static int persist_admit(opcd_state_t *st, const char *path, size_t len,
-                          int *reservation)
+static int persist_admit(opcd_state_t *st, opcd_persist_resource_t resource,
+                         const char *path, size_t len, int *reservation)
 {
     *reservation = -1;
     if (!st->store_async) return 0;
     for (int attempt = 0; attempt < 2; attempt++) {
+        if (persist_resource_busy(st, resource)) return 1;
         if (pending_ack_alloc(st) >= 0) {
             *reservation = opc_store_async_reserve(st->store_async, path, len);
             if (*reservation >= 0) return 0;
@@ -291,12 +303,15 @@ static int persist_admit(opcd_state_t *st, const char *path, size_t len,
  * write errors remain deferred NVRAM NG; queue pressure cannot reach it. */
 static int persist_blob(opcd_state_t *st, const char *path,
                         const void *data, size_t len, mode_t mode,
+                        opcd_persist_resource_t resource, bool no_ack,
                         uint16_t req_id, uint32_t ip, uint16_t port,
-                        uint16_t seq, int reservation, bool *deferred)
+                        uint16_t seq, int reservation, bool *deferred,
+                        opc_store_outcome_t *outcome)
 {
     *deferred = false;
+    if (outcome) *outcome = OPC_STORE_UNCHANGED;
     if (!st->store_async)
-        return opc_store_write_atomic(path, data, len, mode);
+        return opc_store_write_atomic_ex(path, data, len, mode, outcome);
 
     int slot = pending_ack_alloc(st);
     if (slot < 0) {
@@ -314,7 +329,8 @@ static int persist_blob(opcd_state_t *st, const char *path,
     struct timespec rx_ts;
     clock_gettime(CLOCK_MONOTONIC, &rx_ts);
     st->pending_acks[slot] = (opcd_pending_ack_t){
-        .in_use = true, .req_id = req_id, .seq = seq,
+        .in_use = true, .no_ack = no_ack, .resource = resource,
+        .req_id = req_id, .seq = seq,
         .client_ip = ip, .client_port = port, .rx_ts = rx_ts,
     };
     *deferred = true;
@@ -324,36 +340,23 @@ static int persist_blob(opcd_state_t *st, const char *path,
 /* Preserve the earlier IP entry error as the immediate response. Its
  * committed prefix owns capacity already and is written by the sole worker;
  * completion is log-only, with the existing power-loss durability boundary. */
-static void persist_no_ack(opcd_state_t *st, const char *path,
-                           const void *data, size_t len, mode_t mode,
-                           int reservation)
+static int persist_password(opcd_state_t *st, const char *candidate, size_t len,
+                            uint32_t ip, uint16_t port, uint16_t seq,
+                            int reservation, bool *deferred,
+                            opc_store_outcome_t *outcome)
 {
-    if (!st->store_async) {
-        if (opc_store_write_atomic(path, data, len, mode) != 0)
-            fprintf(stderr, "opcd: NVRAM write failed (%s): %s\n", path, strerror(errno));
-        return;
-    }
-    if (opc_store_async_submit_reserved(st->store_async, reservation, data,
-                                         len, mode, OPCD_STORE_TOKEN_NO_ACK) != 0) {
-        int e = errno;
-        opc_store_async_cancel(st->store_async, reservation);
-        fprintf(stderr, "opcd: NVRAM submit failed (%s): %s\n", path, strerror(e));
-    }
-}
-
-static int persist_password(opcd_state_t *st, uint32_t ip, uint16_t port,
-                            uint16_t seq, int reservation, bool *deferred)
-{
-    return persist_blob(st, st->paths.password, st->password,
-                        strnlen(st->password, sizeof st->password), 0600,
-                        OPC_REQ_SET_PASSWORD, ip, port, seq, reservation, deferred);
+    return persist_blob(st, st->paths.password, candidate, len, 0600,
+                        OPCD_PERSIST_PASSWORD, false, OPC_REQ_SET_PASSWORD,
+                        ip, port, seq, reservation, deferred, outcome);
 }
 
 static int persist_radio(opcd_state_t *st, uint32_t ip, uint16_t port,
-                         uint16_t seq, int reservation, bool *deferred)
+                         uint16_t seq, int reservation, bool *deferred,
+                         opc_store_outcome_t *outcome)
 {
     return persist_blob(st, st->paths.radio, &st->radio, sizeof st->radio, 0644,
-                        OPC_REQ_SET_RADIO_CONFIG, ip, port, seq, reservation, deferred);
+                        OPCD_PERSIST_RADIO, false, OPC_REQ_SET_RADIO_CONFIG,
+                        ip, port, seq, reservation, deferred, outcome);
 }
 
 /* radio.conf is a raw dump of opc_set_radio_config_req_t. Before Rev1.01 (#102)
@@ -503,10 +506,13 @@ int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t
 }
 
 static int persist_ip_list(opcd_state_t *st, uint32_t ip, uint16_t port,
-                           uint16_t seq, int reservation, bool *deferred)
+                           uint16_t seq, int reservation, bool no_ack,
+                           const opcd_ip_list_t *candidate, bool *deferred,
+                           opc_store_outcome_t *outcome)
 {
-    return persist_blob(st, st->paths.ip_list, &st->ip_list, sizeof st->ip_list, 0644,
-                        OPC_REQ_SET_IP_CONFIG_LIST, ip, port, seq, reservation, deferred);
+    return persist_blob(st, st->paths.ip_list, candidate, sizeof *candidate, 0644,
+                        OPCD_PERSIST_IP_LIST, no_ack, OPC_REQ_SET_IP_CONFIG_LIST,
+                        ip, port, seq, reservation, deferred, outcome);
 }
 
 /* ---- handlers ---- */
@@ -545,6 +551,7 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
         result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
     } else {
         bool was_active = st->logged_in;
+        if (!was_active) st->session_generation++;
         st->logged_in   = true;
         st->holder_ip   = ip;
         st->holder_port = port;
@@ -886,15 +893,12 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         size_t newlen = strnlen(req.new_password, sizeof st->password - 1);
-        if (is_request_retransmission(st, OPC_REQ_SET_PASSWORD, ip, port)) {
-            /* §4.1.3: a re-send while the ORIGINAL's
-             * NVRAM write is in flight. It already passed every check below
-             * as the original; re-evaluating it now would NG it against the
-             * password the original just changed. Discard it — the original's
-             * deferred ack answers with the ORIGINAL SN. A re-send that
-             * arrives after that ack (엇갈림) finds no pending slot and is
-             * processed as a new request on its own SN. */
-            fprintf(stderr, "opcd: set_password: retransmission while write in flight — discarded, original SN answers (§4.1.3)\n");
+        if (persist_resource_busy(st, OPCD_PERSIST_PASSWORD)) {
+            /* A password transaction owns the resource across every peer and
+             * UDP port.  Re-evaluating another request against the still-
+             * published password could emit a premature mismatch while the
+             * original durable-write result is unresolved. */
+            fprintf(stderr, "opcd: set_password: password persistence in flight — request left unaccepted for timeout/retry\n");
             session_touch(st);
             *rlen = 0;
             return 0;
@@ -918,7 +922,8 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
             result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else {
             int reservation = -1;
-            int admission = persist_admit(st, st->paths.password, newlen, &reservation);
+            int admission = persist_admit(st, OPCD_PERSIST_PASSWORD,
+                                           st->paths.password, newlen, &reservation);
             if (admission > 0) {
                 session_touch(st);
                 *rlen = 0;
@@ -929,17 +934,22 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
                 emit_ack(rlen, opc_set_password_ack_pack(resp, rcap, seq, &ack));
                 return 0;
             }
-            memset(st->password, 0, sizeof st->password);
-            memcpy(st->password, req.new_password, newlen);
+            char candidate[sizeof st->password] = {0};
+            memcpy(candidate, req.new_password, newlen);
             bool deferred = false;
-            if (persist_password(st, ip, port, seq, reservation, &deferred) != 0) {
+            opc_store_outcome_t outcome = OPC_STORE_UNCHANGED;
+            if (persist_password(st, candidate, newlen, ip, port, seq,
+                                 reservation, &deferred, &outcome) != 0) {
                 result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
             }
             session_touch(st);
             if (deferred) {
+                memcpy(st->pending_password, candidate, sizeof candidate);
                 *rlen = 0;   /* ack follows the NVRAM completion */
                 return 0;
             }
+            if (outcome != OPC_STORE_UNCHANGED)
+                memcpy(st->password, candidate, sizeof candidate);
         }
     }
     opc_set_password_ack_t ack = { .result = result, .error_cause = err };
@@ -980,7 +990,8 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
         return 0;
     } else {
         int reservation = -1;
-        int admission = persist_admit(st, st->paths.ip_list, sizeof st->ip_list,
+        int admission = persist_admit(st, OPCD_PERSIST_IP_LIST,
+                                       st->paths.ip_list, sizeof st->ip_list,
                                        &reservation);
         if (admission > 0) {
             session_touch(st);
@@ -993,6 +1004,9 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             return 0;
         }
         bool committed = false;
+        opcd_ip_list_t candidate = st->ip_list;
+        opcd_ip_list_t staging = st->ip_list_staging;
+        bool staging_active = st->ip_list_staging_active;
         for (size_t i = 0; i < req.entry_count; i++) {
             const opc_ipcfg_entry_t *e = &req.entries[i];
             if (e->list_number < 1 || e->list_number > OPC_IPCFG_LIST_MAX_SLOTS) {
@@ -1016,9 +1030,9 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                  * a prior incomplete cycle. 0x0003 (시작 및 완료) opens and
                  * closes in this one entry — it seeds here and commits below
                  * (#107, Rev1.01 §4.3.6 그림 4-6 single-frame commit). */
-                st->ip_list_staging = st->ip_list;
-                st->ip_list_staging_active = true;
-            } else if (!st->ip_list_staging_active) {
+                staging = candidate;
+                staging_active = true;
+            } else if (!staging_active) {
                 /* A17: CONTINUE/END with no open cycle — NG with 0x0018 per
                  * the vendor answer (numeric value pending confirmation).
                  * The entry is not recorded and nothing reaches NVM. */
@@ -1027,8 +1041,8 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             }
 
             uint16_t slot = (uint16_t)(e->list_number - 1);
-            st->ip_list_staging.slots[slot] = *e;
-            st->ip_list_staging.present[slot] = 1;
+            staging.slots[slot] = *e;
+            staging.present[slot] = 1;
 
             if (flag == OPC_LIST_BOUNDARY_END ||
                 flag == OPC_LIST_BOUNDARY_START_END) {
@@ -1037,10 +1051,10 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                  * above. Commit atomically (in memory); the shared persist
                  * below writes it to NVRAM. A CONTINUE/END that FOLLOWS this
                  * 0x0003 finds staging closed → START-less → 0x0018. */
-                st->ip_list = st->ip_list_staging;
+                candidate = staging;
                 committed = true;
-                st->ip_list_staging_active = false;
-                memset(&st->ip_list_staging, 0, sizeof st->ip_list_staging);
+                staging_active = false;
+                memset(&staging, 0, sizeof staging);
             }
         }
         session_touch(st);
@@ -1051,19 +1065,32 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
              * request takes the deferred-ack path: when an entry already
              * failed, the ack must carry that error now, so the committed
              * portion is written in-line (malformed-frame corner). */
-            if (result == OPC_RESULT_OK) {
-                bool deferred = false;
-                if (persist_ip_list(st, ip, port, seq, reservation, &deferred) != 0) {
-                    result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
-                } else if (deferred) {
+            bool deferred = false;
+            opc_store_outcome_t outcome = OPC_STORE_UNCHANGED;
+            bool no_ack = result != OPC_RESULT_OK;
+            int prc = persist_ip_list(st, ip, port, seq, reservation, no_ack,
+                                      &candidate, &deferred, &outcome);
+            if (prc != 0 && result == OPC_RESULT_OK) {
+                result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+            }
+            if (deferred) {
+                st->pending_ip_list = candidate;
+                st->pending_ip_staging = staging;
+                st->pending_ip_staging_active = staging_active;
+                st->pending_ip_staging_session_generation =
+                    st->session_generation;
+                if (!no_ack) {
                     *rlen = 0;   /* ack follows the NVRAM completion */
                     return 0;
                 }
-            } else {
-                persist_no_ack(st, st->paths.ip_list, &st->ip_list,
-                               sizeof st->ip_list, 0644, reservation);
+            } else if (outcome != OPC_STORE_UNCHANGED) {
+                st->ip_list = candidate;
+                st->ip_list_staging = staging;
+                st->ip_list_staging_active = staging_active;
             }
         } else {
+            st->ip_list_staging = staging;
+            st->ip_list_staging_active = staging_active;
             opc_store_async_cancel(st->store_async, reservation);
         }
     }
@@ -1210,6 +1237,46 @@ static bool radio_cfg_differs(const opc_set_radio_config_req_t *a,
     return false;
 }
 
+static bool radio_baseline_covers(const opcd_state_t *st,
+                                  const opc_set_radio_config_req_t *next)
+{
+    if (!st->radio_applied_known) return false;
+    if (st->radio.station_type != OPC_STATION_SINGLE &&
+        st->radio.station_type != OPC_STATION_DUAL) return false;
+    if (!valid_wlan_mode(st->radio.wlan1.mode) ||
+        !valid_wlan_bw(st->radio.wlan1.bandwidth)) return false;
+    if (!valid_scan_band(st->radio.wlan1.scan_band) ||
+        !opc_scan_list_valid(st->radio.wlan1.scan_band,
+                             st->radio.wlan1.scan_chlist)) return false;
+    /* Restoring SINGLE cannot reconstruct WLAN#2 after a DUAL apply may have
+     * changed it. A DUAL baseline covers both interfaces. */
+    if (next->station_type == OPC_STATION_DUAL) {
+        if (st->radio.station_type != OPC_STATION_DUAL) return false;
+        if (!valid_wlan_mode(st->radio.wlan2.mode) ||
+            !valid_wlan_bw(st->radio.wlan2.bandwidth) ||
+            check_priority_ch(st->radio.priority_ch) != PRIO_CH_OK) return false;
+        if (!valid_scan_band(st->radio.wlan2.scan_band) ||
+            !opc_scan_list_valid(st->radio.wlan2.scan_band,
+                                 st->radio.wlan2.scan_chlist)) return false;
+    }
+    return true;
+}
+
+static void radio_arm_revert(opcd_state_t *st,
+                             const opc_set_radio_config_req_t *baseline,
+                             bool baseline_committed, bool baseline_valid)
+{
+    if (!baseline_valid) {
+        st->radio_applied_known = false;
+        st->radio_committed = false;
+        st->radio_recovery_state = OPCD_RADIO_RECOVERY_DEGRADED_UNKNOWN_BASELINE;
+        return;
+    }
+    st->radio_revert_cfg = *baseline;
+    st->radio_revert_committed = baseline_committed;
+    st->radio_revert_pending = true;
+}
+
 static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                    uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                    ssize_t *rlen, uint16_t seq)
@@ -1229,10 +1296,10 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
         const prio_ch_verdict_t prio_v =
             (req.station_type == OPC_STATION_DUAL) ? check_priority_ch(req.priority_ch)
                                                    : PRIO_CH_OK;
-        if (is_request_retransmission(st, OPC_REQ_SET_RADIO_CONFIG, ip, port)) {
+        if (persist_resource_busy(st, OPCD_PERSIST_RADIO)) {
             /* §4.1.3 그림 4-2 (identical in Rev1.00 그림 3-4): any SetRadioConfig
-             * arriving on this socket while the ORIGINAL request's NVRAM write
-             * is still in flight is a RETRANSMISSION. Discard it — do not
+             * arriving while the resource's ORIGINAL request has an NVRAM
+             * write in flight is left unaccepted. Do not
              * re-apply (a wpa_supplicant reconfigure would drop the link) and
              * start no second write. The original's deferred ack answers on
              * completion, carrying the ORIGINAL request's SN. The payload is
@@ -1261,7 +1328,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
              * unpack behind the gate would instead swallow malformed traffic
              * silently. Recorded so the deviation is explicit; see the Rev1.02
              * inquiry log for the same reasoning. */
-            fprintf(stderr, "opcd: set_radio: retransmission while write in flight — discarded, original SN answers (§4.1.3)\n");
+            fprintf(stderr, "opcd: set_radio: radio persistence in flight — request left unaccepted for timeout/retry\n");
             session_touch(st);
             *rlen = 0;
             return 0;
@@ -1332,7 +1399,8 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 abort();
             }
             int reservation = -1;
-            int admission = persist_admit(st, st->paths.radio, sizeof st->radio,
+            int admission = persist_admit(st, OPCD_PERSIST_RADIO,
+                                           st->paths.radio, sizeof st->radio,
                                            &reservation);
             if (admission > 0) {
                 session_touch(st);
@@ -1344,6 +1412,9 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 emit_ack(rlen, opc_set_radio_config_ack_pack(resp, rcap, seq, &ack));
                 return 0;
             }
+            const opc_set_radio_config_req_t baseline = st->radio;
+            const bool baseline_committed = st->radio_committed;
+            const bool baseline_valid = radio_baseline_covers(st, &req);
             if (plat->apply_radio_config(&req) != 0) {
                 opc_store_async_cancel(st->store_async, reservation);
                 /* Platform refused/failed the kernel change. Arm a best-effort
@@ -1364,25 +1435,34 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                  * is a runtime fault, so the operator must not be told to change
                  * it (D9 re-decided 2026-06-16). User decision 2026-10-13:
                  * retain in-house 0x0050 and deliver its spec separately. */
-                if (radio_cfg_differs(&req, &st->radio)) {
-                    st->radio_revert_pending = true;
-                    st->radio_revert_cfg     = st->radio;
-                }
+                if (radio_cfg_differs(&req, &st->radio))
+                    radio_arm_revert(st, &baseline, baseline_committed,
+                                     baseline_valid);
                 result = OPC_RESULT_NG; err = OPC_ERR_RADIO_APPLY;
             } else {
                 st->radio = req;
+                st->radio_applied_known = true;
+                st->radio_recovery_state = OPCD_RADIO_RECOVERY_HEALTHY;
                 st->radio_gen++;               /* this config's generation */
                 st->radio_committed = false;   /* until the NVRAM write lands */
                 bool deferred = false;
-                if (persist_radio(st, ip, port, seq, reservation, &deferred) != 0) {
+                opc_store_outcome_t outcome = OPC_STORE_UNCHANGED;
+                if (persist_radio(st, ip, port, seq, reservation, &deferred,
+                                  &outcome) != 0) {
                     /* Applied but not persisted: stays uncommitted so an
                      * identical retry re-applies and re-persists (Codex P1). */
                     result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+                    if (outcome == OPC_STORE_UNCHANGED)
+                        radio_arm_revert(st, &baseline, baseline_committed,
+                                         baseline_valid);
                 } else if (deferred) {
                     /* Bind the queued write to this generation: its completion
                      * may commit only while st->radio still is this config. */
                     opcd_pending_ack_t *pa = pending_slot_for(st, OPC_REQ_SET_RADIO_CONFIG, ip, port);
                     if (pa) pa->radio_gen = st->radio_gen;
+                    st->radio_revert_cfg = baseline;
+                    st->radio_revert_committed = baseline_committed;
+                    st->radio_persist_baseline_valid = baseline_valid;
                     session_touch(st);
                     *rlen = 0;   /* ack follows the NVRAM completion */
                     return 0;
@@ -1401,12 +1481,17 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
 void opcd_radio_revert_drain(opcd_state_t *st)
 {
     if (!st->radio_revert_pending) return;
-    st->radio_revert_pending = false;
     const opcd_platform_ops_t *plat = opcd_platform();
     /* Unreachable when a revert is armed (an armed revert means an apply just
      * failed, which requires a platform), but bail defensively rather than
      * deref NULL. */
-    if (!plat) return;
+    if (!plat) {
+        st->radio_revert_pending = false;
+        st->radio_applied_known = false;
+        st->radio_committed = false;
+        st->radio_recovery_state = OPCD_RADIO_RECOVERY_DEGRADED_RESTORE_FAILED;
+        return;
+    }
     /* Re-apply the last-good config the SetRadioConfig handler captured on its
      * apply failure. Best-effort and off the response path (main loop, post-ack)
      * — the client already has its NG. A still-failing revert means the device
@@ -1415,7 +1500,16 @@ void opcd_radio_revert_drain(opcd_state_t *st)
         fprintf(stderr, "opcd: set_radio: deferred best-effort revert to "
                         "last-good config FAILED — device may be in a partial "
                         "apply state\n");
+        st->radio_applied_known = false;
+        st->radio_committed = false;
+        st->radio_recovery_state = OPCD_RADIO_RECOVERY_DEGRADED_RESTORE_FAILED;
+    } else {
+        st->radio = st->radio_revert_cfg;
+        st->radio_committed = st->radio_revert_committed;
+        st->radio_applied_known = true;
+        st->radio_recovery_state = OPCD_RADIO_RECOVERY_HEALTHY;
     }
+    st->radio_revert_pending = false;
 }
 
 static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, size_t flen,
@@ -1709,6 +1803,36 @@ void opcd_store_async_on_ready(opcd_state_t *st)
                      opcd_req_name(pa->req_id), strerror(done[i].saved_errno));
         }
 
+        /* Reconcile the published state while this resource's transaction gate
+         * is still held by pa->in_use. A second request can be admitted only
+         * after the visible state agrees with the write outcome. */
+        if (pa->resource == OPCD_PERSIST_PASSWORD) {
+            if (done[i].outcome != OPC_STORE_UNCHANGED)
+                memcpy(st->password, st->pending_password,
+                       sizeof st->password);
+            memset(st->pending_password, 0, sizeof st->pending_password);
+        } else if (pa->resource == OPCD_PERSIST_IP_LIST) {
+            if (done[i].outcome != OPC_STORE_UNCHANGED) {
+                st->ip_list = st->pending_ip_list;
+                /* The trailing open cycle is meaningful only in the session
+                 * that submitted the committed prefix. Logout/fresh-login
+                 * clears that volatile dependency even when the prefix later
+                 * becomes visible on disk. */
+                if (st->logged_in &&
+                    st->session_generation ==
+                        st->pending_ip_staging_session_generation) {
+                    st->ip_list_staging = st->pending_ip_staging;
+                    st->ip_list_staging_active =
+                        st->pending_ip_staging_active;
+                }
+            }
+            memset(&st->pending_ip_list, 0, sizeof st->pending_ip_list);
+            memset(&st->pending_ip_staging, 0,
+                   sizeof st->pending_ip_staging);
+            st->pending_ip_staging_active = false;
+            st->pending_ip_staging_session_generation = 0;
+        }
+
         uint8_t resp[OPC_FRAME_MAX];
         ssize_t rlen = 0;
         switch (pa->req_id) {
@@ -1735,8 +1859,26 @@ void opcd_store_async_on_ready(opcd_state_t *st)
              * drain after the current generation already committed, and must
              * not clear that (Codex, round 5). A failed current-generation
              * write leaves it uncommitted so the retry re-persists. */
-            if (pa->radio_gen == st->radio_gen)
-                st->radio_committed = (done[i].result == 0);
+            if (pa->radio_gen == st->radio_gen) {
+                if (done[i].outcome == OPC_STORE_DURABLE) {
+                    st->radio_committed = true;
+                } else if (done[i].outcome == OPC_STORE_REPLACED_UNSYNCED) {
+                    /* The candidate is both live and visible on disk, but its
+                     * directory entry is not confirmed durable. Keep it as the
+                     * published config and answer NG. */
+                    st->radio_committed = false;
+                } else {
+                    st->radio_committed = false;
+                    radio_arm_revert(st, &st->radio_revert_cfg,
+                                     st->radio_revert_committed,
+                                     st->radio_persist_baseline_valid);
+                    /* Completion-triggered recovery: do not wait for another
+                     * UDP packet, and keep pa->in_use true until this attempt
+                     * returns so the resource gate cannot open early. */
+                    opcd_radio_revert_drain(st);
+                }
+            }
+            st->radio_persist_baseline_valid = false;
             opc_set_radio_config_ack_t ack = { .result = result, .error_cause = err };
             emit_ack(&rlen, opc_set_radio_config_ack_pack(resp, sizeof resp, pa->seq, &ack));
             break;
@@ -1745,7 +1887,7 @@ void opcd_store_async_on_ready(opcd_state_t *st)
             break;
         }
 
-        if (rlen > 0 && st->udp_fd >= 0) {
+        if (!pa->no_ack && rlen > 0 && st->udp_fd >= 0) {
             struct sockaddr_in dst = {0};
             dst.sin_family      = AF_INET;
             dst.sin_port        = htons(pa->client_port);
