@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
 #include "../systemd_notify.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +14,13 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+
+#ifndef OPCD_TEST_BIN
+#define OPCD_TEST_BIN "../../build/native/opcd/opcd"
+#endif
 
 static int failures;
 
@@ -39,6 +48,77 @@ static int recv_exact(int fd, const char *want)
     ssize_t n = recv(fd, buf, sizeof buf, 0);
     return n == (ssize_t)strlen(want) && memcmp(buf, want, (size_t)n) == 0
         ? 0 : -1;
+}
+
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return -1;
+    return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
+static int recv_exact_until(int fd, const char *want, int timeout_ms)
+{
+    long long deadline = monotonic_ms() + timeout_ms;
+    while (1) {
+        long long remaining = deadline - monotonic_ms();
+        if (remaining <= 0)
+            return -1;
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int rc = poll(&pfd, 1, remaining > 100 ? 100 : (int)remaining);
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (rc == 0) continue;
+        char buf[64];
+        ssize_t n = recv(fd, buf, sizeof buf, 0);
+        if (n == (ssize_t)strlen(want) &&
+            memcmp(buf, want, (size_t)n) == 0)
+            return 0;
+    }
+}
+
+static int choose_udp_port(char *text, size_t cap)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        close(fd);
+        return -1;
+    }
+    socklen_t len = sizeof sa;
+    if (getsockname(fd, (struct sockaddr *)&sa, &len) != 0) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return snprintf(text, cap, "%u", (unsigned)ntohs(sa.sin_port)) < (int)cap
+        ? 0 : -1;
+}
+
+static pid_t spawn_udp_flooder(const char *port_text)
+{
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) _exit(2);
+    struct sockaddr_in dst = {0};
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    dst.sin_port = htons((uint16_t)strtoul(port_text, NULL, 10));
+    const uint8_t bad_frame = 0;
+    long long deadline = monotonic_ms() + 4000;
+    while (monotonic_ms() < deadline)
+        (void)sendto(fd, &bad_frame, sizeof bad_frame, 0,
+                     (struct sockaddr *)&dst, sizeof dst);
+    close(fd);
+    _exit(0);
 }
 
 static int bind_path_socket(char *path, size_t cap)
@@ -206,6 +286,70 @@ static void test_invalid_socket_addresses(void)
     ASSERT(n.fd == -1, "oversized address leaves no open socket");
 }
 
+static void test_watchdog_survives_continuous_udp_ingress(void)
+{
+    clear_env();
+    char notify_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    int receiver = bind_path_socket(notify_path, sizeof notify_path);
+    ASSERT(receiver >= 0, "bind watchdog fairness receiver");
+    if (receiver < 0) return;
+
+    char port[16];
+    int port_rc = choose_udp_port(port, sizeof port);
+    ASSERT(port_rc == 0, "choose control UDP port");
+    if (port_rc != 0) {
+        cleanup_path_socket(receiver, notify_path);
+        return;
+    }
+
+    setenv("NOTIFY_SOCKET", notify_path, 1);
+    setenv("WATCHDOG_USEC", "2000000", 1);
+    pid_t daemon_pid = fork();
+    ASSERT(daemon_pid >= 0, "fork opcd fairness daemon");
+    if (daemon_pid == 0) {
+        int nullfd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            dup2(nullfd, STDERR_FILENO);
+            close(nullfd);
+        }
+        execl(OPCD_TEST_BIN, OPCD_TEST_BIN, "-p", port,
+              "-c", "/nonexistent/opcd-fairness.conf", (char *)NULL);
+        _exit(127);
+    }
+    clear_env();
+    if (daemon_pid < 0) {
+        cleanup_path_socket(receiver, notify_path);
+        return;
+    }
+
+    int ready = recv_exact_until(receiver, "READY=1", 3000);
+    ASSERT(ready == 0, "opcd emits READY before ingress flood");
+
+    enum { FLOODER_COUNT = 32 };
+    pid_t flooders[FLOODER_COUNT];
+    size_t flooder_count = 0;
+    if (ready == 0) {
+        for (size_t i = 0; i < FLOODER_COUNT; i++) {
+            pid_t pid = spawn_udp_flooder(port);
+            ASSERT(pid >= 0, "fork UDP ingress flooder");
+            if (pid > 0) flooders[flooder_count++] = pid;
+        }
+        ASSERT(recv_exact_until(receiver, "WATCHDOG=1", 2500) == 0,
+               "main loop services watchdog during continuous UDP ingress");
+        ASSERT(kill(daemon_pid, 0) == 0,
+               "opcd remains alive while servicing continuous UDP ingress");
+    }
+
+    for (size_t i = 0; i < flooder_count; i++) {
+        kill(flooders[i], SIGTERM);
+        (void)waitpid(flooders[i], NULL, 0);
+    }
+    kill(daemon_pid, SIGTERM);
+    (void)waitpid(daemon_pid, NULL, 0);
+    cleanup_path_socket(receiver, notify_path);
+}
+
 int main(void)
 {
     test_standalone();
@@ -213,6 +357,7 @@ int main(void)
     test_watchdog_environment();
     test_abstract_socket();
     test_invalid_socket_addresses();
+    test_watchdog_survives_continuous_udp_ingress();
     clear_env();
     if (failures) {
         fprintf(stderr, "%d systemd-notify test(s) failed\n", failures);

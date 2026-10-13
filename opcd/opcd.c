@@ -51,6 +51,11 @@
 
 #define LOG(fmt, ...) fprintf(stderr, "opcd: " fmt "\n", ##__VA_ARGS__)
 
+/* Keep continuously-readable ingress sockets from monopolising the epoll
+ * thread. All registrations below are level-triggered (no EPOLLET), so an
+ * unread datagram remains readable and is reported again on the next wait. */
+#define OPCD_INGRESS_BATCH_MAX 16u
+
 /* Cached teardown function pointer for AS-safe signal-handler access — see
  * platform.h. Although opcd uses signalfd (not raw handlers) today, this
  * keeps the contract honest for future hot paths. */
@@ -580,11 +585,13 @@ int main(int argc, char **argv)
                     evt_fd = -1;
                 }
             } else if (fd == roam_fd) {
-                /* Local roam-notify datagrams (loopback only). Drain the whole
-                 * non-blocking socket; each datagram is one flat JSON object
+                /* Local roam-notify datagrams (loopback only). Process a
+                 * bounded batch so timer/signalfd service remains prompt under
+                 * sustained ingress. Level-triggered epoll reports any unread
+                 * remainder again. Each datagram is one flat JSON object
                  * (design §9.1 WIRE CONTRACT). Malformed/short → drop silently
                  * (debug log only), never block, never crash. */
-                while (1) {
+                for (unsigned batch = 0; batch < OPCD_INGRESS_BATCH_MAX; batch++) {
                     char buf[513];   /* contract caps payload at 512 B + NUL */
                     ssize_t rn = recvfrom(roam_fd, buf, sizeof buf - 1,
                                           MSG_TRUNC, NULL, NULL);
@@ -633,7 +640,10 @@ int main(int argc, char **argv)
                     on_platform_event(&revt, &st);
                 }
             } else if (fd == udp_fd) {
-                while (1) {
+                /* Bound each turn for fairness with timerfd, signalfd and
+                 * async completions. The socket is level-triggered, so queued
+                 * datagrams are presented again without an EAGAIN drain. */
+                for (unsigned batch = 0; batch < OPCD_INGRESS_BATCH_MAX; batch++) {
                     struct sockaddr_in src;
                     socklen_t srclen = sizeof src;
                     /* MSG_TRUNC: rn reports the true datagram size even when

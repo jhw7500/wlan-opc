@@ -137,6 +137,9 @@ $(TESTDIR)/test_opcd_log: $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
 $(TESTDIR)/test_systemd_notify: $(TESTDIR)/test_systemd_notify.o $(OPCD_OBJS_NOTIFY)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_systemd_notify.o $(OPCD_OBJS_NOTIFY)
 
+$(TESTDIR)/test_systemd_notify.o: test_systemd_notify.c | $(TESTDIR)
+	$(CC) $(CFLAGS) -DOPCD_TEST_BIN='"$(OPCDOBJ)/opcd"' -MMD -MP -c $< -o $@
+
 $(TESTDIR)/%.o: %.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
