@@ -12,6 +12,7 @@
 
 typedef enum {
     JOB_FREE = 0,   /* slot available for submit() */
+    JOB_RESERVED,   /* admitted, not yet submitted to the worker */
     JOB_QUEUED,     /* waiting for / being processed by the worker */
     JOB_DONE,       /* finished, waiting for drain() */
 } job_state_t;
@@ -140,23 +141,12 @@ int opc_store_async_event_fd(const opc_store_async_t *sa)
     return sa ? sa->event_fd : -1;
 }
 
-int opc_store_async_submit(opc_store_async_t *sa, const char *path,
-                           const void *data, size_t len, mode_t mode,
-                           uint64_t token)
+int opc_store_async_reserve(opc_store_async_t *sa, const char *path, size_t len)
 {
-    if (!sa || !path || (len > 0 && !data)) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (len > OPC_STORE_ASYNC_DATA_MAX) {
-        errno = E2BIG;
-        return -1;
-    }
+    if (!sa || !path) { errno = EINVAL; return -1; }
+    if (len > OPC_STORE_ASYNC_DATA_MAX) { errno = E2BIG; return -1; }
     size_t plen = strlen(path);
-    if (plen >= sizeof sa->jobs[0].path) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
+    if (plen >= sizeof sa->jobs[0].path) { errno = ENAMETOOLONG; return -1; }
 
     pthread_mutex_lock(&sa->mu);
     if (sa->shutdown) {
@@ -169,28 +159,71 @@ int opc_store_async_submit(opc_store_async_t *sa, const char *path,
         if (sa->jobs[i].state == JOB_FREE) { ji = i; break; }
     }
     if (ji < 0) {
-        /* Never block here: the main thread is also the drainer, so waiting
-         * for a slot inside submit() would deadlock against itself. */
         pthread_mutex_unlock(&sa->mu);
         errno = EAGAIN;
         return -1;
     }
-
     job_t *j = &sa->jobs[ji];
     memcpy(j->path, path, plen + 1);
-    if (len > 0) memcpy(j->data, data, len);
-    j->len         = len;
-    j->mode        = mode;
-    j->token       = token;
-    j->result      = 0;
-    j->saved_errno = 0;
-    j->state       = JOB_QUEUED;
+    j->len = len;
+    j->state = JOB_RESERVED;
+    pthread_mutex_unlock(&sa->mu);
+    return ji;
+}
 
-    sa->q[(sa->q_head + sa->q_count) % OPC_STORE_ASYNC_QUEUE_DEPTH] = ji;
+void opc_store_async_cancel(opc_store_async_t *sa, int reservation)
+{
+    if (!sa || reservation < 0 || reservation >= OPC_STORE_ASYNC_QUEUE_DEPTH) return;
+    pthread_mutex_lock(&sa->mu);
+    if (sa->jobs[reservation].state == JOB_RESERVED)
+        sa->jobs[reservation].state = JOB_FREE;
+    pthread_mutex_unlock(&sa->mu);
+}
+
+int opc_store_async_submit_reserved(opc_store_async_t *sa, int reservation,
+                                    const void *data, size_t len, mode_t mode,
+                                    uint64_t token)
+{
+    if (!sa || reservation < 0 || reservation >= OPC_STORE_ASYNC_QUEUE_DEPTH ||
+        (len > 0 && !data)) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&sa->mu);
+    job_t *j = &sa->jobs[reservation];
+    if (sa->shutdown || j->state != JOB_RESERVED || j->len != len) {
+        int e = sa->shutdown ? ECANCELED : EINVAL;
+        pthread_mutex_unlock(&sa->mu);
+        errno = e;
+        return -1;
+    }
+    if (len > 0) memcpy(j->data, data, len);
+    j->mode = mode;
+    j->token = token;
+    j->result = 0;
+    j->saved_errno = 0;
+    j->state = JOB_QUEUED;
+    sa->q[(sa->q_head + sa->q_count) % OPC_STORE_ASYNC_QUEUE_DEPTH] = reservation;
     sa->q_count++;
     pthread_cond_broadcast(&sa->cv);
     pthread_mutex_unlock(&sa->mu);
     return 0;
+}
+
+int opc_store_async_submit(opc_store_async_t *sa, const char *path,
+                           const void *data, size_t len, mode_t mode,
+                           uint64_t token)
+{
+    if (len > 0 && !data) { errno = EINVAL; return -1; }
+    int reservation = opc_store_async_reserve(sa, path, len);
+    if (reservation < 0) return -1;
+    int rc = opc_store_async_submit_reserved(sa, reservation, data, len, mode, token);
+    if (rc != 0) {
+        int e = errno;
+        opc_store_async_cancel(sa, reservation);
+        errno = e;
+    }
+    return rc;
 }
 
 size_t opc_store_async_drain(opc_store_async_t *sa,

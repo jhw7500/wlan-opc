@@ -61,9 +61,8 @@ void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
  * Set* acks they correspond to. Safe to call at any time: the completion
  * eventfd is EFD_NONBLOCK, so a read with nothing pending returns EAGAIN
  * instead of blocking, and the job scan then finds nothing to harvest. The
- * main loop calls it when the event fd is readable; persist_blob and
- * persist_no_ack also call it unconditionally on first slot saturation, to
- * reclaim slots held by jobs that finished mid-dispatch (#140). No-op when
+ * main loop calls it when the event fd is readable; persistence admission
+ * also harvests once on saturation, before changing any settings (#144). No-op when
  * no async store is attached. */
 void opcd_store_async_on_ready(opcd_state_t *st);
 

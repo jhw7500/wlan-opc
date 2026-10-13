@@ -3,7 +3,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -208,50 +207,12 @@ static void emit_ack(ssize_t *rlen, ssize_t packed)
 
 static_assert(sizeof(opcd_ip_list_t) <= OPC_STORE_ASYNC_DATA_MAX,
               "largest persisted blob must fit an async store job");
-/* Intended invariant is equality (PENDING_ACK_MAX == QUEUE_DEPTH) so every
- * pending ack can always claim a job slot and persist_blob defers in one
- * pass. The assert only requires <=; if the two ever diverge, persist_blob
- * still terminates via its wait-and-retry loop, just not in a single pass. */
-static_assert(OPCD_PENDING_ACK_MAX <= OPC_STORE_ASYNC_QUEUE_DEPTH,
-              "every pending ack needs an async store job slot");
+/* Admission must have both one ACK slot and one writer slot before any
+ * mutation. A no-ACK partial IP commit still consumes a writer slot. */
+static_assert(OPCD_PENDING_ACK_MAX == OPC_STORE_ASYNC_QUEUE_DEPTH,
+              "pending ACK capacity must match writer capacity");
 
-/* Job token for a queued write with no deferred ack attached — the wire ack
- * already went out carrying an earlier error. Completion is log-only. */
 #define OPCD_STORE_TOKEN_NO_ACK UINT64_MAX
-
-/* Upper bound on waiting for an in-flight NVRAM write when every slot is
- * busy. An unbounded wait here would re-create the loop stall (and outlast
- * SIGTERM, which is blocked for signalfd and thus cannot interrupt poll).
- *
- * Side effect: when slot saturation does occur, the dispatch thread is
- * suspended inside wait_one_completion for up to this duration, pausing UDP
- * reception, indication ticks, and the idle-logout timer for that window.
- * wait_one_completion returns on the FIRST completion, so the typical stall
- * is one fsync, not this bound; the bound is only reached when the writer is
- * genuinely stuck — and then OPC_ERR_NVRAM ("비휘발성 메모리의 소거·재기록
- * 이상", §4.3.6/§4.3.8) is the accurate answer.
- *
- * Lowered 2000 -> 500 (#140) so the worst-case stall stays under the 1 s
- * indication tick (opcd.c) instead of spanning two of them. Answering NG
- * sooner than this was considered and rejected: §4.1.3.1 triggers a VHL
- * retransmission on TIMEOUT only, so an NG is a delivered final answer — a
- * transient queue-full would become a permanent configuration failure, and
- * for SetRadioConfig it would leave wpa_supplicant.conf (already applied) ahead
- * of radio.conf with no boot-time re-apply to reconcile them.
- *
- * Measured on the target (cts-wlan, NXP i.MX93, eMMC /dev/mmcblk0p2 ext4,
- * opcd running), timing the real opc_store_write_atomic() against the real
- * OPC_PATH_BASE directory: for the largest persisted blob
- * (sizeof(opcd_ip_list_t) = 6784 B) p50 3.7 ms, p99 6.7 ms, worst 18.2 ms
- * over 200 writes, and worst 18.1 ms over 1000 sustained writes; 8192 B
- * (OPC_STORE_ASYNC_DATA_MAX) measures the same. So this bound leaves ~27x
- * margin over the worst single write actually observed on the target. */
-#define OPCD_PERSIST_WAIT_MS 500
-/* The worst-case stall must fit inside one indication tick (opcd.c arms a 1 s
- * timerfd). The pre-#140 value of 2000 spanned two ticks; this assert makes a
- * regression to it a build failure rather than a silent latency change. */
-static_assert(OPCD_PERSIST_WAIT_MS < 1000,
-              "persist wait must stay under the 1 s indication tick");
 
 static int pending_ack_alloc(const opcd_state_t *st)
 {
@@ -301,153 +262,98 @@ static bool is_request_retransmission(opcd_state_t *st, uint16_t req_id,
     return pending_slot_for(st, req_id, ip, port) != NULL;
 }
 
-/* Wait up to `ms` for one async-store completion and harvest it (sending
- * any deferred ack it carries). Returns 0 only when the eventfd was actually
- * readable (POLLIN). A timeout, or a wake from POLLERR/POLLHUP/POLLNVAL,
- * returns -1 — without the POLLIN guard the caller's retry loop would spin
- * at 100% CPU on a persistent error event. */
-static int wait_one_completion(opcd_state_t *st, int ms)
+/* Reserve the validated path/length before changing memory or live radio.
+ * Returns 0 admitted, 1 transient saturation, -1 invalid/shutdown failure.
+ * Harvest once without waiting. On saturation the request is UNACCEPTED:
+ * no mutation and no NG; the protocol's timeout/retransmission retries it.
+ * This may cost the client's NVRAM timer (120s); there is no server-side
+ * pending request queue, so shutdown owns only submitted worker jobs. */
+static int persist_admit(opcd_state_t *st, const char *path, size_t len,
+                          int *reservation)
 {
-    struct pollfd pfd = {
-        .fd     = opc_store_async_event_fd(st->store_async),
-        .events = POLLIN,
-    };
-    int r;
-    do { r = poll(&pfd, 1, ms); } while (r < 0 && errno == EINTR);
-    if (r != 1 || !(pfd.revents & POLLIN)) return -1;
-    opcd_store_async_on_ready(st);
-    return 0;
+    *reservation = -1;
+    if (!st->store_async) return 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (pending_ack_alloc(st) >= 0) {
+            *reservation = opc_store_async_reserve(st->store_async, path, len);
+            if (*reservation >= 0) return 0;
+            if (errno != EAGAIN) return -1;
+        }
+        if (attempt == 0) opcd_store_async_on_ready(st);
+    }
+    errno = EAGAIN;
+    return 1;
 }
 
-/* Persist `data` to `path`. Returns 0 with *deferred=true when the write was
- * queued (the ack is sent later by opcd_store_async_on_ready), 0/-1 with
- * *deferred=false for a synchronous write.
- *
- * In async mode the worker is the only writer of NVRAM paths. An in-line
- * write from this thread could interleave with an in-flight job for the
- * same path — both would use the same <path>.tmp.<pid> temp file (store.c)
- * and a stale queued snapshot could overtake the newer data — so a persist
- * that cannot be queued surfaces as OPC_ERR_NVRAM instead of falling back
- * to a synchronous write.
- *
- * Slot exhaustion means Set* writes arrived faster than NVRAM completes. The
- * earlier claim here — that a spec-compliant VHL cannot cause it — was wrong
- * (#140): §4.1.3.1 makes the VHL wait for a RESPONSE, not for the write that
- * response left behind, so the no-ack path (see persist_no_ack) lets a fully
- * compliant client fill the queue by sending partially-failing
- * SetIpConfigList frames back to back. Before paying the bounded wait this
- * harvests completions that already landed — the eventfd is level-triggered
- * and drained by the main loop, so a job that finished while this handler was
- * running still holds its slot. Waiting is bounded by OPCD_PERSIST_WAIT_MS. */
+/* Consume previously admitted capacity. Only the main loop allocates ACK
+ * slots, and admission/submit occur in one dispatch without re-entry, so the
+ * ACK slot established before mutation is still available here. Genuine
+ * write errors remain deferred NVRAM NG; queue pressure cannot reach it. */
 static int persist_blob(opcd_state_t *st, const char *path,
                         const void *data, size_t len, mode_t mode,
                         uint16_t req_id, uint32_t ip, uint16_t port,
-                        uint16_t seq, bool *deferred)
+                        uint16_t seq, int reservation, bool *deferred)
 {
-    /* T7 (proto-todo): captured before any slot wait so the served-in log
-     * on the deferred ack covers the full request→response interval. */
-    struct timespec rx_ts;
-    clock_gettime(CLOCK_MONOTONIC, &rx_ts);
-
     *deferred = false;
     if (!st->store_async)
         return opc_store_write_atomic(path, data, len, mode);
 
-    for (int attempt = 0;; attempt++) {
-        int slot = pending_ack_alloc(st);
-        if (slot >= 0) {
-            if (opc_store_async_submit(st->store_async, path, data, len, mode,
-                                       (uint64_t)slot) == 0) {
-                st->pending_acks[slot] = (opcd_pending_ack_t){
-                    .in_use      = true,
-                    .req_id      = req_id,
-                    .seq         = seq,
-                    .client_ip   = ip,
-                    .client_port = port,
-                    .rx_ts       = rx_ts,
-                };
-                /* No supersede pass: under the Request-ID rule (vendor reply
-                 * 2026-09-18) a second request for the same (req_id, ip, port)
-                 * is discarded upstream while the first is in flight, so a
-                 * live same-key slot cannot exist here. The former "rapid
-                 * reconfigure discards the earlier response duty" path is
-                 * unreachable and is gone with the payload comparison. */
-                *deferred = true;
-                return 0;
-            }
-            if (errno != EAGAIN) {
-                /* EINVAL/E2BIG/ENAMETOOLONG are ruled out by the fixed paths
-                 * and the static_asserts above; ECANCELED only during
-                 * shutdown. Report as a persist failure either way. */
-                fprintf(stderr, "opcd: async store submit failed: %s\n",
-                        strerror(errno));
-                return -1;
-            }
-            /* EAGAIN: a no-ack job holds the last queue slot — fall through
-             * and free one before retrying. */
-        }
-        /* First saturation hit: drain completions that are already finished
-         * but not yet harvested by the main loop. Costs no wait — the drain
-         * read() is on an EFD_NONBLOCK eventfd — and clears the common
-         * transient case with zero stall. */
-        if (attempt == 0) {
-            opcd_store_async_on_ready(st);
-            continue;
-        }
-        if (wait_one_completion(st, OPCD_PERSIST_WAIT_MS) != 0) {
-            errno = ETIMEDOUT;
-            return -1;
-        }
+    int slot = pending_ack_alloc(st);
+    if (slot < 0) {
+        opc_store_async_cancel(st->store_async, reservation);
+        errno = EAGAIN;
+        return -1;
     }
+    if (opc_store_async_submit_reserved(st->store_async, reservation,
+                                         data, len, mode, (uint64_t)slot) != 0) {
+        int e = errno;
+        opc_store_async_cancel(st->store_async, reservation);
+        errno = e;
+        return -1;
+    }
+    struct timespec rx_ts;
+    clock_gettime(CLOCK_MONOTONIC, &rx_ts);
+    st->pending_acks[slot] = (opcd_pending_ack_t){
+        .in_use = true, .req_id = req_id, .seq = seq,
+        .client_ip = ip, .client_port = port, .rx_ts = rx_ts,
+    };
+    *deferred = true;
+    return 0;
 }
 
-/* Persist with no deferred ack — the wire ack already carries an earlier
- * error, but a commit that reached memory still has to reach NVRAM. Queued
- * with the no-ack token so completion is log-only; written in-line only
- * when no worker exists. A drop (queue wedged) leaves memory ahead of disk
- * until the next successful persist — logged, same exposure as a failed
- * write. */
+/* Preserve the earlier IP entry error as the immediate response. Its
+ * committed prefix owns capacity already and is written by the sole worker;
+ * completion is log-only, with the existing power-loss durability boundary. */
 static void persist_no_ack(opcd_state_t *st, const char *path,
-                           const void *data, size_t len, mode_t mode)
+                           const void *data, size_t len, mode_t mode,
+                           int reservation)
 {
     if (!st->store_async) {
         if (opc_store_write_atomic(path, data, len, mode) != 0)
-            fprintf(stderr, "opcd: NVRAM write failed (%s): %s\n",
-                    path, strerror(errno));
+            fprintf(stderr, "opcd: NVRAM write failed (%s): %s\n", path, strerror(errno));
         return;
     }
-    for (int attempt = 0;; attempt++) {
-        if (opc_store_async_submit(st->store_async, path, data, len, mode,
-                                   OPCD_STORE_TOKEN_NO_ACK) == 0)
-            return;
-        /* Harvest already-landed completions before paying a wait (see
-         * persist_blob); only then block. */
-        if (errno == EAGAIN && attempt == 0) {
-            opcd_store_async_on_ready(st);
-            continue;
-        }
-        if (errno != EAGAIN ||
-            wait_one_completion(st, OPCD_PERSIST_WAIT_MS) != 0) {
-            fprintf(stderr, "opcd: NVRAM write dropped (%s): %s\n",
-                    path, strerror(errno));
-            return;
-        }
+    if (opc_store_async_submit_reserved(st->store_async, reservation, data,
+                                         len, mode, OPCD_STORE_TOKEN_NO_ACK) != 0) {
+        int e = errno;
+        opc_store_async_cancel(st->store_async, reservation);
+        fprintf(stderr, "opcd: NVRAM submit failed (%s): %s\n", path, strerror(e));
     }
 }
 
 static int persist_password(opcd_state_t *st, uint32_t ip, uint16_t port,
-                            uint16_t seq, bool *deferred)
+                            uint16_t seq, int reservation, bool *deferred)
 {
     return persist_blob(st, st->paths.password, st->password,
                         strnlen(st->password, sizeof st->password), 0600,
-                        OPC_REQ_SET_PASSWORD, ip, port, seq, deferred);
+                        OPC_REQ_SET_PASSWORD, ip, port, seq, reservation, deferred);
 }
 
 static int persist_radio(opcd_state_t *st, uint32_t ip, uint16_t port,
-                         uint16_t seq, bool *deferred)
+                         uint16_t seq, int reservation, bool *deferred)
 {
     return persist_blob(st, st->paths.radio, &st->radio, sizeof st->radio, 0644,
-                        OPC_REQ_SET_RADIO_CONFIG, ip, port, seq, deferred);
+                        OPC_REQ_SET_RADIO_CONFIG, ip, port, seq, reservation, deferred);
 }
 
 /* radio.conf is a raw dump of opc_set_radio_config_req_t. Before Rev1.01 (#102)
@@ -597,10 +503,10 @@ int opcd_radio_conf_decode(const void *buf, size_t n, opc_set_radio_config_req_t
 }
 
 static int persist_ip_list(opcd_state_t *st, uint32_t ip, uint16_t port,
-                           uint16_t seq, bool *deferred)
+                           uint16_t seq, int reservation, bool *deferred)
 {
     return persist_blob(st, st->paths.ip_list, &st->ip_list, sizeof st->ip_list, 0644,
-                        OPC_REQ_SET_IP_CONFIG_LIST, ip, port, seq, deferred);
+                        OPC_REQ_SET_IP_CONFIG_LIST, ip, port, seq, reservation, deferred);
 }
 
 /* ---- handlers ---- */
@@ -1011,10 +917,22 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
              * empty-login state became reachable. Reject at the source. */
             result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else {
+            int reservation = -1;
+            int admission = persist_admit(st, st->paths.password, newlen, &reservation);
+            if (admission > 0) {
+                session_touch(st);
+                *rlen = 0;
+                return 0;
+            }
+            if (admission < 0) {
+                opc_set_password_ack_t ack = { OPC_RESULT_NG, OPC_ERR_NVRAM };
+                emit_ack(rlen, opc_set_password_ack_pack(resp, rcap, seq, &ack));
+                return 0;
+            }
             memset(st->password, 0, sizeof st->password);
             memcpy(st->password, req.new_password, newlen);
             bool deferred = false;
-            if (persist_password(st, ip, port, seq, &deferred) != 0) {
+            if (persist_password(st, ip, port, seq, reservation, &deferred) != 0) {
                 result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
             }
             session_touch(st);
@@ -1061,6 +979,19 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
         *rlen = 0;
         return 0;
     } else {
+        int reservation = -1;
+        int admission = persist_admit(st, st->paths.ip_list, sizeof st->ip_list,
+                                       &reservation);
+        if (admission > 0) {
+            session_touch(st);
+            *rlen = 0;
+            return 0;
+        }
+        if (admission < 0) {
+            opc_set_ip_config_list_ack_t ack = { OPC_RESULT_NG, OPC_ERR_NVRAM };
+            emit_ack(rlen, opc_set_ip_config_list_ack_pack(resp, rcap, seq, &ack));
+            return 0;
+        }
         bool committed = false;
         for (size_t i = 0; i < req.entry_count; i++) {
             const opc_ipcfg_entry_t *e = &req.entries[i];
@@ -1122,7 +1053,7 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
              * portion is written in-line (malformed-frame corner). */
             if (result == OPC_RESULT_OK) {
                 bool deferred = false;
-                if (persist_ip_list(st, ip, port, seq, &deferred) != 0) {
+                if (persist_ip_list(st, ip, port, seq, reservation, &deferred) != 0) {
                     result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
                 } else if (deferred) {
                     *rlen = 0;   /* ack follows the NVRAM completion */
@@ -1130,8 +1061,10 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                 }
             } else {
                 persist_no_ack(st, st->paths.ip_list, &st->ip_list,
-                               sizeof st->ip_list, 0644);
+                               sizeof st->ip_list, 0644, reservation);
             }
+        } else {
+            opc_store_async_cancel(st->store_async, reservation);
         }
     }
     opc_set_ip_config_list_ack_t ack = { .result = result, .error_cause = err };
@@ -1398,7 +1331,21 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 fprintf(stderr, "opcd: BUG: opcd_platform() returned NULL in handle_set_radio_config\n");
                 abort();
             }
+            int reservation = -1;
+            int admission = persist_admit(st, st->paths.radio, sizeof st->radio,
+                                           &reservation);
+            if (admission > 0) {
+                session_touch(st);
+                *rlen = 0;
+                return 0;
+            }
+            if (admission < 0) {
+                opc_set_radio_config_ack_t ack = { OPC_RESULT_NG, OPC_ERR_NVRAM };
+                emit_ack(rlen, opc_set_radio_config_ack_pack(resp, rcap, seq, &ack));
+                return 0;
+            }
             if (plat->apply_radio_config(&req) != 0) {
+                opc_store_async_cancel(st->store_async, reservation);
                 /* Platform refused/failed the kernel change. Arm a best-effort
                  * revert to the last-good config so a partial apply (e.g. DUAL:
                  * mlan0 applied, mlan1 failed) cannot leave the device's
@@ -1427,7 +1374,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                 st->radio_gen++;               /* this config's generation */
                 st->radio_committed = false;   /* until the NVRAM write lands */
                 bool deferred = false;
-                if (persist_radio(st, ip, port, seq, &deferred) != 0) {
+                if (persist_radio(st, ip, port, seq, reservation, &deferred) != 0) {
                     /* Applied but not persisted: stays uncommitted so an
                      * identical retry re-applies and re-persists (Codex P1). */
                     result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;

@@ -1429,13 +1429,11 @@ int main(void)
                disk_list.slots[0].ip_address == 0xC0A80170,
                "NG-after-commit: committed list reached NVRAM via queue");
 
-        /* 19. burst pressure: with every async-store job slot pre-filled by
-         *     no-ack writes, a deferred Set* must still queue — persist_blob
-         *     first harvests already-landed completions, then falls back to a
-         *     bounded wait until a slot frees (#140) — and produce
-         *     exactly one OK ack. Re-init to a known password so this case
-         *     does not depend on the 15-16 chain (test 16 leaves memory at
-         *     "Another1" with disk unchanged — the no-rollback semantics). */
+        /* 19. Queue pressure must not permanently reject configuration.
+         * Admission may leave a full-queue request unaccepted; a client
+         * retransmits after its timeout once completions restore capacity.
+         * Use a known password so this is independent of the earlier genuine
+         * write failure and its existing no-rollback policy. */
         init_state(&st, OPC_PASSWORD_DEFAULT);
         st.udp_fd      = srv;
         st.store_async = sa;
@@ -1459,9 +1457,16 @@ int main(void)
          * those completions (freeing a slot) before the password write can be
          * submitted and its deferred ack reach the client. Pump until the ack
          * lands. */
-        for (int tries = 0; tries < 10 && wait_fd_readable(cli, 1000) != 0; tries++) {
-            if (wait_fd_readable(opc_store_async_event_fd(sa), 1000) == 0)
+        for (int tries = 0; tries < 50 && wait_fd_readable(cli, 0) != 0; tries++) {
+            if (wait_fd_readable(opc_store_async_event_fd(sa), 100) == 0)
                 opcd_store_async_on_ready(&st);
+            if (wait_fd_readable(cli, 0) != 0) {
+                /* A timeout retry is new only if admission rejected the
+                 * original. While accepted it remains a discarded duplicate. */
+                rlen = -1;
+                (void)opcd_dispatch(&st, frame, (size_t)fn, LOOP, cli_port,
+                                    resp, sizeof resp, &rlen);
+            }
         }
         rn = recv(cli, rx_buf, sizeof rx_buf, 0);
         ASSERT(rn > 0 && opc_set_password_ack_unpack(rx_buf, (size_t)rn, &pack_ack) == 0 &&
@@ -1473,7 +1478,7 @@ int main(void)
         /* Drain any no-ack filler completions the burst loop left queued so
          * test 20 starts with an empty job queue, then re-init to a clean
          * logged-in session. Without this, an undrained JOB_DONE slot can hold
-         * the queue full and the radio persist would hit the bounded wait. */
+         * the queue full and radio admission could require a timeout retry. */
         while (wait_fd_readable(opc_store_async_event_fd(sa), 200) == 0)
             opcd_store_async_on_ready(&st);
         init_state(&st, OPC_PASSWORD_DEFAULT);

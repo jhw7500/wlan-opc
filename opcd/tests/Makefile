@@ -51,7 +51,7 @@ OPCD_OBJS_NXP_TEST  := $(TESTDIR)/platform_nxp_test.o $(OPCDOBJ)/json_util.o \
                        $(OPCDOBJ)/ntp_parse.o $(OPCDOBJ)/nl80211_parse.o \
                        $(OPCDOBJ)/chan_encode.o
 
-TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler \
+TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler test_persist_admission \
          test_store_async test_fault_probe test_nl80211_parse test_chan_encode \
          test_freq_source test_ip_iface test_topology test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log \
          test_platform_nxp_radio test_systemd_notify
@@ -74,6 +74,10 @@ $(TESTDIR)/test_snapshot: $(TESTDIR)/test_snapshot.o $(OPCD_OBJS_SNAPSHOT) $(PRO
 
 $(TESTDIR)/test_handler: $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(PROTODIR)/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_handler.o $(OPCD_OBJS_HANDLER) $(LDFLAGS) $(LDLIBS)
+
+$(TESTDIR)/test_persist_admission: $(TESTDIR)/test_persist_admission.o $(OPCD_OBJS_HANDLER) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_persist_admission.o $(OPCD_OBJS_HANDLER) \
+		$(LDFLAGS) -Wl,--wrap=fsync $(LDLIBS)
 
 # Exercise the real NXP radio apply path while replacing only execv(2), the
 # external target boundary.  The private object avoids mixing NXP and stub
