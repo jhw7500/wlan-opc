@@ -81,6 +81,35 @@ validate_private_regular() {  # $1=path $2=description
         || die "$description metadata 불일치(기대 link1 owner $TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID mode0600, 현재 $metadata): $path"
 }
 
+latest_backup_pointer_path() {
+    echo "$BACKUP_DIR/.bd-provision-latest"
+}
+
+preflight_latest_backup_pointer() {
+    local pointer
+    pointer="$(latest_backup_pointer_path)"
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+        validate_private_regular "$pointer" "latest backup pointer"
+    fi
+}
+
+publish_latest_backup_pointer() {  # $1=validated complete backup tar
+    local bk="$1" pointer staged
+    pointer="$(latest_backup_pointer_path)"
+    staged="$(mktemp "$BACKUP_DIR/.bd-provision-latest.XXXXXX")" || return 1
+    if ! printf '%s\n' "${bk##*/}" > "$staged" \
+        || ! chmod 600 "$staged"; then
+        rm -f "$staged"
+        return 1
+    fi
+    validate_private_regular "$staged" "staged latest backup pointer"
+    if ! mv "$staged" "$pointer"; then
+        rm -f "$staged"
+        return 1
+    fi
+    validate_private_regular "$pointer" "published latest backup pointer"
+}
+
 acquire_operation_lock() {
     local lock_dir="${OPERATION_LOCK_FILE%/*}" fd_metadata path_metadata
     mkdir -p "$lock_dir" || die "operation lock 디렉터리 생성 실패: $lock_dir"
@@ -456,6 +485,7 @@ do_apply() {
 
     # 2) 백업 — 상대경로 -C 방식 (GNU/BusyBox tar 공통; 2026-09-02 실기 리허설에서 BusyBox 비호환 발견)
     mkdir -p "$BACKUP_DIR"
+    preflight_latest_backup_pointer
     local stamp bk reserve token staged_tar staged_manifest
     stamp="$(date +%Y%m%d-%H%M%S)"
     reserve="$(mktemp "$BACKUP_DIR/.bd-provision-reserve.XXXXXX")" \
@@ -495,6 +525,10 @@ do_apply() {
     mv "$staged_manifest" "$bk.manifest"
     validate_private_regular "$bk" "published backup tar"
     validate_private_regular "$bk.manifest" "published backup manifest"
+    if ! publish_latest_backup_pointer "$bk"; then
+        rm -f "$bk" "$bk.manifest"
+        die "latest backup pointer 게시 실패: $(latest_backup_pointer_path)"
+    fi
     info "백업: $bk"
 
     if [ -n "$FACTORY_TOPOLOGY" ] && [ "$topology_change_needed" -eq 0 ]; then
@@ -701,20 +735,45 @@ restore_backup_preserving_selector() {  # $1=backup tar; never writes/removes se
 }
 
 latest_complete_backup() {
-    local candidate newest="" newest_mtime=-1 candidate_mtime
+    local pointer candidate newest="" newest_mtime=-1 candidate_mtime newest_count=0 metadata
+    local pointer_lines=()
+    pointer="$(latest_backup_pointer_path)"
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+        validate_private_regular "$pointer" "latest backup pointer"
+        mapfile -t pointer_lines < "$pointer" \
+            || die "latest backup pointer 읽기 실패: $pointer"
+        [ "${#pointer_lines[@]}" -eq 1 ] \
+            && [[ "${pointer_lines[0]}" =~ ^bd-provision-[0-9]{8}-[0-9]{6}-[[:alnum:]]{6}\.tar$ ]] \
+            || die "latest backup pointer 내용 오류: $pointer"
+        candidate="$BACKUP_DIR/${pointer_lines[0]}"
+        validate_private_regular "$candidate" "pointed backup tar"
+        validate_private_regular "$candidate.manifest" "pointed backup manifest"
+        echo "$candidate"
+        return 0
+    fi
+
     shopt -s nullglob
     for candidate in "$BACKUP_DIR"/bd-provision-*.tar; do
         [ ! -L "$candidate" ] && [ -f "$candidate" ] \
             && [ ! -L "$candidate.manifest" ] && [ -f "$candidate.manifest" ] \
             || continue
+        metadata="$(stat -Lc '%h:%u:%g:%a' "$candidate" 2>/dev/null || echo '')"
+        [ "$metadata" = "1:$TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID:600" ] || continue
+        metadata="$(stat -Lc '%h:%u:%g:%a' "$candidate.manifest" 2>/dev/null || echo '')"
+        [ "$metadata" = "1:$TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID:600" ] || continue
         candidate_mtime="$(stat -c %Y "$candidate" 2>/dev/null || echo -1)"
-        if [ "$candidate_mtime" -ge "$newest_mtime" ]; then
+        if [ "$candidate_mtime" -gt "$newest_mtime" ]; then
             newest="$candidate"
             newest_mtime="$candidate_mtime"
+            newest_count=1
+        elif [ "$candidate_mtime" -eq "$newest_mtime" ]; then
+            newest_count=$((newest_count + 1))
         fi
     done
     shopt -u nullglob
     [ -n "$newest" ] || return 1
+    [ "$newest_count" -eq 1 ] \
+        || die "latest backup pointer 없이 최신 complete backup 시간이 중복됨: $BACKUP_DIR"
     echo "$newest"
 }
 
@@ -728,8 +787,7 @@ do_rollback() {
     guard_target; acquire_operation_lock
     local bk="$BACKUP_FILE"
     if [ -z "$bk" ]; then
-        bk="$(latest_complete_backup 2>/dev/null)" || true
-        [ -n "$bk" ] \
+        bk="$(latest_complete_backup)" \
             || die "완전한 backup tar/manifest pair 없음: $BACKUP_DIR (legacy tar는 --backup으로 명시)"
     fi
     [ -f "$bk" ] || die "백업 파일 없음: $bk"

@@ -455,6 +455,104 @@ test_same_second_backups_are_unique_and_private() {
     pass "same-second backups are unique complete pairs with mode 0600"
 }
 
+test_bare_rollback_selects_last_complete_same_second_backup() {
+    local root="$TEST_TMP/same-second-rollback"
+    new_root "$root"
+    local bin="$root/test-bin" counter="$root/reserve-counter"
+    mkdir -p "$bin"
+    # The fake date and mktemp scripts expand their own arguments at runtime.
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'if [ "${1:-}" = "+%Y%m%d-%H%M%S" ]; then printf "%s\n" 20261014-040000; else exec /usr/bin/date "$@"; fi' \
+        > "$bin/date"
+    # shellcheck disable=SC2016
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'case "${1:-}" in' \
+        '    */.bd-provision-reserve.XXXXXX)' \
+        '        count=0' \
+        '        [ ! -f "$PROVISION_TEST_RESERVE_COUNTER" ] || read -r count < "$PROVISION_TEST_RESERVE_COUNTER"' \
+        '        count=$((count + 1))' \
+        '        printf "%s\n" "$count" > "$PROVISION_TEST_RESERVE_COUNTER"' \
+        '        case "$count" in 1) token=zzzzzz ;; 2) token=aaaaaa ;; *) exit 74 ;; esac' \
+        '        path="${1%XXXXXX}$token"' \
+        '        (set -o noclobber; : > "$path") || exit 75' \
+        '        printf "%s\n" "$path"' \
+        '        ;;' \
+        '    *) exec /usr/bin/mktemp "$@" ;;' \
+        'esac' > "$bin/mktemp"
+    chmod +x "$bin/date" "$bin/mktemp"
+
+    PATH="$bin:$PATH" PROVISION_TEST_RESERVE_COUNTER="$counter" \
+        PROVISION_ROOT="$root" PROVISION_TOPOLOGY_HELPER="$HELPER" \
+        "$SCRIPT" apply --ip 192.168.0.101/24 --factory-topology peer-route >/dev/null
+    PATH="$bin:$PATH" PROVISION_TEST_RESERVE_COUNTER="$counter" \
+        PROVISION_ROOT="$root" PROVISION_TOPOLOGY_HELPER="$HELPER" \
+        "$SCRIPT" apply --ip 192.168.0.102/24 --factory-topology eth0-ip >/dev/null
+    touch -t 202610140400.00 "$root"/var/backups/bd-provision/bd-provision-*.tar
+
+    run_provision "$root" rollback >/dev/null
+    grep -q '^Address=192.168.0.101/24$' "$root/etc/systemd/network/20-mlan0.network" \
+        || fail "bare rollback did not select the second same-second apply pre-image"
+
+    printf 'Address=192.168.0.102/24\n' > "$root/etc/systemd/network/20-mlan0.network"
+    rm -f "$root/var/backups/bd-provision/.bd-provision-latest"
+    if run_provision "$root" rollback >/dev/null 2>&1; then
+        fail "bare rollback guessed among tied legacy backups without a pointer"
+    fi
+    grep -q '^Address=192.168.0.102/24$' "$root/etc/systemd/network/20-mlan0.network" \
+        || fail "ambiguous legacy rollback changed the active network"
+
+    touch -t 202610140359.59 \
+        "$root/var/backups/bd-provision/bd-provision-20261014-040000-zzzzzz.tar"
+    touch -t 202610140400.00 \
+        "$root/var/backups/bd-provision/bd-provision-20261014-040000-aaaaaa.tar"
+    run_provision "$root" rollback >/dev/null
+    grep -q '^Address=192.168.0.101/24$' "$root/etc/systemd/network/20-mlan0.network" \
+        || fail "bare rollback did not preserve unambiguous legacy backup selection"
+    pass "bare rollback selects the last published complete same-second backup"
+}
+
+test_bare_rollback_rejects_malformed_or_symlink_latest_pointer() {
+    local root="$TEST_TMP/unsafe-latest-pointer"
+    new_root "$root"
+    run_provision "$root" apply --ip 192.168.0.101/24 --factory-topology peer-route >/dev/null
+    local pointer="$root/var/backups/bd-provision/.bd-provision-latest"
+    local victim="$root/pointer-victim"
+    assert_eq "600" "$(stat -c %a "$pointer")" "latest-backup pointer is not private"
+    assert_eq "$(id -u):$(id -g)" "$(stat -c %u:%g "$pointer")" \
+        "latest-backup pointer owner mismatch"
+    cp "$root/etc/systemd/network/20-mlan0.network" "$root/network.before"
+
+    printf '../outside.tar\n' > "$pointer"
+    chmod 600 "$pointer"
+    if run_provision "$root" rollback >/dev/null 2>&1; then
+        fail "bare rollback accepted a malformed latest-backup pointer"
+    fi
+    assert_file_eq "$root/network.before" "$root/etc/systemd/network/20-mlan0.network" \
+        "malformed latest-backup pointer allowed a restore"
+
+    printf 'bd-provision-20261014-040000-aaaaaa.tar\n' > "$pointer"
+    if run_provision "$root" rollback >/dev/null 2>&1; then
+        fail "bare rollback fell back from a stale latest-backup pointer"
+    fi
+    assert_file_eq "$root/network.before" "$root/etc/systemd/network/20-mlan0.network" \
+        "stale latest-backup pointer allowed a fallback restore"
+
+    rm -f "$pointer"
+    printf 'do-not-touch\n' > "$victim"
+    ln -s "$victim" "$pointer"
+    if run_provision "$root" rollback >/dev/null 2>&1; then
+        fail "bare rollback accepted a symlink latest-backup pointer"
+    fi
+    assert_eq "do-not-touch" "$(sed -n '1p' "$victim")" \
+        "symlink latest-backup pointer clobbered its target"
+    assert_file_eq "$root/network.before" "$root/etc/systemd/network/20-mlan0.network" \
+        "symlink latest-backup pointer allowed a restore"
+    pass "bare rollback rejects malformed and symlink latest-backup pointers"
+}
+
 test_auto_rollback_ignores_incomplete_orphan() {
     local root="$TEST_TMP/orphan-backup"
     new_root "$root"
@@ -586,6 +684,8 @@ test_visible_selector_failure_rolls_back_whole_apply
 test_cooperative_writer_waits_through_post_visible_set_failure_rollback
 test_cooperative_writer_waits_through_mid_file_failure_rollback
 test_same_second_backups_are_unique_and_private
+test_bare_rollback_rejects_malformed_or_symlink_latest_pointer
+test_bare_rollback_selects_last_complete_same_second_backup
 test_auto_rollback_ignores_incomplete_orphan
 test_managed_rollback_holds_shared_selector_lock
 test_concurrent_apply_is_rejected_by_operation_lock
