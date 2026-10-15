@@ -33,6 +33,7 @@
 /* nl80211 attribute ids. */
 #define NL80211_ATTR_IFINDEX      3
 #define NL80211_ATTR_MAC          6
+#define NL80211_ATTR_FRAME       51
 #define NL80211_ATTR_WIPHY_FREQ  38
 #define NL80211_ATTR_STATUS_CODE 72   /* 72 in nl80211 UAPI; 48 is REG_INITIATOR */
 #define NL80211_ATTR_REASON_CODE 54
@@ -173,6 +174,19 @@ int nl80211_parse_evt(const uint8_t *msg, size_t len, int family_id,
                 out->mac_present = true;
             }
             break;
+        case NL80211_ATTR_FRAME: {
+            /* Management header: receiver@4, transmitter@10, BSSID@16,
+             * reason@24. Accept only an AP-sent frame of the matching
+             * subtype; local STA deauth must not seed a later AP identity. */
+            const uint8_t zero_mac[6] = {0};
+            uint8_t subtype = kind == OPCD_NL_DEAUTH ? 0xc0 : 0xa0;
+            if ((kind == OPCD_NL_DEAUTH || kind == OPCD_NL_DISASSOC) &&
+                pl_len >= 26 && pl[0] == subtype && (pl[1] & 3) == 0 &&
+                !(pl[10] & 1) && memcmp(pl + 10, zero_mac, 6) != 0 &&
+                memcmp(pl + 10, pl + 16, 6) == 0)
+                memcpy(out->ap_frame_mac, pl + 10, 6);
+            break;
+        }
         case NL80211_ATTR_DISCONNECTED_BY_AP:
             /* NLA_FLAG: a zero-length attr whose mere presence means true. */
             out->by_ap = true;

@@ -62,10 +62,16 @@ int main(void)
     /* CWD-relative paths (`make check` runs with CWD opcd/tests/), avoiding
      * the predictable-/tmp-path symlink class (CWE-377). Cleaned by unlink
      * below on a passing run. */
-    char path_a[128], path_bad[160];
+    char path_a[128], path_reserved[128], path_unsubmitted[128], path_bad[160];
     snprintf(path_a, sizeof path_a, "test_store_async_a_%d.tmp", (int)getpid());
+    snprintf(path_reserved, sizeof path_reserved,
+             "test_store_async_reserved_%d.tmp", (int)getpid());
+    snprintf(path_unsubmitted, sizeof path_unsubmitted,
+             "test_store_async_unsubmitted_%d.tmp", (int)getpid());
     snprintf(path_bad, sizeof path_bad, "no_such_dir_%d/file.tmp", (int)getpid());
     unlink(path_a);
+    unlink(path_reserved);
+    unlink(path_unsubmitted);
 
     opc_store_async_t *sa = opc_store_async_create();
     ASSERT(sa != NULL, "create succeeds");
@@ -152,6 +158,97 @@ int main(void)
                "saturated queue drains every completion");
     }
 
+    /* 5c. Two-phase admission reserves real capacity before the handler
+     *     mutates live state. A reservation neither reaches the worker nor
+     *     emits a completion; cancel releases exactly that capacity. */
+    {
+        int reservation = opc_store_async_reserve(sa, path_reserved, 5);
+        ASSERT(reservation >= 0, "reserve validates path/length and claims a slot");
+        int accepted = 0;
+        for (int i = 0; i < OPC_STORE_ASYNC_QUEUE_DEPTH - 1; i++)
+            if (opc_store_async_submit(sa, path_a, "held", 4, 0644,
+                                       (uint64_t)(200 + i)) == 0)
+                accepted++;
+        ASSERT(accepted == OPC_STORE_ASYNC_QUEUE_DEPTH - 1,
+               "reservation counts against queue capacity");
+        ASSERT(opc_store_async_submit(sa, path_a, "full", 4, 0644, 999u) == -1 &&
+               errno == EAGAIN,
+               "normal submit sees reserved slot as occupied");
+        opc_store_async_cancel(sa, reservation);
+        ASSERT(opc_store_async_submit(sa, path_a, "freed", 5, 0644, 299u) == 0,
+               "cancel makes the reserved capacity reusable");
+        n = drain_n(sa, done, OPC_STORE_ASYNC_QUEUE_DEPTH);
+        ASSERT(n == OPC_STORE_ASYNC_QUEUE_DEPTH,
+               "cancelled-reservation saturation drains submitted jobs only");
+        ASSERT(access(path_reserved, F_OK) != 0,
+               "cancelled reservation never reaches persistent storage");
+    }
+
+    /* 5d. submit_reserved accepts only its captured length, consumes the
+     *     handle exactly once, and retains the reservation after a rejected
+     *     length so the owner can still submit or cancel it deliberately. */
+    {
+        int reservation = opc_store_async_reserve(sa, path_reserved, 5);
+        ASSERT(reservation >= 0, "second reservation succeeds");
+        ASSERT(opc_store_async_submit_reserved(sa, reservation,
+                                               "bad", 3, 0644, 300u) == -1 &&
+               errno == EINVAL,
+               "reserved submit rejects length different from admission");
+        ASSERT(opc_store_async_submit_reserved(sa, reservation,
+                                               "right", 5, 0644, 301u) == 0,
+               "reservation remains usable after rejected submit");
+        ASSERT(opc_store_async_submit_reserved(sa, reservation,
+                                               "again", 5, 0644, 302u) == -1 &&
+               errno == EINVAL,
+               "submitted reservation cannot be reused");
+        n = drain_n(sa, done, 1);
+        memset(buf, 0, sizeof buf);
+        ASSERT(n == 1 && done[0].token == 301u &&
+               read_file(path_reserved, buf, sizeof buf - 1) == 5 &&
+               strcmp(buf, "right") == 0,
+               "reserved submit preserves token and writes captured path");
+    }
+
+    /* Reservations do not impose worker order.  Jobs enter FIFO when they are
+     * submitted, even when their slot indexes were reserved in the opposite
+     * order. */
+    {
+        int first_reserved = opc_store_async_reserve(sa, path_reserved, 5);
+        int second_reserved = opc_store_async_reserve(sa, path_reserved, 6);
+        ASSERT(first_reserved >= 0 && second_reserved >= 0,
+               "two ordered reservations succeed");
+        ASSERT(opc_store_async_submit_reserved(sa, second_reserved,
+                                               "second", 6, 0644, 310u) == 0 &&
+               opc_store_async_submit_reserved(sa, first_reserved,
+                                               "first", 5, 0644, 311u) == 0,
+               "reserved jobs submit opposite reservation order");
+        n = drain_n(sa, done, 2);
+        memset(buf, 0, sizeof buf);
+        ASSERT(n == 2 && read_file(path_reserved, buf, sizeof buf - 1) == 5 &&
+               strcmp(buf, "first") == 0,
+               "reserved jobs run in submit order, not slot order");
+    }
+
+    /* 5e. Reserve performs predictable validation before caller mutation. */
+    {
+        static char too_long[1025];
+        memset(too_long, 'x', sizeof too_long - 1);
+        too_long[sizeof too_long - 1] = '\0';
+        ASSERT(opc_store_async_reserve(NULL, path_a, 1) == -1 && errno == EINVAL,
+               "reserve rejects NULL store");
+        ASSERT(opc_store_async_reserve(sa, NULL, 1) == -1 && errno == EINVAL,
+               "reserve rejects NULL path");
+        ASSERT(opc_store_async_reserve(sa, path_a,
+                                       OPC_STORE_ASYNC_DATA_MAX + 1) == -1 &&
+               errno == E2BIG,
+               "reserve rejects oversized blob");
+        ASSERT(opc_store_async_reserve(sa, too_long, 1) == -1 &&
+               errno == ENAMETOOLONG,
+               "reserve rejects overlong path");
+        opc_store_async_cancel(NULL, -1);
+        ASSERT(1, "cancel is NULL/invalid-handle safe");
+    }
+
     /* 6. destroy() completes queued jobs before joining (durability). */
     ASSERT(opc_store_async_submit(sa, path_a, "final", 5, 0644, 9u) == 0,
            "submit before destroy ok");
@@ -160,12 +257,45 @@ int main(void)
     ASSERT(read_file(path_a, buf, sizeof buf - 1) == 5 && strcmp(buf, "final") == 0,
            "destroy drains the queue to disk");
 
+    /* Shutdown drains submitted work but does not turn a reservation into a
+     * write or wait for its owner (dispatch reservations never cross turns). */
+    opc_store_async_t *shutdown_sa = opc_store_async_create();
+    ASSERT(shutdown_sa != NULL, "shutdown reservation rig created");
+    if (shutdown_sa) {
+        int reservation = opc_store_async_reserve(shutdown_sa,
+                                                  path_unsubmitted, 8);
+        ASSERT(reservation >= 0, "unsubmitted shutdown reservation created");
+        ASSERT(opc_store_async_submit(shutdown_sa, path_a,
+                                      "shutdown", 8, 0644, 400u) == 0,
+               "queued shutdown write accepted beside reservation");
+        opc_store_async_finish(shutdown_sa);
+        ASSERT(opc_store_async_event_fd(shutdown_sa) >= 0,
+               "finish retains completion channel for reconciliation");
+        n = drain_n(shutdown_sa, done, 1);
+        ASSERT(n == 1 && done[0].token == 400u && done[0].result == 0 &&
+               done[0].outcome == OPC_STORE_DURABLE,
+               "finish retains submitted result and durability outcome");
+        ASSERT(opc_store_async_submit(shutdown_sa, path_a, "late", 4, 0644, 401u) == -1 &&
+               errno == ECANCELED,
+               "finished writer refuses new admission");
+        opc_store_async_finish(shutdown_sa);
+        opc_store_async_destroy(shutdown_sa);
+        memset(buf, 0, sizeof buf);
+        ASSERT(read_file(path_a, buf, sizeof buf - 1) == 8 &&
+               strcmp(buf, "shutdown") == 0,
+               "destroy drains queued work beside reservation");
+        ASSERT(access(path_unsubmitted, F_OK) != 0,
+               "destroy discards unsubmitted reservation without writing");
+    }
+
     /* 7. NULL-safety of the accessors. */
     ASSERT(opc_store_async_event_fd(NULL) == -1, "event_fd(NULL) is -1");
     opc_store_async_destroy(NULL);   /* must not crash */
     ASSERT(1, "destroy(NULL) is a no-op");
 
     unlink(path_a);
+    unlink(path_reserved);
+    unlink(path_unsubmitted);
 
     if (failures == 0) {
         fprintf(stdout, "all store_async tests passed\n");

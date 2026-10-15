@@ -1392,23 +1392,32 @@ static int nxp_get_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel
  * 0x000C, §3.4.4) per wlan idx. In Host-MLME mode the driver delivers the AP's
  * deauth/disassoc frame as NL80211_CMD_DEAUTHENTICATE / _DISASSOCIATE on the
  * mlme group BEFORE cfg80211_disconnected emits CMD_DISCONNECT; we latch the
- * subtype here and the following CMD_DISCONNECT(by_ap) reports it. Absent a
- * preceding frame the hint stays Deauthentication — the prior unconditional
- * default, so no regression. Reset on (re)association and after each disconnect
- * so a stale hint never mislabels a later drop. idx is 0/1 (nl_ifindex_to_idx).
+ * subtype and AP sender here and the following CMD_DISCONNECT(by_ap) reports
+ * them. The sender is needed when DISCONNECT omits its MAC attribute (#130).
+ * Without a preceding frame the defaults remain Deauthentication / zero MAC.
+ * Reset on (re)association, roaming and after each disconnect so an earlier
+ * AP cannot label a later drop. idx is 0/1 (nl_ifindex_to_idx).
  *
  * The "frame BEFORE CMD_DISCONNECT" ordering is specific to Host-MLME on the
  * 9098/mwifiex driver; where it does not hold the code simply falls back to
  * Deauthentication (still safe), so a future porter must not silently rely on it. */
-#define NXP_WLAN_COUNT_MAX 2   /* mlan0/mlan1 — bounds g_ap_disc_msgid + idx guards; must match nl_ifindex_to_idx() */
+#define NXP_WLAN_COUNT_MAX 2   /* mlan0/mlan1; must match nl_ifindex_to_idx() */
 static uint16_t g_ap_disc_msgid[NXP_WLAN_COUNT_MAX] = {
     OPC_AP_MSG_DEAUTHENTICATION, OPC_AP_MSG_DEAUTHENTICATION,
 };
+static uint8_t g_ap_disc_mac[NXP_WLAN_COUNT_MAX][6];
+
+static void nl_clear_ap_disc_hint(int idx)
+{
+    if (idx < 0 || idx >= NXP_WLAN_COUNT_MAX) return;
+    g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
+    memset(g_ap_disc_mac[idx], 0, sizeof g_ap_disc_mac[idx]);
+}
 
 /* Translate one decoded nl80211 event into 0..2 platform events and stage them
  * into the coalesce table. DISCONNECT emits AP_DISCONNECT (only when AP-
  * initiated) followed by WLAN_STATUS(UP); its Message ID (deauth/disassoc) comes
- * from g_ap_disc_msgid; DEAUTH/DISASSOC only latch that hint; CONNECT clears it. */
+ * from g_ap_disc_msgid; DEAUTH/DISASSOC latch the subtype and AP MAC. */
 static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
                          const opcd_nl_evt_t *nev, int idx)
 {
@@ -1422,8 +1431,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
 
         /* A successful (re)association clears any stale AP-disconnect subtype
          * hint left by a prior deauth/disassoc frame. */
-        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
-            g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
+        nl_clear_ap_disc_hint(idx);
 
         /* NL80211_CMD_CONNECT commonly omits NL80211_ATTR_WIPHY_FREQ, leaving
          * the event channel 0. Only then query the kernel directly
@@ -1460,6 +1468,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
          * mgmt-frame event the driver emits just before this disconnect (Host
          * MLME). With no preceding frame it defaults to Deauthentication. */
         if (nev->by_ap) {
+            const uint8_t zero_mac[6] = {0};
             memset(&pe, 0, sizeof pe);
             pe.kind                       = OPCD_PEVT_AP_DISCONNECT;
             pe.u.ap_disconnect.idx        = (uint8_t)idx;
@@ -1467,17 +1476,20 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
                 (idx >= 0 && idx < NXP_WLAN_COUNT_MAX) ? g_ap_disc_msgid[idx]
                                       : OPC_AP_MSG_DEAUTHENTICATION;
             pe.u.ap_disconnect.result_code   = nev->reason_code;
-            /* nev->mac is zeroed when NL80211_ATTR_MAC is absent (mac_present
-             * false) — best-effort: the AP MAC is reported as 00:00:00:00:00:00
-             * rather than dropping the indication. */
-            memcpy(pe.u.ap_disconnect.mac, nev->mac, 6);
+            /* Prefer a usable DISCONNECT MAC; otherwise keep the AP that
+             * sent the preceding frame. A live link lookup could already
+             * return the newly associated AP by the time this is delivered. */
+            if (nev->mac_present && !(nev->mac[0] & 1) &&
+                memcmp(nev->mac, zero_mac, 6) != 0)
+                memcpy(pe.u.ap_disconnect.mac, nev->mac, 6);
+            else if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
+                memcpy(pe.u.ap_disconnect.mac, g_ap_disc_mac[idx], 6);
             nl_coalesce_put(tab, count, &pe);
         }
 
         /* Hint is consumed once per disconnect: reset so it cannot mislabel a
          * later drop (e.g. a deauth/disassoc frame with no following DISCONNECT). */
-        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
-            g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
+        nl_clear_ap_disc_hint(idx);
 
         /* Then the link returns to UP (associated→up), channel cleared.
          * OPCD_WLAN_STATUS_UP = "link up, awaiting association" (platform.h:83),
@@ -1492,21 +1504,18 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         break;
 
     case OPCD_NL_DEAUTH:
-        /* AP-sent deauthentication frame (Host MLME). Latch the subtype for the
-         * CMD_DISCONNECT that follows; emit nothing here. (Written value equals
-         * the array's reset default, so this is a no-op today — kept explicit for
-         * symmetry with the DISASSOC arm and any future per-subtype cause.) */
-        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
-            g_ap_disc_msgid[idx] = OPC_AP_MSG_DEAUTHENTICATION;
-        break;
-
     case OPCD_NL_DISASSOC:
-        /* AP-sent disassociation frame (Host MLME). Latch the subtype. */
-        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX)
-            g_ap_disc_msgid[idx] = OPC_AP_MSG_DISASSOCIATION;
+        /* Latch only for the following DISCONNECT. An invalid/missing frame
+         * clears any older sender instead of reusing an unrelated address. */
+        if (idx >= 0 && idx < NXP_WLAN_COUNT_MAX) {
+            g_ap_disc_msgid[idx] = nev->kind == OPCD_NL_DEAUTH
+                ? OPC_AP_MSG_DEAUTHENTICATION : OPC_AP_MSG_DISASSOCIATION;
+            memcpy(g_ap_disc_mac[idx], nev->ap_frame_mac, 6);
+        }
         break;
 
     case OPCD_NL_ROAM: {
+        nl_clear_ap_disc_hint(idx);
         /* nl80211 ROAM carries no SNR/RSSI — seed from the cached link
          * readback (link.json). On failure the fields stay 0 (best-effort). */
         opcd_platform_link_t link;

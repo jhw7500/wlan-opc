@@ -39,6 +39,8 @@ typedef struct opcd_nl_evt {
     uint16_t channel;       /* derived from freq_mhz (0 if absent/unknown) */
     uint8_t  mac[6];        /* NL80211_ATTR_MAC, zeroed if absent          */
     bool     mac_present;
+    uint8_t  ap_frame_mac[6]; /* validated AP sender in deauth/disassoc
+                              * NL80211_ATTR_FRAME; zero if unavailable */
     uint16_t reason_code;   /* NL80211_ATTR_REASON_CODE (DISCONNECT)       */
     uint16_t status_code;   /* NL80211_ATTR_STATUS_CODE (CONNECT)          */
     bool     by_ap;         /* NL80211_ATTR_DISCONNECTED_BY_AP (DISCONNECT) */

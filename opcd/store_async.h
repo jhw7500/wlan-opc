@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include "store.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +34,7 @@ extern "C" {
  * submit returns.
  *
  * Capacity is fixed (OPC_STORE_ASYNC_QUEUE_DEPTH in-flight jobs). submit()
- * never blocks: it fails with EAGAIN when every slot is in use (queued or
+ * never blocks: it fails with EAGAIN when every slot is in use (reserved, queued or
  * completed-but-not-drained).
  *
  * Saturation is NOT limited to a non-compliant client (the earlier claim here
@@ -62,8 +63,9 @@ extern "C" {
  *
  * Accepted rather than capped: reaching it needs an abrupt kill DURING a
  * saturating burst, the lost writes are config the VHL can re-send, and the
- * alternative — keeping depth at 4 — keeps the dispatch-thread stall this
- * change exists to remove. Write durability (a WAL, or a cap on the no-ack
+ * alternative at the time — keeping depth at 4 — preserved the dispatch
+ * stall. Issue #144 now reserves capacity before mutation and relies on
+ * client timeout/retransmission when full, with no dispatch wait. Write durability (a WAL, or a cap on the no-ack
  * share of the queue, which is the portion no client will ever retry because
  * it was already answered NG) is a separate follow-up, not part of this fix. */
 #define OPC_STORE_ASYNC_QUEUE_DEPTH 16
@@ -75,11 +77,18 @@ typedef struct opc_store_async_done {
     uint64_t token;        /* caller-chosen id passed to submit() */
     int      result;       /* 0 = written, -1 = failed */
     int      saved_errno;  /* errno of the failure; 0 on success */
+    opc_store_outcome_t outcome; /* replacement vs durability, even on failure */
 } opc_store_async_done_t;
 
 /* Create the writer (worker thread + eventfd). Returns NULL on failure —
  * callers are expected to fall back to synchronous writes. */
 opc_store_async_t *opc_store_async_create(void);
+
+/* Stop admission and join the worker after its queued writes finish, but
+ * retain results/eventfd so the single lifecycle owner can harvest and
+ * reconcile before destroy. NULL-safe and repeatable by that owner; lifecycle
+ * calls must not run concurrently with one another. */
+void opc_store_async_finish(opc_store_async_t *sa);
 
 /* Complete all queued jobs, join the worker, release resources.
  * NULL-safe. Undrained completions are discarded. */
@@ -100,6 +109,21 @@ int opc_store_async_event_fd(const opc_store_async_t *sa);
 int opc_store_async_submit(opc_store_async_t *sa, const char *path,
                            const void *data, size_t len, mode_t mode,
                            uint64_t token);
+
+/* Reserve capacity BEFORE a caller changes settings. Validates and captures
+ * path/len; returns a slot >=0, or -1 with the same errors as submit().
+ * Reserved slots count toward the fixed capacity but never reach the worker.
+ * A caller owns its handle until exactly one submit_reserved or cancel.
+ * The handler consumes reservations within one dispatch; it never retains
+ * unsubmitted work across epoll turns or shutdown. */
+int opc_store_async_reserve(opc_store_async_t *sa, const char *path, size_t len);
+int opc_store_async_submit_reserved(opc_store_async_t *sa, int reservation,
+                                    const void *data, size_t len, mode_t mode,
+                                    uint64_t token);
+/* Release an unsubmitted reservation. Does not cancel queued/running writes.
+ * Invalid indexes and NULL are harmless. Handles must not be reused after
+ * submission/cancellation; a freed index may belong to a subsequent owner. */
+void opc_store_async_cancel(opc_store_async_t *sa, int reservation);
 
 /* Harvest finished jobs into `out[cap]`, freeing their slots. Clears the
  * eventfd; re-arms it when more completions remain than `cap` allowed.

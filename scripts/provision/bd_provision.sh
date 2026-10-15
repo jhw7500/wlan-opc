@@ -1,7 +1,8 @@
 #!/bin/bash
 # bd_provision.sh — 무선기판(BD) 현장 프로비저닝 번들 (1회성·운영자 명시 실행 전용)
 #
-# DFK 배정값(관리 IP/GW/NTP/무선 자격증명)을 기기 1대에 원자적으로 적용한다.
+# DFK 배정값(관리 IP/GW/NTP/무선 자격증명)을 기기 1대에 stage한 뒤 적용하고,
+# 정상 오류로 중단되면 적용 전 백업을 복원한다.
 # 근거: docs/dfk-meeting/dfk-consolidated-questions-20260708.md §4 "프로비저닝 번들",
 #       meeting-2026-06-26-dfk-network-ip-design.md §12 (opcd로 wlan0 IP/GW/NTP 설정 불가,
 #       set-ntp 래치, wbridge 부팅 1회 IP 수집 → 재부팅이 표준 반영 경로).
@@ -13,6 +14,7 @@
 #
 # 사용법:
 #   bd_provision.sh plan   --ip A.B.C.D/NN [--gw A.B.C.D] [--ntp A.B.C.D] [--ssid S --psk P] [--profile a|b]
+#                          [--factory-topology eth0-ip|peer-route]
 #   bd_provision.sh apply  (plan과 동일 인자) [--reboot] [--force]
 #   bd_provision.sh verify (plan과 동일 인자)
 #   bd_provision.sh rollback [--backup FILE.tar]
@@ -30,6 +32,9 @@
 #   --psk PASSPHRASE  WPA2-PSK 평문 8~63자 (따옴표 평문으로 기록)
 #   --profile a|b     b = Option B 3종 토글(peer_route=on, ip_discovery=on,
 #                     arp_ignore_always=off) 적용. a(기본) = 토글 불변·현재값 보고만.
+#   --factory-topology eth0-ip|peer-route
+#                     Factory Reset용 영구 topology를 명시적으로 기록·검증.
+#                     --profile 값에서 추론하지 않으며, 미지정 시 selector를 건드리지 않음.
 #   --reboot          apply 성공 후 실제 재부팅 (기본: 안내만)
 #   --force           mlan0(무선) 경유 SSH 세션에서도 apply 진행 (자기절단 경고 무시)
 #   --backup-dir DIR  백업 위치 (기본 /var/backups/bd-provision)
@@ -39,6 +44,7 @@
 #         (timedatectl/reboot/verify 라이브 점검)을 건너뛰고 파일 변환만 수행한다.
 
 set -euo pipefail
+umask 077
 
 ROOT="${PROVISION_ROOT:-}"
 NET_FILE="$ROOT/etc/systemd/network/20-mlan0.network"
@@ -46,13 +52,133 @@ TS_FILE="$ROOT/etc/systemd/timesyncd.conf"
 WPA_FILE="$ROOT/etc/wpa_supplicant/wpa_supplicant-mlan0.conf"
 CONF_CANDIDATES=("$ROOT/opt/wlan/config/wifi_init_conf.json" "$ROOT/etc/wlan/wifi_init_conf.json")
 BACKUP_DIR_DEFAULT="$ROOT/var/backups/bd-provision"
+TOPOLOGY_FILE="$ROOT/usr/local/etc/wifi_factory_topology.json"
+TOPOLOGY_HELPER="${PROVISION_TOPOLOGY_HELPER:-$ROOT/usr/local/scripts/wifi_factory_topology.py}"
+TOPOLOGY_LOCK_FILE="${TOPOLOGY_FILE%/*}/.${TOPOLOGY_FILE##*/}.lock"
+OPERATION_LOCK_FILE="${PROVISION_LOCK_FILE:-$ROOT/var/lock/bd-provision.lock}"
+if [ -n "$ROOT" ]; then
+    TOPOLOGY_OWNER_UID="$(id -u)"
+    TOPOLOGY_OWNER_GID="$(id -g)"
+else
+    TOPOLOGY_OWNER_UID=0
+    TOPOLOGY_OWNER_GID=0
+fi
 
 CMD="${1:-}"; shift || true
 IPCIDR="" GW="" NTP="" SSID="" PSK="" PROFILE="a" DO_REBOOT=0 FORCE=0
+FACTORY_TOPOLOGY="" TOPOLOGY_CURRENT="" TOPOLOGY_EXPECTED_SNAPSHOT="" TOPOLOGY_LOCK_FD=""
 BACKUP_DIR="$BACKUP_DIR_DEFAULT" BACKUP_FILE=""
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 info() { echo "[bd-provision] $*"; }
+
+validate_private_regular() {  # $1=path $2=description
+    local path="$1" description="$2" metadata
+    [ ! -L "$path" ] && [ -f "$path" ] || die "$description 이 안전한 regular file이 아님: $path"
+    metadata="$(stat -Lc '%h:%u:%g:%a' "$path")" \
+        || die "$description metadata 확인 실패: $path"
+    [ "$metadata" = "1:$TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID:600" ] \
+        || die "$description metadata 불일치(기대 link1 owner $TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID mode0600, 현재 $metadata): $path"
+}
+
+latest_backup_pointer_path() {
+    echo "$BACKUP_DIR/.bd-provision-latest"
+}
+
+preflight_latest_backup_pointer() {
+    local pointer
+    pointer="$(latest_backup_pointer_path)"
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+        validate_private_regular "$pointer" "latest backup pointer"
+    fi
+}
+
+publish_latest_backup_pointer() {  # $1=validated complete backup tar
+    local bk="$1" pointer staged
+    pointer="$(latest_backup_pointer_path)"
+    staged="$(mktemp "$BACKUP_DIR/.bd-provision-latest.XXXXXX")" || return 1
+    if ! printf '%s\n' "${bk##*/}" > "$staged" \
+        || ! chmod 600 "$staged"; then
+        rm -f "$staged"
+        return 1
+    fi
+    validate_private_regular "$staged" "staged latest backup pointer"
+    if ! mv "$staged" "$pointer"; then
+        rm -f "$staged"
+        return 1
+    fi
+    validate_private_regular "$pointer" "published latest backup pointer"
+}
+
+acquire_operation_lock() {
+    local lock_dir="${OPERATION_LOCK_FILE%/*}" fd_metadata path_metadata
+    mkdir -p "$lock_dir" || die "operation lock 디렉터리 생성 실패: $lock_dir"
+    [ ! -L "$OPERATION_LOCK_FILE" ] \
+        || die "operation lock이 symlink임: $OPERATION_LOCK_FILE"
+    if [ -e "$OPERATION_LOCK_FILE" ] && [ ! -f "$OPERATION_LOCK_FILE" ]; then
+        die "operation lock이 regular file이 아님: $OPERATION_LOCK_FILE"
+    fi
+    exec {OPERATION_LOCK_FD}>>"$OPERATION_LOCK_FILE" \
+        || die "operation lock 열기 실패: $OPERATION_LOCK_FILE"
+    flock -n "$OPERATION_LOCK_FD" \
+        || die "다른 프로비저닝 작업이 진행 중임: $OPERATION_LOCK_FILE"
+    [ ! -L "$OPERATION_LOCK_FILE" ] \
+        || die "operation lock 경로가 열기 중 symlink로 바뀜: $OPERATION_LOCK_FILE"
+    chmod 600 "/proc/$$/fd/$OPERATION_LOCK_FD" \
+        || die "operation lock mode 설정 실패: $OPERATION_LOCK_FILE"
+    fd_metadata="$(stat -Lc '%d:%i:%h:%u:%g:%a' "/proc/$$/fd/$OPERATION_LOCK_FD")" \
+        || die "operation lock fd 확인 실패"
+    path_metadata="$(stat -Lc '%d:%i:%h:%u:%g:%a' "$OPERATION_LOCK_FILE")" \
+        || die "operation lock path 확인 실패"
+    [ "$fd_metadata" = "$path_metadata" ] \
+        || die "operation lock 경로가 열기 중 교체됨: $OPERATION_LOCK_FILE"
+    case "$fd_metadata" in
+        *:1:"$TOPOLOGY_OWNER_UID":"$TOPOLOGY_OWNER_GID":600) ;;
+        *) die "operation lock metadata 불일치: $OPERATION_LOCK_FILE ($fd_metadata)" ;;
+    esac
+}
+
+acquire_topology_lock() {
+    local parent="${TOPOLOGY_FILE%/*}" parent_real parent_metadata parent_mode
+    local created=0 fd_metadata path_metadata
+    [ -d "$parent" ] && [ ! -L "$parent" ] \
+        || die "factory topology lock 디렉터리가 안전한 directory가 아님: $parent"
+    parent_real="$(realpath -e "$parent")" \
+        || die "factory topology lock 디렉터리 확인 실패: $parent"
+    [ "$parent_real" = "$parent" ] \
+        || die "factory topology lock 디렉터리 경로에 symlink가 있음: $parent"
+    parent_metadata="$(stat -Lc '%u:%g:%a' "$parent")" \
+        || die "factory topology lock 디렉터리 metadata 확인 실패: $parent"
+    parent_mode="${parent_metadata##*:}"
+    case "$parent_metadata" in
+        "$TOPOLOGY_OWNER_UID":"$TOPOLOGY_OWNER_GID":*) ;;
+        *) die "factory topology lock 디렉터리 owner 불일치: $parent ($parent_metadata)" ;;
+    esac
+    [ $((8#$parent_mode & 8#022)) -eq 0 ] \
+        || die "factory topology lock 디렉터리가 group/world writable임: $parent ($parent_mode)"
+
+    if (set -o noclobber; : > "$TOPOLOGY_LOCK_FILE") 2>/dev/null; then
+        created=1
+    else
+        [ ! -L "$TOPOLOGY_LOCK_FILE" ] && [ -f "$TOPOLOGY_LOCK_FILE" ] \
+            || die "factory topology lock이 안전한 regular file이 아님: $TOPOLOGY_LOCK_FILE"
+    fi
+    exec {TOPOLOGY_LOCK_FD}<>"$TOPOLOGY_LOCK_FILE" \
+        || die "factory topology lock 열기 실패: $TOPOLOGY_LOCK_FILE"
+    fd_metadata="$(stat -Lc '%d:%i:%h:%u:%g:%a' "/proc/$$/fd/$TOPOLOGY_LOCK_FD")" \
+        || die "factory topology lock fd 확인 실패"
+    path_metadata="$(stat -Lc '%d:%i:%h:%u:%g:%a' "$TOPOLOGY_LOCK_FILE")" \
+        || die "factory topology lock path 확인 실패"
+    [ "$fd_metadata" = "$path_metadata" ] \
+        || die "factory topology lock 경로가 열기 중 교체됨: $TOPOLOGY_LOCK_FILE"
+    case "$fd_metadata" in
+        *:1:"$TOPOLOGY_OWNER_UID":"$TOPOLOGY_OWNER_GID":600) ;;
+        *) die "factory topology lock metadata 불일치: $TOPOLOGY_LOCK_FILE ($fd_metadata)" ;;
+    esac
+    flock -n "$TOPOLOGY_LOCK_FD" \
+        || die "다른 factory topology writer가 진행 중임: $TOPOLOGY_LOCK_FILE"
+    [ "$created" -eq 0 ] || info "factory topology shared lock 생성: $TOPOLOGY_LOCK_FILE"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -62,6 +188,7 @@ while [ $# -gt 0 ]; do
         --ssid)       SSID="${2:-}"; shift 2 ;;
         --psk)        PSK="${2:-}"; shift 2 ;;
         --profile)    PROFILE="${2:-}"; shift 2 ;;
+        --factory-topology) FACTORY_TOPOLOGY="${2:-}"; shift 2 ;;
         --reboot)     DO_REBOOT=1; shift ;;
         --force)      FORCE=1; shift ;;
         --backup-dir) BACKUP_DIR="${2:-}"; shift 2 ;;
@@ -98,6 +225,62 @@ validate_args() {
         [ -z "$SSID" ] || [ "${#SSID}" -le 32 ] || die "--ssid 32바이트 초과"
     fi
     case "$PROFILE" in a|b) ;; *) die "--profile 은 a 또는 b" ;; esac
+    case "$FACTORY_TOPOLOGY" in
+        ""|eth0-ip|peer-route) ;;
+        *) die "--factory-topology 은 eth0-ip 또는 peer-route" ;;
+    esac
+}
+
+topology_path_exists() {
+    [ -e "$TOPOLOGY_FILE" ] || [ -L "$TOPOLOGY_FILE" ]
+}
+
+topology_helper() {
+    python3 "$TOPOLOGY_HELPER" "$@" \
+        --owner-uid "$TOPOLOGY_OWNER_UID" --owner-gid "$TOPOLOGY_OWNER_GID"
+}
+
+preflight_topology() {
+    [ -n "$FACTORY_TOPOLOGY" ] || return 0
+    [ -f "$TOPOLOGY_HELPER" ] || die "factory topology helper 없음: $TOPOLOGY_HELPER"
+    [ -d "${TOPOLOGY_FILE%/*}" ] \
+        || die "factory topology selector 디렉터리 없음: ${TOPOLOGY_FILE%/*}"
+    TOPOLOGY_CURRENT="$(topology_helper read --path "$TOPOLOGY_FILE")" \
+        || die "factory topology selector 검증 실패: $TOPOLOGY_FILE"
+    case "$TOPOLOGY_CURRENT" in
+        eth0-ip|peer-route) ;;
+        *) die "factory topology helper의 잘못된 응답: $TOPOLOGY_CURRENT" ;;
+    esac
+}
+
+stage_topology() {  # $1=staging path
+    [ -n "$FACTORY_TOPOLOGY" ] || return 0
+    topology_helper set --path "$1" --topology "$FACTORY_TOPOLOGY" >/dev/null \
+        || die "factory topology selector stage 실패"
+}
+
+set_active_topology() {
+    [ -n "$TOPOLOGY_LOCK_FD" ] || die "factory topology shared lock fd 없음"
+    topology_helper set --path "$TOPOLOGY_FILE" --topology "$FACTORY_TOPOLOGY" \
+        --lock-fd "$TOPOLOGY_LOCK_FD"
+}
+
+topology_needs_change() {
+    [ -n "$FACTORY_TOPOLOGY" ] || return 1
+    topology_path_exists || return 0
+    ! cmp -s "$TOPOLOGY_FILE" "$1"
+}
+
+capture_topology_snapshot() {
+    local snapshot
+    snapshot="$(topology_helper snapshot --path "$TOPOLOGY_FILE")" || return 1
+    jq -e --arg expected "$FACTORY_TOPOLOGY" '
+        type == "object"
+        and (.topology == $expected)
+        and (.generation | type == "string")
+        and (.generation | test("^(absent|v1-[0-9a-f]{64})$"))
+    ' >/dev/null <<<"$snapshot" || return 1
+    printf '%s\n' "$snapshot"
 }
 
 find_conf() {
@@ -228,9 +411,10 @@ require_conf_if_b() {
 }
 
 do_plan() {
-    validate_args; guard_target; require_conf_if_b
+    validate_args; guard_target; require_conf_if_b; preflight_topology
     local tmp; tmp="$(mktemp -d)"
     trap 'rm -rf "${tmp:-}"' EXIT
+    [ -z "$FACTORY_TOPOLOGY" ] || stage_topology "$tmp/wifi_factory_topology.json"
     local src name changed=0
     while IFS='|' read -r src name; do
         [ -f "$src" ] || die "대상 파일 없음: $src"
@@ -244,6 +428,19 @@ do_plan() {
             sed 's/psk=".*"/psk="********"/' "$tmp/$name.diff"
         fi
     done < <(list_targets)
+    if [ -n "$FACTORY_TOPOLOGY" ]; then
+        if topology_needs_change "$tmp/wifi_factory_topology.json"; then
+            changed=1
+            echo "----- wifi_factory_topology.json ($TOPOLOGY_FILE) -----"
+            if topology_path_exists; then
+                diff -u "$TOPOLOGY_FILE" "$tmp/wifi_factory_topology.json" || true
+            else
+                diff -u /dev/null "$tmp/wifi_factory_topology.json" || true
+            fi
+        else
+            info "wifi_factory_topology.json: 변경 없음"
+        fi
+    fi
     if [ "$PROFILE" = "a" ]; then
         local conf; conf="$(find_conf 2>/dev/null)" || true
         if [ -n "${conf:-}" ]; then
@@ -254,18 +451,27 @@ do_plan() {
 }
 
 do_apply() {
-    validate_args; guard_target; require_conf_if_b; guard_selfcut
+    validate_args; guard_target; require_conf_if_b; acquire_operation_lock; preflight_topology
+    [ -z "$FACTORY_TOPOLOGY" ] || acquire_topology_lock
+    guard_selfcut
     local tmp; tmp="$(mktemp -d)"
     trap 'rm -rf "${tmp:-}"' EXIT
+    [ -z "$FACTORY_TOPOLOGY" ] || stage_topology "$tmp/wifi_factory_topology.json"
 
     # 1) 전 대상 변환을 먼저 성공시킨다 (하나라도 실패 시 시스템 무변경)
-    local src name pairs=() changed=()
+    local src name pairs=() changed=() topology_change_needed=0
     while IFS='|' read -r src name; do
         [ -f "$src" ] || die "대상 파일 없음: $src"
         gen_one "$src" "$name" "$tmp/$name"
         pairs+=("$src|$name")
         diff -q "$src" "$tmp/$name" >/dev/null || changed+=("$name")
     done < <(list_targets)
+    if [ -n "$FACTORY_TOPOLOGY" ]; then
+        if topology_needs_change "$tmp/wifi_factory_topology.json"; then
+            changed+=("wifi_factory_topology.json")
+            topology_change_needed=1
+        fi
+    fi
 
     # 변경이 전혀 없으면 백업·반영·재부팅을 모두 생략 (rollback 이력 오염 방지)
     if [ "${#changed[@]}" -eq 0 ]; then
@@ -279,23 +485,59 @@ do_apply() {
 
     # 2) 백업 — 상대경로 -C 방식 (GNU/BusyBox tar 공통; 2026-09-02 실기 리허설에서 BusyBox 비호환 발견)
     mkdir -p "$BACKUP_DIR"
-    local stamp bk
+    preflight_latest_backup_pointer
+    local stamp bk reserve token staged_tar staged_manifest
     stamp="$(date +%Y%m%d-%H%M%S)"
-    bk="$BACKUP_DIR/bd-provision-$stamp.tar"
+    reserve="$(mktemp "$BACKUP_DIR/.bd-provision-reserve.XXXXXX")" \
+        || die "고유 backup 이름 예약 실패: $BACKUP_DIR"
+    token="${reserve##*.bd-provision-reserve.}"
+    rm -f "$reserve"
+    bk="$BACKUP_DIR/bd-provision-$stamp-$token.tar"
+    staged_tar="$tmp/backup.tar"
+    staged_manifest="$tmp/backup.tar.manifest"
     local rels=() p
     for p in "${pairs[@]}"; do
         src="${p%%|*}"
         rels+=("${src#"$ROOT"/}")   # ROOT 공백이면 선두 / 제거 → / 기준 상대경로
     done
-    tar -cf "$bk" -C "${ROOT:-/}" "${rels[@]}"
+    if [ -n "$FACTORY_TOPOLOGY" ] && topology_path_exists; then
+        rels+=("${TOPOLOGY_FILE#"$ROOT"/}")
+    fi
+    tar -cf "$staged_tar" -C "${ROOT:-/}" "${rels[@]}"
     {
         echo "# bd_provision backup $stamp"
-        echo "# args: ip=$IPCIDR gw=$GW ntp=$NTP ssid=${SSID:+SET} profile=$PROFILE"
+        echo "# args: ip=$IPCIDR gw=$GW ntp=$NTP ssid=${SSID:+SET} profile=$PROFILE factory_topology=${FACTORY_TOPOLOGY:-UNMANAGED}"
         printf '# file: %s\n' "${rels[@]}"
-    } > "$bk.manifest"
+        if [ -n "$FACTORY_TOPOLOGY" ]; then
+            if topology_path_exists; then
+                echo "# topology-state: PRESENT ${TOPOLOGY_FILE#"$ROOT"/}"
+            else
+                echo "# topology-state: ABSENT ${TOPOLOGY_FILE#"$ROOT"/}"
+            fi
+        else
+            echo "# topology-state: UNMANAGED"
+        fi
+    } > "$staged_manifest"
+    chmod 600 "$staged_tar" "$staged_manifest"
+    validate_private_regular "$staged_tar" "backup tar"
+    validate_private_regular "$staged_manifest" "backup manifest"
+    mv "$staged_tar" "$bk"
+    mv "$staged_manifest" "$bk.manifest"
+    validate_private_regular "$bk" "published backup tar"
+    validate_private_regular "$bk.manifest" "published backup manifest"
+    if ! publish_latest_backup_pointer "$bk"; then
+        rm -f "$bk" "$bk.manifest"
+        die "latest backup pointer 게시 실패: $(latest_backup_pointer_path)"
+    fi
     info "백업: $bk"
 
-    # 3) 원자 반영 (tmp → 대상, 권한 보존)
+    if [ -n "$FACTORY_TOPOLOGY" ] && [ "$topology_change_needed" -eq 0 ]; then
+        TOPOLOGY_EXPECTED_SNAPSHOT="$(capture_topology_snapshot)" \
+            || die "factory topology snapshot 확인 실패 — 활성 파일 반영 전 중단"
+    fi
+
+    # 3) 원자 반영 (tmp → 대상, 권한 보존). 중간 실패 시 백업으로 즉시 복원한다.
+    local commit_failed=0
     for p in "${pairs[@]}"; do
         src="${p%%|*}"; name="${p##*|}"
         if diff -q "$src" "$tmp/$name" >/dev/null; then
@@ -306,11 +548,54 @@ do_apply() {
         local mode own
         mode="$(stat -c %a "$src" 2>/dev/null || echo '')"
         own="$(stat -c %u:%g "$src" 2>/dev/null || echo '')"
-        [ -n "$mode" ] && chmod "$mode" "$tmp/$name"
-        [ -n "$own" ] && chown "$own" "$tmp/$name" 2>/dev/null || true
-        mv "$tmp/$name" "$src"
+        if [ -n "$mode" ] && ! chmod "$mode" "$tmp/$name"; then
+            commit_failed=1
+            break
+        fi
+        if [ -n "$own" ] && ! chown "$own" "$tmp/$name"; then
+            commit_failed=1
+            break
+        fi
+        if ! mv "$tmp/$name" "$src"; then
+            commit_failed=1
+            break
+        fi
         info "$name: 반영 완료 → $src"
     done
+    if [ "$commit_failed" -eq 0 ] && [ "$topology_change_needed" -eq 1 ]; then
+        if set_active_topology >/dev/null; then
+            info "wifi_factory_topology.json: 반영 완료 → $TOPOLOGY_FILE"
+            TOPOLOGY_EXPECTED_SNAPSHOT="$(capture_topology_snapshot)" || {
+                info "factory topology 외부 변경 또는 snapshot 검증 실패 — selector를 보존하고 적용 전 파일 복원 시도"
+                if restore_backup_preserving_selector "$bk"; then
+                    die "factory topology 외부 변경 감지 — selector를 보존하고 다른 파일을 적용 전 상태로 복원 완료"
+                fi
+                die "CRITICAL: factory topology snapshot 실패 후 다른 파일 복원도 실패함. 재부팅 금지, 수동 복구 필요: $bk"
+            }
+        else
+            commit_failed=1
+        fi
+    fi
+    if [ "$commit_failed" -ne 0 ]; then
+        info "반영 실패 — 적용 전 백업 복원 시도"
+        if restore_backup "$bk"; then
+            die "반영 실패 — 적용 전 상태로 복원 완료"
+        fi
+        die "CRITICAL: 반영 실패 후 백업 복원도 실패함. 재부팅 금지, 수동 복구 필요: $bk"
+    fi
+
+    if [ -n "$FACTORY_TOPOLOGY" ]; then
+        local topology_final_snapshot
+        topology_final_snapshot="$(capture_topology_snapshot)" || topology_final_snapshot=""
+        if [ -z "$topology_final_snapshot" ] \
+            || [ "$topology_final_snapshot" != "$TOPOLOGY_EXPECTED_SNAPSHOT" ]; then
+            info "factory topology 외부 변경 감지 — selector를 보존하고 적용 전 파일 복원 시도"
+            if restore_backup_preserving_selector "$bk"; then
+                die "factory topology 외부 변경 감지 — selector를 보존하고 다른 파일을 적용 전 상태로 복원 완료"
+            fi
+            die "CRITICAL: factory topology 외부 변경 후 다른 파일 복원도 실패함. 재부팅 금지, 수동 복구 필요: $bk"
+        fi
+    fi
 
     # 4) NTP 재활성화 (postinst set-ntp false 래치 해제) — --ntp 지정 시에만, 1회 명령
     if [ -n "$NTP" ] && [ -z "$ROOT" ]; then
@@ -337,7 +622,7 @@ chk() {  # $1=PASS|FAIL|SKIP|INFO $2=메시지
 }
 
 do_verify() {
-    validate_args; guard_target
+    validate_args; guard_target; preflight_topology
     info "verify (읽기 전용 — 불일치는 보고만 함)"
 
     # 파일 레벨 (테스트 모드에서도 수행)
@@ -359,6 +644,13 @@ do_verify() {
         grep -q "ssid=$hex" "$WPA_FILE" \
             && chk PASS "wpa conf ssid(hex) 일치" \
             || chk FAIL "wpa conf ssid 불일치"
+    fi
+    if [ -n "$FACTORY_TOPOLOGY" ]; then
+        if [ "$TOPOLOGY_CURRENT" = "$FACTORY_TOPOLOGY" ]; then
+            chk PASS "factory topology=$FACTORY_TOPOLOGY"
+        else
+            chk FAIL "factory topology 불일치 (현재 $TOPOLOGY_CURRENT, 기대 $FACTORY_TOPOLOGY)"
+        fi
     fi
     local conf; conf="$(find_conf 2>/dev/null)" || true
     if [ -n "${conf:-}" ]; then
@@ -421,17 +713,87 @@ do_verify() {
     info "verify 결과: 전체 통과"
 }
 
+restore_backup() {  # $1=backup tar; optional sidecar preserves selector absence
+    local bk="$1" manifest="$1.manifest"
+    tar -xf "$bk" -C "${ROOT:-/}" || return 1
+    if [ -f "$manifest" ] && grep -q '^# topology-state: ABSENT ' "$manifest"; then
+        rm -f "$TOPOLOGY_FILE" || return 1
+    fi
+    return 0
+}
+
+restore_backup_preserving_selector() {  # $1=backup tar; never writes/removes selector
+    local bk="$1" selector_rel="${TOPOLOGY_FILE#"$ROOT"/}" member members
+    local restore_members=()
+    members="$(tar -tf "$bk")" || return 1
+    while IFS= read -r member; do
+        [ "$member" = "$selector_rel" ] || restore_members+=("$member")
+    done <<<"$members"
+    [ "${#restore_members[@]}" -eq 0 ] \
+        || tar -xf "$bk" -C "${ROOT:-/}" "${restore_members[@]}" || return 1
+    return 0
+}
+
+latest_complete_backup() {
+    local pointer candidate newest="" newest_mtime=-1 candidate_mtime newest_count=0 metadata
+    local pointer_lines=()
+    pointer="$(latest_backup_pointer_path)"
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+        validate_private_regular "$pointer" "latest backup pointer"
+        mapfile -t pointer_lines < "$pointer" \
+            || die "latest backup pointer 읽기 실패: $pointer"
+        [ "${#pointer_lines[@]}" -eq 1 ] \
+            && [[ "${pointer_lines[0]}" =~ ^bd-provision-[0-9]{8}-[0-9]{6}-[[:alnum:]]{6}\.tar$ ]] \
+            || die "latest backup pointer 내용 오류: $pointer"
+        candidate="$BACKUP_DIR/${pointer_lines[0]}"
+        validate_private_regular "$candidate" "pointed backup tar"
+        validate_private_regular "$candidate.manifest" "pointed backup manifest"
+        echo "$candidate"
+        return 0
+    fi
+
+    shopt -s nullglob
+    for candidate in "$BACKUP_DIR"/bd-provision-*.tar; do
+        [ ! -L "$candidate" ] && [ -f "$candidate" ] \
+            && [ ! -L "$candidate.manifest" ] && [ -f "$candidate.manifest" ] \
+            || continue
+        metadata="$(stat -Lc '%h:%u:%g:%a' "$candidate" 2>/dev/null || echo '')"
+        [ "$metadata" = "1:$TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID:600" ] || continue
+        metadata="$(stat -Lc '%h:%u:%g:%a' "$candidate.manifest" 2>/dev/null || echo '')"
+        [ "$metadata" = "1:$TOPOLOGY_OWNER_UID:$TOPOLOGY_OWNER_GID:600" ] || continue
+        candidate_mtime="$(stat -c %Y "$candidate" 2>/dev/null || echo -1)"
+        if [ "$candidate_mtime" -gt "$newest_mtime" ]; then
+            newest="$candidate"
+            newest_mtime="$candidate_mtime"
+            newest_count=1
+        elif [ "$candidate_mtime" -eq "$newest_mtime" ]; then
+            newest_count=$((newest_count + 1))
+        fi
+    done
+    shopt -u nullglob
+    [ -n "$newest" ] || return 1
+    [ "$newest_count" -eq 1 ] \
+        || die "latest backup pointer 없이 최신 complete backup 시간이 중복됨: $BACKUP_DIR"
+    echo "$newest"
+}
+
+backup_manages_topology() {
+    local manifest="$1.manifest"
+    [ ! -L "$manifest" ] && [ -f "$manifest" ] \
+        && grep -Eq '^# topology-state: (ABSENT|PRESENT) ' "$manifest"
+}
+
 do_rollback() {
-    guard_target
+    guard_target; acquire_operation_lock
     local bk="$BACKUP_FILE"
     if [ -z "$bk" ]; then
-        bk="$(ls -1t "$BACKUP_DIR"/bd-provision-*.tar 2>/dev/null | head -1)" \
-            || true
-        [ -n "$bk" ] || die "백업 없음: $BACKUP_DIR"
+        bk="$(latest_complete_backup)" \
+            || die "완전한 backup tar/manifest pair 없음: $BACKUP_DIR (legacy tar는 --backup으로 명시)"
     fi
     [ -f "$bk" ] || die "백업 파일 없음: $bk"
+    backup_manages_topology "$bk" && acquire_topology_lock
     info "복원: $bk"
-    tar -xf "$bk" -C "${ROOT:-/}"
+    restore_backup "$bk" || die "백업 복원 실패: $bk"
     info "★ 복원 완료 — 재부팅해야 라이브 상태에 반영됨 (자동 재부팅하지 않음)"
 }
 
