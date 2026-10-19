@@ -322,12 +322,15 @@ static int nl_event_socket_open(void)
 /* Lifecycle                                                          */
 /* ------------------------------------------------------------------ */
 
+static void nl_seed_ch_cache(void);
+
 static int nxp_init(void)
 {
     /* Best-effort nl80211 event socket. Failure degrades to no-event
      * operation (event_fd stays -1) and MUST NOT fail nxp_init — opcd still
      * serves the pull API and the polled FaultDetect probe. */
     (void)nl_event_socket_open();
+    nl_seed_ch_cache();    /* best-effort too: a failed query leaves 0xFFFF */
     return 0;
 }
 
@@ -1570,6 +1573,30 @@ static void nl_note_ch(int idx, uint16_t ch_field)
 {
     if (idx < 0 || idx >= NXP_WLAN_COUNT_MAX) return;
     g_last_ch[idx] = ch_field ? ch_field : OPC_WLAN_CH_UNSET;
+}
+
+/* nl80211 does not replay a CONNECT that happened before opcd started, so a
+ * daemon (re)started while WLAN#1 is already associated would report 0xFFFF
+ * on the first disconnect. Seed the cache from the live interface at init
+ * (Codex review of PR #169). The query is indirect so the host test, which
+ * includes this file, can substitute it. */
+static int (*g_iface_freq_query)(int ifindex, uint32_t *freq_mhz, uint16_t *channel) =
+    nxp_get_iface_freq;
+
+static void nl_seed_ch_cache_idx(int idx, unsigned ifindex)
+{
+    uint32_t freq = 0;
+    uint16_t ch   = 0;
+    if (idx < 0 || idx >= NXP_WLAN_COUNT_MAX || ifindex == 0) return;
+    if (g_iface_freq_query((int)ifindex, &freq, &ch) != 0) return;
+    nl_note_ch(idx, opc_chan_field(freq, ch));
+}
+
+static void nl_seed_ch_cache(void)
+{
+    static const char *const names[NXP_WLAN_COUNT_MAX] = { "mlan0", "mlan1" };
+    for (int idx = 0; idx < NXP_WLAN_COUNT_MAX; idx++)
+        nl_seed_ch_cache_idx(idx, if_nametoindex(names[idx]));
 }
 
 static void nl_clear_ap_disc_hint(int idx)

@@ -92,6 +92,13 @@ static int emit_ap_disconnect(opcd_state_t *st, uint16_t msg_id, uint16_t reason
     return send_indication_frame(st, frame, n);
 }
 
+time_t opcd_mono_now_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
+}
+
 /* §4.3.9 period coalescing (#105): with a reporting period > 0 a state change
  * is STAGED (latest wins) and flushed once at the period boundary by
  * opcd_ind_tick; with period 0 it is notified on arrival, as the spec requires
@@ -106,6 +113,11 @@ void opcd_ind_radio_up(opcd_state_t *st)
 
 int opcd_ind_wlan_status(opcd_state_t *st, uint16_t status, uint16_t ch)
 {
+    /* Latch first, gates later: an event consumed while indications are off
+     * must still decide RadioUp at the next SetIndicationConfig. */
+    st->wlan0_assoc_known = true;
+    st->wlan0_assoc       = (status == OPC_WLAN_STATUS_CONNECTED);
+    st->wlan0_assoc_at    = opcd_mono_now_s();
     if (status == OPC_WLAN_STATUS_CONNECTED) opcd_ind_radio_up(st);
     if (!(st->indication_info_bits & OPC_IND_BIT_WLAN_STATUS_CHANGE)) return 0;
     if (st->indication_period_s > 0) {

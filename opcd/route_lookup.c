@@ -54,8 +54,13 @@ int opcd_route_direct_lookup(const char *text, uint32_t dst_host,
                         best_bits   = bits;
                         best_metric = (unsigned)metric;
                         best_mask   = mask;
+                        /* throw/unreachable/blackhole routes have no output
+                         * device (Iface "*"); throw and blackhole carry only
+                         * RTF_UP (unreachable adds RTF_REJECT), so the flag
+                         * test alone would call them direct */
                         best_direct = gw_raw == 0 &&
-                                      !(flags & (RT_GATEWAY | RT_REJECT));
+                                      !(flags & (RT_GATEWAY | RT_REJECT)) &&
+                                      strcmp(iface, "*") != 0;
                     }
                 }
             }

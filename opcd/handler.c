@@ -593,8 +593,14 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
          *    clears. A same-holder re-login / Login retransmission continues the
          *    SAME session and must keep its own still-pending change (#43).
          *  - !armed: an explicit Logout earlier in the same UDP drain armed a
-         *    commit that must survive to the apply pass. */
-        if (!was_active && !st->ip_change_commit_armed) {
+         *    commit that must survive to the apply pass.
+         *  - !deferred: an explicit Logout found an IP-list NVRAM write in
+         *    flight and left its decision to opcd_store_async_on_ready; that
+         *    change is Logout-committed, not abandoned, so it must survive
+         *    until on_ready re-checks and arms (or skips) it (#163 follow-up,
+         *    F2 tribunal A-R1-001). */
+        if (!was_active && !st->ip_change_commit_armed &&
+            !st->ip_change_logout_deferred) {
             st->ip_change_pending      = false;
             st->ip_change_list_no      = 0;
             st->ip_change_commit_armed = false;  /* already false per the guard;
@@ -608,6 +614,38 @@ static int handle_login(opcd_state_t *st, const uint8_t *frame, size_t flen,
     opc_login_ack_t ack = { .result = result, .error_cause = err };
     emit_ack(rlen, opc_login_ack_pack(resp, rcap, seq, &ack));
     return 0;
+}
+
+/* The Logout-time decision for a reserved ChangeIp (#43/#163): re-check the
+ * reserved slot against the COMMITTED list and either skip the apply (the slot
+ * was emptied by a SetIpConfigList between ChangeIp and Logout) or snapshot
+ * the entry and arm the commit the main loop applies. Called by handle_logout
+ * when no IP-list write is in flight, otherwise by opcd_store_async_on_ready
+ * once that write's outcome has been reconciled into ip_list. */
+static void arm_ip_change_from_committed(opcd_state_t *st)
+{
+    uint16_t n = st->ip_change_list_no;
+    if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS && !st->ip_list.present[n - 1]) {
+        /* #163: the reserved slot was emptied (SetIpConfigList with IP
+         * 0.0.0.0) between ChangeIp and this Logout — re-check before
+         * arming, like the 0x0050 clash re-check, and skip the apply. */
+        fprintf(stderr,
+                "opcd: logout: IP change slot %u cleared before Logout — not applied\n", n);
+        OLOG_WARN("exec: IP change skipped (slot=%u cleared before Logout)", n);
+        st->ip_change_pending = false;
+        st->ip_change_list_no = 0;
+    } else if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS) {
+        st->ip_change_armed_entry  = st->ip_list.slots[n - 1];
+        st->ip_change_armed_no     = n;
+        st->ip_change_commit_armed = true;
+    } else {
+        /* Defensive dead path: handle_change_ip_address validates the slot
+         * before staging, so n is always in range here. Log if the invariant
+         * is ever violated so a future regression is visible rather than a
+         * silently dropped commit (Claude review). */
+        fprintf(stderr,
+                "opcd: logout: pending IP change has invalid slot %u — not armed\n", n);
+    }
 }
 
 static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
@@ -633,28 +671,30 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
          * with the rewritten slot. Idle auto-logout reaches opcd_session_logout()
          * without arming and therefore never commits. */
         if (st->ip_change_pending && !st->ip_change_commit_armed) {
-            uint16_t n = st->ip_change_list_no;
-            if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS &&
-                !st->ip_list.present[n - 1]) {
-                /* #163: the reserved slot was emptied (SetIpConfigList with IP
-                 * 0.0.0.0) between ChangeIp and this Logout — re-check before
-                 * arming, like the 0x0050 clash re-check, and skip the apply. */
+            if (persist_resource_busy(st, OPCD_PERSIST_IP_LIST)) {
+                /* A SetIpConfigList whose NVRAM write is still in flight sits
+                 * in pending_ip_list, and ip_list is replaced only once that
+                 * write's outcome is known (opcd_store_async_on_ready).
+                 * Deciding here from either list would act on data the outcome
+                 * may still discard: a cleared slot the write then fails to
+                 * clear, or a rewritten slot whose ESSID would reach the wpa
+                 * conf although the VHL is told the request failed. So this
+                 * Logout only records that it committed; on_ready re-checks
+                 * and arms against the then-committed list and the main loop
+                 * applies it in that same cycle (#163 follow-up, F2 tribunal
+                 * A-R1-001). A fresh Login in that window must not clear the
+                 * staged change (handle_login checks this flag). If the write
+                 * completes only in the teardown reconcile, the armed commit
+                 * is logged and dropped there (opcd.c), as no apply pass
+                 * follows. */
                 fprintf(stderr,
-                        "opcd: logout: IP change slot %u cleared before Logout — not applied\n", n);
-                OLOG_WARN("exec: IP change skipped (slot=%u cleared before Logout)", n);
-                st->ip_change_pending = false;
-                st->ip_change_list_no = 0;
-            } else if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS) {
-                st->ip_change_armed_entry  = st->ip_list.slots[n - 1];
-                st->ip_change_armed_no     = n;
-                st->ip_change_commit_armed = true;
+                        "opcd: logout: IP change slot %u decision deferred — IP list write in flight\n",
+                        st->ip_change_list_no);
+                OLOG_INFO("exec: IP change decision deferred (slot=%u, IP list write in flight)",
+                          st->ip_change_list_no);
+                st->ip_change_logout_deferred = true;
             } else {
-                /* Defensive dead path: handle_change_ip_address validates the
-                 * slot before staging, so n is always in range here. Log if the
-                 * invariant is ever violated so a future regression is visible
-                 * rather than a silently dropped commit (Claude review). */
-                fprintf(stderr,
-                        "opcd: logout: pending IP change has invalid slot %u — not armed\n", n);
+                arm_ip_change_from_committed(st);
             }
         }
         opcd_session_logout(st);
@@ -1188,13 +1228,15 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
     if (opc_change_ip_address_req_unpack(frame, flen, &req) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        if (st->ip_change_commit_armed) {
+        if (st->ip_change_commit_armed || st->ip_change_logout_deferred) {
             /* A prior session's Logout armed a commit that the main loop will
-             * apply imminently; refuse to stage a new change so a returned OK is
-             * never silently dropped by that apply's clear (#43, Codex review).
-             * Only reachable in a same-drain race — the armed commit is about to
-             * switch the device IP regardless. This also keeps the armed window
-             * exclusive: no live pending state exists for the apply to discard. */
+             * apply imminently — or deferred its decision to the in-flight
+             * IP-list write, after which on_ready arms it; refuse to stage a
+             * new change so a returned OK is never silently dropped by that
+             * apply's clear (#43, Codex review). Only reachable in a same-drain
+             * race — the armed commit is about to switch the device IP
+             * regardless. This also keeps the armed window exclusive: no live
+             * pending state exists for the apply to discard. */
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
         } else if (st->ip_list_staging_active) {
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
@@ -1607,10 +1649,21 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
                 opcd_ind_init_complete(st, OPC_INIT_STATE_READY);
                 /* RadioUp(2) = associated (spec 4.4.1, #165): only if the AP
                  * link is up now (WLAN#1); otherwise it follows the first
-                 * association (opcd_ind_wlan_status). */
-                opcd_platform_link_t lk = {0};
-                if (opcd_platform()->get_link(0, &lk) == 0 && lk.associated)
-                    opcd_ind_radio_up(st);
+                 * association (opcd_ind_wlan_status). The association state
+                 * comes from the latch of processed events while it is fresh
+                 * (OPCD_ASSOC_LATCH_TTL_S); the polled link readback (link.json,
+                 * lagging nl80211 by about a second) is consulted before any
+                 * event has been seen and once the latch has aged past the
+                 * TTL, so a lost event cannot keep a stale latch authoritative. */
+                bool assoc;
+                if (st->wlan0_assoc_known &&
+                    opcd_mono_now_s() - st->wlan0_assoc_at <= OPCD_ASSOC_LATCH_TTL_S) {
+                    assoc = st->wlan0_assoc;
+                } else {
+                    opcd_platform_link_t lk = {0};
+                    assoc = opcd_platform()->get_link(0, &lk) == 0 && lk.associated;
+                }
+                if (assoc) opcd_ind_radio_up(st);
                 if (st->logged_in) opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
             }
         }
@@ -1895,6 +1948,17 @@ void opcd_store_async_on_ready(opcd_state_t *st)
                    sizeof st->pending_ip_staging);
             st->pending_ip_staging_active = false;
             st->pending_ip_staging_session_generation = 0;
+            /* A Logout that found this write in flight left its ChangeIp
+             * decision here: ip_list now reflects the outcome (replaced on
+             * success, kept on failure), so decide and arm against it. The
+             * main loop applies an armed commit at the end of this cycle;
+             * when this runs from the teardown reconcile instead, opcd.c logs
+             * and drops the armed commit (no apply pass follows). */
+            if (st->ip_change_logout_deferred) {
+                st->ip_change_logout_deferred = false;
+                if (st->ip_change_pending && !st->ip_change_commit_armed)
+                    arm_ip_change_from_committed(st);
+            }
         }
 
         uint8_t resp[OPC_FRAME_MAX];

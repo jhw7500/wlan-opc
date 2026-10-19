@@ -83,6 +83,28 @@ int main(void)
         ASSERT(rc == -ENETUNREACH, "RTF_REJECT route is not reachable");
     }
     /* junk / empty input */
+    /* throw / unreachable / blackhole routes print Iface "*" and no gateway;
+     * throw and blackhole carry only RTF_UP (0001), unreachable RTF_UP|RTF_REJECT
+     * (0201) — as measured in a network namespace. None of them delivers. */
+    {
+        static const char *t = HDR
+            "d0\t0001010A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"    /* 10.1.1.0/24 direct */
+            "*\t0000620A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"     /* throw 10.98.0.0/24 */
+            "*\t0000630A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"     /* blackhole 10.99.0.0/24 */
+            "*\t0000610A\t00000000\t0201\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"     /* unreachable 10.97.0.0/24 */
+            "d0\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n";   /* 10.0.0.0/8 direct, shorter */
+        rc = opcd_route_direct_lookup(t, 0x0A620005u, &m);   /* 10.98.0.5 */
+        ASSERT(rc == -ENETUNREACH, "throw route (Iface *, UP only) is not reachable even over a shorter direct prefix");
+        rc = opcd_route_direct_lookup(t, 0x0A630005u, &m);   /* 10.99.0.5 */
+        ASSERT(rc == -ENETUNREACH, "blackhole route (Iface *, UP only) is not reachable");
+        rc = opcd_route_direct_lookup(t, 0x0A610005u, &m);   /* 10.97.0.5 */
+        ASSERT(rc == -ENETUNREACH, "unreachable route (Iface *, UP|REJECT) is not reachable");
+        rc = opcd_route_direct_lookup(t, 0x0A010105u, &m);   /* 10.1.1.5 */
+        ASSERT(rc == 0 && m == 0xFFFFFF00u, "a real interface route next to * rows stays direct");
+        rc = opcd_route_direct_lookup(t, 0x0A050505u, &m);   /* 10.5.5.5 -> the /8 */
+        ASSERT(rc == 0 && m == 0xFF000000u, "the shorter direct prefix still serves hosts no * row covers");
+    }
+
     rc = opcd_route_direct_lookup("", 0xC0A80132u, &m);
     ASSERT(rc == -ENETUNREACH, "empty table -> -ENETUNREACH");
     rc = opcd_route_direct_lookup(NULL, 0xC0A80132u, &m);

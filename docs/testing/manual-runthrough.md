@@ -38,7 +38,7 @@ complete. Until Phase 3 lands, sections marked `[Phase ≥ 3]` are placeholders.
 ## 4. Indications [Phase ≥ 2]
 
 - [ ] `set-indication --bits 0x85 --period 5 --to <vhl-ip>:9999` returns OK
-- [ ] `vhlctl listen --bind 0.0.0.0:9999` decodes the InitComplete `0x00 → 0x01 → 0x02` boot sequence after the next `opcd` restart
+- [ ] `vhlctl listen --bind 0.0.0.0:9999` decodes InitComplete `0x01(ready)` on `set-indication`, `0x02(radio_up)` at once when WLAN#1 is associated (or at the first association otherwise) and `0x03(login)` when logged in; an `opcd` restart drops the indication config, so re-login and re-send `set-indication` to observe the sequence again
 - [ ] KeepAlive (`0x0080`) arrives every ~5 s when Period=5; arrives never when Period=0
 - [ ] While indications are enabled, `device-info` returns NG with Error Cause = `0x0010` (indication-setting violation)
 - [ ] Manual disconnect from the AP triggers WlanStatusChange (`0x0002`) with the right CH
