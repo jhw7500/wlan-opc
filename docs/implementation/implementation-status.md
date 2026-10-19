@@ -45,8 +45,8 @@
 - **잔여**: Dual `priority_ch`의 데이터 경로 우선순위 의미는 미결이며 값 검증/저장/응답만 수행하고 실드라이버 steering은 구현하지 않는다. Dual의 양 AP 동시 연결·장시간 운용, 실제 ax·40/80MHz 링크 협상 및 다른 보드/AP는 미검증이다. 추가 시험 후에도 기존 파일의 SHA-256·소유권·모드, 양 인터페이스 드라이버·서비스·MAC·IP·경로를 복구하고 전용 임시 백업·복구 타이머를 제거했다. 외부 배포 승인은 보류 상태다.
 - **파일/로컬 증거**: `opcd/platform_nxp.c`, `opcd/handler.c`, `opcd/tests/test_platform_nxp_radio.c`, 부모 저장소의 `opc_wlan_apply.sh` 및 `tests/test_opc_radio_apply.py`.
 
-### 1.2 ChangeIp NTP apply 미구현 (ESSID 구현됨) — V3 · ~~essid M~~ 완료 / ntp **S**
-- **현황(2026-06-17 갱신, #56 → wlan-package PR #49 반영)**: `nxp_apply_ip_change`는 IP/netmask를 `ip addr`(휘발)로 적용하고, **essid는 `run_opc_wlan_apply`(opc_wlan_apply.sh ssid → conf 직접편집 → `wpa_cli reconfigure`, 비휘발)로 적용 구현**(실타겟 검증, best-effort — 실패는 로그만, IP 결과 반환). ntp는 읽기(`nxp_get_ntp_server`)만 있고 write/재시작 apply 없음(잔존).
+### 1.2 ChangeIp ESSID/Gateway/NTP apply — V3 · ~~essid M~~ 완료 / ~~ntp S~~ 완료(#161/#162, 실기 검증 대기)
+- **현황(2026-06-17 갱신, #56 → wlan-package PR #49 반영)**: `nxp_apply_ip_change`는 IP/netmask를 `ip addr`(휘발)로 적용하고, **essid는 `run_opc_wlan_apply`(opc_wlan_apply.sh ssid → conf 직접편집 → `wpa_cli reconfigure`, 비휘발)로 적용 구현**(실타겟 검증, best-effort — 실패는 로그만, IP 결과 반환). **갱신(#161/#162)**: ntp는 `/run` timesyncd drop-in 휘발 적용 + `try-restart`, gateway는 `ip route replace default`(휘발, 0.0.0.0 제외), `nxp_get_ntp_server`는 drop-in 우선으로 읽는다. essid는 편집 직전에 복원 표식(`essid_marker.{c,h}`)을 쓰고, 적용 성공 후 conf의 현재 `ssid=` 토큰을 `applied=`로 표식에 커밋하며(실패 시 미커밋 표식 삭제), 부팅 시 `opcd -R`이 conf가 그 커밋값을 그대로 갖고 있을 때만 원복한다(다른 작성자가 바꿨거나 커밋 전 중단이면 표식만 지우고 conf는 손대지 않음; 표식을 못 쓰면 ESSID 변경 자체를 하지 않음). 패키지 쪽 과제(추적 이슈 미생성 — wlan-package#361은 timesyncd 활성화·시험용 기본 경로 스크립트 제거만 다룸): `opcd -R` 부팅 유닛을 wifi_init.sh의 conf 변환과 wpa_supplicant보다 먼저 두기(-R은 conf writer lock을 잡지 않음), 공장 초기화 시 표식 삭제.
 - **파일**: `platform_nxp.c:875-940` (주석 886-890 "essid/ntp remain V3 on-target work (wifi_init.sh routing / wpa_supplicant)")
 - **막힘**: essid = wpa_supplicant conf 재구성 시 활성 링크 드롭 정책 미정 / ntp = timesyncd.conf write+재시작 on-target 검증 대기
 - **비고**: essid **읽기** 커널 fallback(device-info용, nl80211 GET_INTERFACE)은 2026-06-16 도입됐다가 **2026-09-21 #142에서 제거됨** — managed STA의 SSID는 인터페이스 상태가 아니어서 GET_INTERFACE 응답에 실리지 않으므로 그 fallback은 실행될 수 없었다(실기 확인: 연결 상태의 `iw mlan0 info`에 ssid 줄 없음, `wpa_cli status`에는 있음). **읽기 원천은 link.json의 `info.ssid` 단일**이며 로거가 wpa_supplicant에서 채운다(wlan-package #336). 여기 1.2 항목은 **쓰기**(change-ip가 SSID를 실제로 바꾸는 것)로 읽기와 별개다. set-ip-list의 essid 필드는 iplist.cfg에 저장되나 apply 시 무시됨.
@@ -72,7 +72,7 @@
 | **wlan_id** Dual 구분 | indication에 wlan_id 필드 없어 **mlan1(idx≠0) 이벤트 드롭** → Dual WLAN#1/#2 구분 불가(잠정 mlan0) | #35 — dual 발행 정책 + 실 dual-radio HW | `opcd.c` on_platform_event |
 | Memory(0x0002) | swapless 타깃이라 사양 정의(페이징) 성립 불가 → **의도적 미발행**(Disk I/O로 일원화) | 확정(코드 변경 불요) | `fault_probe.c` |
 | capability 비트 | `device_info.json` 정적값(전부 1=추정) vs silicon 실광고 미검증 | #35 — 고객사 문의 | `inventory.c` |
-| 0x0018 / gateway | 0x0018(비정상 boundary NG) 벤더 확정 대기 / gateway는 #27로 **의도적 미적용**(브릿지) | #35(A17) / #27(확정) | `handler.c`, `platform_nxp.c:886-889` |
+| 0x0018 / gateway | 0x0018(비정상 boundary NG) 벤더 확정 대기 / gateway는 #27의 미적용 결정이 #162(2026-10-17)로 **대체되어 휘발 적용** | #35(A17) / #27(확정) | `handler.c`, `platform_nxp.c:886-889` |
 | ~~**G11** device-info FREQ/CH~~ | **Rev1.01 §4.3.4로 확정(2026-08-06): 접속 시 주파수(접속값), 미접속 0xFFFF** → #103에서 출하 기본 `live`로 전환, `config`(Rev1.00 해석)·`auto`는 옵션 유지 | 종결 (#103, 2026-09-04) | `freq_source.{c,h}`, `handler.c`(select_devinfo_freq_ch) |
 
 ---

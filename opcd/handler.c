@@ -1750,7 +1750,7 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
      * vtable is fully populated after init(), so only the registration guard
      * (opcd_platform() can be NULL before register) is needed. */
     const opcd_platform_ops_t *plat = opcd_platform();
-    int rc = plat ? plat->apply_ip_change(e, mgmt_ip_iface_idx(st)) : -1;
+    int rc = plat ? plat->apply_ip_change(e, mgmt_ip_iface_idx(st), st->ip_change_armed_no) : -1;
     if (rc != 0) {
         fprintf(stderr, "opcd: apply pending IP change: platform apply_ip_change failed\n");
         OLOG_ERR("exec: IP change apply failed (slot=%u)", st->ip_change_armed_no);

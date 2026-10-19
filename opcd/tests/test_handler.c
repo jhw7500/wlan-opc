@@ -43,6 +43,7 @@ static int failures = 0;
 extern unsigned     stub_apply_ip_calls(void);
 extern uint32_t     stub_apply_ip_last_ip(void);
 extern int          stub_apply_ip_last_iface(void);
+extern uint16_t     stub_apply_ip_last_slot(void);
 extern void         stub_apply_ip_reset(void);
 extern void         stub_apply_ip_set_fail(int fail);
 extern unsigned     stub_peer_route_refresh_calls(void);
@@ -851,6 +852,8 @@ int main(void)
     ASSERT(stub_apply_ip_last_iface() == 0, "change-ip: default device_ip_iface applies to eth0");
     ASSERT(strcmp(stub_apply_ip_last_essid(), "cantops-x") == 0,
            "change-ip: apply gets committed slot essid");
+    ASSERT(stub_apply_ip_last_slot() == 1,
+           "#161: apply gets the committed list slot number (ESSID restore marker)");
 
     /* 13b. #43 regression: the deferred ChangeIp must NOT apply on a non-logout
      *      wakeup. opcd_apply_pending_ip_change runs every epoll iteration

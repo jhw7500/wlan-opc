@@ -244,7 +244,7 @@ typedef struct opcd_platform_ops {
     /* iface: 0=eth0, 1=mlan0 — MUST be the same device_ip_iface selector the
      * GetDeviceInfo read path uses (ip_iface.h): a read/apply split across
      * interfaces makes the VHL §3.3.6→§3.3.7→§3.3.4 loop diverge. */
-    int  (*apply_ip_change)(const opc_ipcfg_entry_t *slot, int iface);
+    int  (*apply_ip_change)(const opc_ipcfg_entry_t *slot, int iface, uint16_t slot_no);
     /* peer_route topology only (#122, topology.h): after apply_ip_change
      * moved the shared management IP on mlan0, re-point the wifi_init.sh
      * artifacts at the NEW address — eth0 /32 mirror, table-100

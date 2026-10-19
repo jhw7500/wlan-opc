@@ -295,10 +295,12 @@ static uint32_t s_apply_ip_last_ip = 0;
 static char     s_apply_ip_last_essid[OPC_ESSID_FIELD_LEN + 1] = {0};
 static int      s_apply_ip_fail    = 0;
 static int s_apply_ip_last_iface = -1;
+static uint16_t s_apply_ip_last_slot = 0;
 
-static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
+static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_t slot_no)
 {
     s_apply_ip_calls++;
+    s_apply_ip_last_slot  = slot_no;
     s_apply_ip_last_ip    = slot->ip_address;
     s_apply_ip_last_iface = iface;
     snprintf(s_apply_ip_last_essid, sizeof s_apply_ip_last_essid,
@@ -310,9 +312,10 @@ static int stub_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
 unsigned    stub_apply_ip_calls(void)           { return s_apply_ip_calls; }
 uint32_t    stub_apply_ip_last_ip(void)         { return s_apply_ip_last_ip; }
 int         stub_apply_ip_last_iface(void)      { return s_apply_ip_last_iface; }
+uint16_t    stub_apply_ip_last_slot(void)       { return s_apply_ip_last_slot; }
 const char *stub_apply_ip_last_essid(void)      { return s_apply_ip_last_essid; }
 void        stub_apply_ip_reset(void)           { s_apply_ip_calls = 0; s_apply_ip_last_ip = 0;
-                                                  s_apply_ip_last_iface = -1;
+                                                  s_apply_ip_last_iface = -1; s_apply_ip_last_slot = 0;
                                                   s_apply_ip_last_essid[0] = '\0'; s_apply_ip_fail = 0; }
 void        stub_apply_ip_set_fail(int fail)    { s_apply_ip_fail = fail; }
 
