@@ -94,6 +94,7 @@ int __wrap_execv(const char *path, char *const argv[])
         if (getenv("OPCD_NXP_FAIL_RESET") != NULL)       _exit(2);      /* non-zero exit: systemd-run/executor failure (policy gates are bypassed by --force) */
         if (getenv("OPCD_NXP_RESET_NOEXEC") != NULL)     _exit(127);    /* execv failure / command not found (bash 127) */
         if (getenv("OPCD_NXP_RESET_SIGNALED") != NULL)   raise(SIGTERM); /* the reboot's stop job killed the systemd-run client */
+        if (getenv("OPCD_NXP_RESET_KILLED") != NULL)     kill(getpid(), SIGKILL); /* died by another signal: no hand-off evidence */
     }
     if (getenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT") != NULL &&   /* #161: helper installed the conf, then failed */
         argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0) {
@@ -249,6 +250,15 @@ int main(int argc, char **argv)
         unsetenv("OPCD_NXP_RESET_SIGNALED");
         ASSERT(src == 0 && ERR_HAS("terminated by signal 15") && ERR_HAS("reboot under way"),
                "#164 prepare_reset: client killed by SIGTERM (the shutdown's stop job) -> 0, logged as reboot under way");
+
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_RESET_KILLED", "1", 1);
+        ERR_CAPTURE_BEGIN(errlog);
+        int krc = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        unsetenv("OPCD_NXP_RESET_KILLED");
+        ASSERT(krc != 0 && ERR_HAS("killed by signal 9") && ERR_HAS("no reboot confirmed") && !ERR_HAS("reboot under way"),
+               "#164 prepare_reset: client killed by SIGKILL (not the stop job) -> non-zero, logged as no reboot confirmed");
 
         unlink(g_exec_log);
         setenv("OPCD_NXP_FAIL_RESET", "1", 1);

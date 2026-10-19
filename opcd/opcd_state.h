@@ -175,7 +175,10 @@ typedef struct opcd_state {
      * the snapshot after the Logout ack is sent. Snapshotting makes the armed
      * commit immune to any later list mutation (a same-drain next session cannot
      * rewrite what gets applied). Idle/abandon logout never arms, so the device
-     * keeps its current IP; a fresh Login clears any inherited staging. */
+     * keeps its current IP; a fresh Login clears any inherited staging — except
+     * a Logout-committed change still waiting for the IP-list write
+     * (ip_change_logout_deferred), which survives; the apply then ends any
+     * session established in that window. */
     bool     ip_change_pending;
     bool     ip_change_commit_armed;
     /* A Logout found an IP-list NVRAM write in flight and left the reserved
