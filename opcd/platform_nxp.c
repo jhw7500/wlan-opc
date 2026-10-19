@@ -50,6 +50,7 @@
 #include "json_util.h"
 #include "nl80211_parse.h"
 #include "ntp_parse.h"
+#include "essid_marker.h"
 #include "../protocol/indications.h"   /* OPC_AP_MSG_DEAUTHENTICATION */
 
 #define ETH0_LINK_JSON   "/var/log/cantops/json/eth0/link.json"
@@ -639,12 +640,19 @@ static int nxp_get_firmware_version(char *buf, size_t cap)
     return nxp_copy_string(buf, cap, g_fw_cache);
 }
 
+#ifndef TIMESYNCD_CONF
 #define TIMESYNCD_CONF  "/etc/systemd/timesyncd.conf"
+#endif
+/* Volatile (tmpfs) timesyncd drop-in written by ChangeIpAddress (#162); it
+ * overrides TIMESYNCD_CONF's NTP= and disappears on reboot. */
+#ifndef OPC_NTP_DROPIN
+#define OPC_NTP_DROPIN  "/run/systemd/timesyncd.conf.d/opc-ntp.conf"
+#endif
 
-static int nxp_get_ntp_server(uint32_t *server_host)
+static int ntp_from_file(const char *path, uint32_t *server_host)
 {
     *server_host = 0;
-    char *body = opc_json_slurp_file(TIMESYNCD_CONF);
+    char *body = opc_json_slurp_file(path);
     /* opc_json_slurp_file is misnamed for the use case but does exactly
      * what we want: read the whole file into a heap buffer with a 1MB cap.
      * timesyncd.conf is well under 4KB. */
@@ -658,6 +666,14 @@ static int nxp_get_ntp_server(uint32_t *server_host)
     }
     free(body);
     return rc;
+}
+
+/* Runtime drop-in first (what timesyncd actually uses after a ChangeIp), then
+ * the persistent /etc file. */
+static int nxp_get_ntp_server(uint32_t *server_host)
+{
+    if (ntp_from_file(OPC_NTP_DROPIN, server_host) == 0) return 0;
+    return ntp_from_file(TIMESYNCD_CONF, server_host);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1060,6 +1076,47 @@ static int count_set_bits(uint32_t v)
     return n;
 }
 
+/* #162: point timesyncd at `server_host` for this boot only. The drop-in lives
+ * on tmpfs (/run), so a reboot returns to timesyncd.conf's configured server;
+ * `try-restart` only touches a timesyncd that is already running (the package
+ * decides whether time sync is enabled at all), --no-block keeps this inside
+ * the bounded apply window. Best-effort: logged, returns the first failure. */
+static int nxp_apply_ntp(uint32_t server_host)
+{
+    char dir[128], tmp[136], body[64];
+    snprintf(dir, sizeof dir, "%s", OPC_NTP_DROPIN);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return -EINVAL;
+    *slash = '\0';
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "opcd: nxp_apply_ip_change: ntp drop-in dir %s: %s\n", dir, strerror(errno));
+        return -errno;
+    }
+    /* `NTP=` (empty) first: timesyncd collects list settings across the main
+     * file and drop-ins, so without the reset the ChangeIp server would only
+     * be appended after /etc's server as a fallback. */
+    int bl = snprintf(body, sizeof body, "[Time]\nNTP=\nNTP=%u.%u.%u.%u\n",
+                      (server_host >> 24) & 0xff, (server_host >> 16) & 0xff,
+                      (server_host >> 8) & 0xff, server_host & 0xff);
+    snprintf(tmp, sizeof tmp, "%s.tmp", OPC_NTP_DROPIN);
+    FILE *f = fopen(tmp, "w");
+    int ok = f != NULL && fwrite(body, 1, (size_t)bl, f) == (size_t)bl;
+    if (f && fclose(f) != 0) ok = 0;
+    if (!ok || rename(tmp, OPC_NTP_DROPIN) != 0) {
+        int e = errno;
+        unlink(tmp);
+        fprintf(stderr, "opcd: nxp_apply_ip_change: ntp drop-in write failed: %s\n", strerror(e));
+        return -e;
+    }
+    const char *argv[] = { "sh", "-c",
+        "systemctl --no-block try-restart systemd-timesyncd.service", NULL };
+    int rc = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
+                              (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
+    fprintf(stderr, "opcd: nxp_apply_ip_change: ntp %s%s\n",
+            body + 7, rc == 0 ? " (timesyncd drop-in)" : " (timesyncd restart FAILED)");
+    return rc;
+}
+
 /* Apply a committed IP-config slot to the management IP at runtime, on the
  * interface the caller selects (0=eth0, 1=mlan0): opc.conf device_ip_iface
  * under the eth0_ip topology, mlan0 unconditionally under peer_route (#122,
@@ -1079,18 +1136,20 @@ static int count_set_bits(uint32_t v)
  *
  * We delete every scope-global, non-/32 IPv4 on the target iface (the
  * management address; wifi_init.sh's /32 mirror is intentionally kept) and add
- * the new one, in a single /bin/sh pipeline. gateway/ntp are not applied:
- * gateway is a non-goal — the board operates as a bridge on the control
- * network, so no L3 gateway is needed (user decision 2026-06-12, #27); the
- * stored gateway field is validated (D1: inside the entry's subnet) and echoed
- * but never applied. ntp is DELIBERATELY not applied (decision 2026-09-02,
- * #91 option 2): a timesyncd.conf edit is non-volatile, clashing with
- * ChangeIp's volatile reboot-restores semantics (the essid non-volatility
- * precedent already bit us on-target), and the GW/NTP=0 spec interpretation
- * (G6) is unconfirmed by the vendor — the official NTP provisioning path is
- * scripts/provision/bd_provision.sh --ntp (#88, incl. the set-ntp latch).
- * Revisit implementing it here after the G6/G12 vendor replies. */
-static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
+ * the new one, in a single /bin/sh pipeline.
+ *
+ * Gateway and NTP are applied after a successful address change, both volatile
+ * (#162, decision 2026-10-17/18; spec §4.3.7 and the 2026-06-18 vendor reply —
+ * this supersedes the 2026-06-12 "bridge needs no gateway" and 2026-09-02 "ntp
+ * not applied" decisions): a non-zero gateway becomes the default route on the
+ * management interface (`ip route replace`, gone after reboot); a non-zero NTP
+ * server goes to a /run timesyncd drop-in (OPC_NTP_DROPIN) and timesyncd is
+ * asked to re-read it. 0.0.0.0 means unset and is not applied. Both are
+ * best-effort like the ESSID: logged, never overriding the IP result.
+ *
+ * The ESSID is the one non-volatile part (wpa conf edit): see the marker in
+ * essid_marker.h (#161). */
+static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_t slot_no)
 {
     const char *dev = (iface == 1) ? "mlan0" : "eth0";
     /* Reject a non-contiguous or empty netmask — cannot be a /prefix. */
@@ -1161,19 +1220,69 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface)
     fprintf(stderr, "opcd: nxp_apply_ip_change: %s → %s/%d%s\n", dev, ipbuf, prefix,
             ret == 0 ? " (ip addr)" : " (FAILED)");
 
+    /* #162 gateway + NTP, volatile, only on top of a successfully moved address
+     * (a default route via a gateway needs the new subnet on the interface). */
+    if (ret == 0) {
+        uint32_t gw = slot->default_gateway;
+        uint8_t  ghi = (uint8_t)((gw >> 24) & 0xff);
+        if (gw != 0 && gw != 0xFFFFFFFFu && ghi != 127 && ghi < 224) {
+            char gwbuf[16], gcmd[96];
+            snprintf(gwbuf, sizeof gwbuf, "%u.%u.%u.%u",
+                     (gw >> 24) & 0xff, (gw >> 16) & 0xff, (gw >> 8) & 0xff, gw & 0xff);
+            snprintf(gcmd, sizeof gcmd, "ip route replace default via %s dev %s", gwbuf, dev);
+            const char *gargv[] = { "sh", "-c", gcmd, NULL };
+            int grc = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
+                                       (char *const *)gargv, IP_CHANGE_TIMEOUT_MS);
+            fprintf(stderr, "opcd: nxp_apply_ip_change: default gateway %s on %s%s\n",
+                    gwbuf, dev, grc == 0 ? " (ip route)" : " FAILED");
+        } else if (gw != 0) {
+            fprintf(stderr, "opcd: nxp_apply_ip_change: non-unicast gateway 0x%08x — not applied\n", gw);
+        }
+        if (slot->ntp_server != 0)
+            (void)nxp_apply_ntp(slot->ntp_server);
+    }
+
     /* essid is best-effort: a failure is logged but does NOT override the IP result
      * (unlike freq apply, which is fatal). Reconnect outcome is reported separately
-     * via the WlanStatusChange indication. essid is non-volatile (conf edit + reconfigure).
+     * via the WlanStatusChange indication. The spec wants the ESSID volatile too
+     * (#161) but the apply script edits the persistent wpa conf, so the original
+     * is first recorded in a restore marker (essid_marker.h) that `opcd -R`
+     * puts back at boot. No marker => no conf edit: a persistent change nobody
+     * can undo is worse than an ESSID that stays as configured.
      * DUAL targets mlan0 (the management interface). slot->essid is NUL-terminated
      * by the 0x0016 handler, but we bound-copy defensively anyway. */
     if (slot->essid[0] != '\0') {
         char essid_buf[OPC_ESSID_FIELD_LEN + 1];
         snprintf(essid_buf, sizeof essid_buf, "%.*s",
                  (int)sizeof slot->essid, slot->essid);
-        int erc = run_opc_wlan_apply("mlan0", NULL, NULL, NULL, essid_buf,
-                                     OPC_WLAN_APPLY_TIMEOUT_MS);
-        fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply%s\n",
-                essid_buf, erc == 0 ? " (wpa_cli)" : " FAILED");
+        int mrc = opc_essid_marker_arm(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0,
+                                       slot_no, time(NULL));
+        if (mrc != 0) {
+            fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' NOT applied — restore marker "
+                    "unavailable (%d), a persistent change could not be undone at reboot\n",
+                    essid_buf, mrc);
+        } else {
+            int erc = run_opc_wlan_apply("mlan0", NULL, NULL, NULL, essid_buf,
+                                         OPC_WLAN_APPLY_TIMEOUT_MS);
+            if (erc == 0) {
+                /* Record the token the apply actually wrote: `opcd -R` reverts
+                 * only a conf that still holds it, never a later change by
+                 * another writer. A power cut between the apply and this
+                 * commit leaves an uncommitted marker, which -R drops without
+                 * editing (the ESSID then stays — logged, not reverted). */
+                int crc = opc_essid_marker_commit(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0);
+                fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply (wpa_cli), marker %s\n",
+                        essid_buf, crc == 0 ? "committed"
+                                            : "commit FAILED — -R will not revert this ESSID");
+            } else {
+                /* Nothing was applied: an uncommitted marker must not survive
+                 * to revert a change that never happened (a committed one from
+                 * an earlier successful ChangeIp in this chain stays). */
+                int drc = opc_essid_marker_disarm(OPC_PATH_ESSID_MARKER);
+                fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply FAILED (%d), marker %s\n",
+                        essid_buf, erc, drc == 0 ? "disarmed" : "disarm FAILED");
+            }
+        }
     }
     return ret;
 }

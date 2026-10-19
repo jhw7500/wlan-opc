@@ -34,6 +34,7 @@
 #include "../protocol/codec.h"
 #include "../protocol/indications.h"   /* OPC_WLAN_STATUS_CONNECTED/DISCONNECTED */
 #include "chan_encode.h"
+#include "essid_marker.h"
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
@@ -270,7 +271,8 @@ static int open_timerfd_1s(void)
 
 static void usage(void)
 {
-    fputs("usage: opcd [-p UDP_PORT] [-i IDLE_SECONDS] [-c CONFIG_PATH]\n", stderr);
+    fputs("usage: opcd [-p UDP_PORT] [-i IDLE_SECONDS] [-c CONFIG_PATH]\n"
+          "       opcd -R    (one-shot, boot: undo a ChangeIpAddress ESSID, #161)\n", stderr);
 }
 
 int main(int argc, char **argv)
@@ -281,8 +283,24 @@ int main(int argc, char **argv)
     int port_override = 0;
     int idle_override = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "p:i:c:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:i:c:Rh")) != -1) {
         switch (opt) {
+        case 'R': {
+            /* #161: ChangeIpAddress leaves its ESSID in the persistent wpa conf;
+             * the spec wants it volatile. Run before any other writer of that
+             * conf (wifi_init.sh's boot-time conf transforms as well as
+             * wpa_supplicant — the unit ordering is the package's, and -R takes
+             * no conf writer lock): put the recorded original `ssid=` back,
+             * only when the conf still holds the value ChangeIp applied, and
+             * drop the marker. No socket, no platform, no other state. */
+            int rr = opc_essid_marker_restore(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0);
+            fprintf(stderr, "opcd: -R ChangeIp ESSID restore: %s (rc=%d)\n",
+                    rr == 1 ? "original ESSID restored" :
+                    rr == 2 ? "marker dropped, conf NOT edited — ssid= is not the value "
+                              "ChangeIp applied (changed by another writer, or apply not committed)" :
+                    rr == 0 ? "nothing to restore" : "FAILED", rr);
+            return rr < 0 ? 1 : 0;
+        }
         case 'p': port_override = atoi(optarg); break;
         case 'i': idle_override = atoi(optarg); break;
         case 'c': st.paths.conf = optarg; break;

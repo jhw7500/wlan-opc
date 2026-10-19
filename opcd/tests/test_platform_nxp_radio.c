@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -80,11 +81,52 @@ int __wrap_execv(const char *path, char *const argv[])
     for (size_t i = 0; argv[i] != NULL; i++)
         dprintf(fd, "|%s", argv[i]);
     dprintf(fd, "\n");
+    if (getenv("OPCD_TEST_MARKER_PATH") != NULL)   /* #161: marker state at exec time */
+        dprintf(fd, "marker_present=%d\n", access(getenv("OPCD_TEST_MARKER_PATH"), F_OK) == 0);
     close(fd);
     if (getenv("OPCD_NXP_FAIL_MLAN1") != NULL &&
         argv[1] != NULL && strcmp(argv[1], "mlan1") == 0)
         _exit(42);
+    if (getenv("OPCD_NXP_FAIL_WLAN_APPLY") != NULL &&   /* #161: ESSID apply refused/failed */
+        argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0)
+        _exit(42);
     _exit(0);
+}
+
+/* ChangeIpAddress fixture dir — must equal the -D path overrides given to
+ * platform_nxp_test.o in tests/Makefile. */
+#define IPT_DIR     "/tmp/opcd_nxp_ip_test"
+#define IPT_CONF    IPT_DIR "/wpa_supplicant-mlan0.conf"
+#define IPT_MARKER  IPT_DIR "/changeip_essid.restore"
+#define IPT_DROPIN  IPT_DIR "/timesyncd.conf.d/opc-ntp.conf"
+#define IPT_TSYNCD  IPT_DIR "/timesyncd.conf"
+
+static void ipt_put(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+static char *ipt_slurp(const char *path)
+{
+    static char buf[1024];
+    buf[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static void ipt_reset(const char *conf)
+{
+    unlink(IPT_MARKER);
+    unlink(IPT_DROPIN);
+    rmdir(IPT_DIR "/timesyncd.conf.d");
+    unlink(g_exec_log);
+    ipt_put(IPT_CONF, conf);
+    ipt_put(IPT_TSYNCD, "[Time]\nNTP=10.0.0.9\n");
 }
 
 static int read_log(char *buf, size_t cap)
@@ -133,6 +175,84 @@ int main(int argc, char **argv)
     opcd_platform_register();
     const opcd_platform_ops_t *ops = opcd_platform();
     ASSERT(ops != NULL, "NXP platform registered");
+
+    /* ---- #161/#162: ChangeIpAddress apply — ESSID marker, Gateway, NTP ---- */
+    {
+        mkdir(IPT_DIR, 0700);
+        setenv("OPCD_TEST_MARKER_PATH", IPT_MARKER, 1);
+        char log[2048];
+        opc_ipcfg_entry_t e;
+        memset(&e, 0, sizeof e);
+        e.ip_address      = 0xC0A80165u;   /* 192.168.1.101 */
+        e.subnet_mask     = 0xFFFFFF00u;
+        e.default_gateway = 0xC0A80101u;   /* 192.168.1.1 */
+        e.ntp_server      = 0xC0A80105u;   /* 192.168.1.5 */
+        snprintf(e.essid, sizeof e.essid, "%s", "site-B");
+
+        ipt_reset("network={\n    ssid=\"site-A\"\n    freq_list=2412\n}\n");
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#162 apply_ip_change succeeds");
+        ASSERT(read_log(log, sizeof log) == 0, "#162 apply invocations captured");
+        const char *p_ip  = strstr(log, "ip addr add 192.168.1.101/24 dev eth0");
+        const char *p_gw  = strstr(log, "ip route replace default via 192.168.1.1 dev eth0");
+        ASSERT(p_ip != NULL, "#162 IP address still applied");
+        ASSERT(p_gw != NULL && p_ip != NULL && p_gw > p_ip,
+               "#162 Gateway: default route applied (volatile `ip route`) after the address");
+        ASSERT(strstr(log, "systemctl --no-block try-restart systemd-timesyncd.service") != NULL,
+               "#162 NTP: timesyncd re-reads its volatile drop-in");
+        ASSERT(ipt_slurp(IPT_DROPIN) != NULL &&
+               strcmp(ipt_slurp(IPT_DROPIN), "[Time]\nNTP=\nNTP=192.168.1.5\n") == 0,
+               "#162 NTP: drop-in resets the /etc server list, then sets the ChangeIp server (volatile /run)");
+        uint32_t ntp = 0;
+        ASSERT(ops->get_ntp_server(&ntp) == 0 && ntp == 0xC0A80105u,
+               "#162 GetDeviceInfo NTP reads the runtime drop-in, not only /etc");
+        ASSERT(strstr(log, "|opc_wlan_apply.sh|mlan0|ssid|site-B\nmarker_present=1\n") != NULL,
+               "#161 marker is durable BEFORE the ESSID conf edit is requested");
+        const char *mk = ipt_slurp(IPT_MARKER);
+        ASSERT(mk != NULL && strstr(mk, "essid=\"site-A\"\n") != NULL && strstr(mk, "slot=4\n") != NULL,
+               "#161 marker holds the original ESSID and the applied slot");
+        ASSERT(mk != NULL && strstr(mk, "applied=\"site-A\"\n") != NULL,
+               "#161 marker is committed after a successful ESSID apply (conf token recorded)");
+
+        ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        setenv("OPCD_NXP_FAIL_WLAN_APPLY", "1", 1);
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#161 failed ESSID apply: IP result stays success");
+        ASSERT(read_log(log, sizeof log) == 0 &&
+               strstr(log, "|opc_wlan_apply.sh|mlan0|ssid|site-B\nmarker_present=1\n") != NULL &&
+               access(IPT_MARKER, F_OK) != 0,
+               "#161 failed ESSID apply disarms the marker (nothing for -R to revert)");
+        unsetenv("OPCD_NXP_FAIL_WLAN_APPLY");
+
+        ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        ASSERT(ops->apply_ip_change(&e, 1, 4) == 0, "#162 apply on mlan0 succeeds");
+        ASSERT(read_log(log, sizeof log) == 0 &&
+               strstr(log, "ip route replace default via 192.168.1.1 dev mlan0") != NULL,
+               "#162 Gateway follows the management interface (mlan0)");
+
+        ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        e.default_gateway = 0;
+        e.ntp_server = 0;
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#162 apply with GW/NTP unset succeeds");
+        ASSERT(read_log(log, sizeof log) == 0 &&
+               strstr(log, "route replace default") == NULL && strstr(log, "try-restart") == NULL &&
+               access(IPT_DROPIN, F_OK) != 0,
+               "#162 0.0.0.0 gateway/NTP are unset: nothing applied");
+        e.default_gateway = 0xC0A80101u;
+        e.ntp_server = 0xC0A80105u;
+
+        ipt_reset("network={\n ssid=\"a\"\n}\nnetwork={\n ssid=\"b\"\n}\n");
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#161 multi-network: IP result stays success");
+        ASSERT(read_log(log, sizeof log) == 0 && strstr(log, "opc_wlan_apply.sh") == NULL &&
+               access(IPT_MARKER, F_OK) != 0,
+               "#161 no marker -> the persistent ESSID edit is NOT attempted");
+
+        ipt_reset("");
+        unlink(IPT_DROPIN);
+        ASSERT(ops->get_ntp_server(&ntp) == 0 && ntp == 0x0A000009u,
+               "#162 GetDeviceInfo NTP falls back to /etc timesyncd.conf without a drop-in");
+
+        unsetenv("OPCD_TEST_MARKER_PATH");
+        unlink(g_exec_log);
+    }
 
     opc_set_radio_config_req_t cfg;
     memset(&cfg, 0, sizeof cfg);

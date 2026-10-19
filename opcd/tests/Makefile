@@ -50,13 +50,14 @@ OPCD_OBJS_OLOG      := $(OPCDOBJ)/opcd_log.o
 OPCD_OBJS_NOTIFY    := $(OPCDOBJ)/systemd_notify.o
 OPCD_OBJS_NXP_COMMON := $(OPCDOBJ)/json_util.o $(OPCDOBJ)/ntp_parse.o \
                         $(OPCDOBJ)/nl80211_parse.o $(OPCDOBJ)/chan_encode.o \
-                        $(OPCDOBJ)/route_lookup.o
+                        $(OPCDOBJ)/route_lookup.o $(OPCDOBJ)/essid_marker.o
+OPCD_OBJS_ESSIDMARK := $(OPCDOBJ)/essid_marker.o
 OPCD_OBJS_NXP_TEST  := $(TESTDIR)/platform_nxp_test.o $(OPCD_OBJS_NXP_COMMON)
 
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler test_persist_admission test_persist_failure \
          test_store_async test_store_atomic test_fault_probe test_nl80211_parse test_chan_encode \
          test_freq_source test_ip_iface test_topology test_route_lookup test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log \
-         test_platform_nxp_radio test_nxp_ap_disconnect test_systemd_notify
+         test_platform_nxp_radio test_nxp_ap_disconnect test_systemd_notify test_essid_marker
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -85,7 +86,12 @@ $(TESTDIR)/test_persist_admission: $(TESTDIR)/test_persist_admission.o $(OPCD_OB
 # external target boundary.  The private object avoids mixing NXP and stub
 # registries in test_handler.
 $(TESTDIR)/platform_nxp_test.o: ../platform_nxp.c | $(TESTDIR)
-	$(CC) $(CFLAGS) -DOPC_WLAN_APPLY_SH='"/proc/self/exe"' -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) -DOPC_WLAN_APPLY_SH='"/proc/self/exe"' \
+		-DOPC_PATH_WPA_CONF_MLAN0='"/tmp/opcd_nxp_ip_test/wpa_supplicant-mlan0.conf"' \
+		-DOPC_PATH_ESSID_MARKER='"/tmp/opcd_nxp_ip_test/changeip_essid.restore"' \
+		-DOPC_NTP_DROPIN='"/tmp/opcd_nxp_ip_test/timesyncd.conf.d/opc-ntp.conf"' \
+		-DTIMESYNCD_CONF='"/tmp/opcd_nxp_ip_test/timesyncd.conf"' \
+		-MMD -MP -c $< -o $@
 
 $(TESTDIR)/test_platform_nxp_radio: $(TESTDIR)/test_platform_nxp_radio.o $(OPCD_OBJS_NXP_TEST) $(PROTODIR)/libopcproto.a
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_platform_nxp_radio.o $(OPCD_OBJS_NXP_TEST) \
@@ -154,6 +160,9 @@ $(TESTDIR)/test_roam_datagram: $(TESTDIR)/test_roam_datagram.o $(OPCD_OBJS_ROAMD
 # opcd_log_init() 전 no-op 계약이라 테스트에서 호스트 syslog 를 오염시키지 않는다.
 $(TESTDIR)/test_opcd_log: $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_opcd_log.o $(OPCD_OBJS_OLOG)
+
+$(TESTDIR)/test_essid_marker: $(TESTDIR)/test_essid_marker.o $(OPCD_OBJS_ESSIDMARK)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_essid_marker.o $(OPCD_OBJS_ESSIDMARK)
 
 $(TESTDIR)/test_systemd_notify: $(TESTDIR)/test_systemd_notify.o $(OPCD_OBJS_NOTIFY)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_systemd_notify.o $(OPCD_OBJS_NOTIFY)

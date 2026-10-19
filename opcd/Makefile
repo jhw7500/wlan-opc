@@ -23,7 +23,7 @@ PLATFORM ?= stub
 SRCS := opcd.c store.c store_async.c handler.c indication.c fault_probe.c \
         json_util.c inventory.c ntp_parse.c snapshot.c nl80211_parse.c \
         chan_encode.c freq_source.c ip_iface.c topology.c route_lookup.c reset_cause.c roam_notify_conf.c roam_datagram.c \
-        opcd_log.c systemd_notify.c platform_$(PLATFORM).c
+        opcd_log.c systemd_notify.c essid_marker.c platform_$(PLATFORM).c
 OBJS := $(addprefix $(OBJDIR)/,$(SRCS:.c=.o))
 BIN  := $(OBJDIR)/opcd
 
