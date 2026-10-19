@@ -48,7 +48,13 @@ static uint16_t effective_station_type(const opcd_state_t *st)
                                   : st->conf.default_station_type;
 }
 
-static int check_login_required(const opcd_state_t *st, uint32_t client_ip,
+/* Every setting/query handler gates on this after its frame unpacked. A
+ * command from the logged-in session's IP restarts the 300 s idle timer
+ * whatever its result (#167, spec §4.3.1: the timer counts commands received,
+ * not successes) — hence the touch here, not on each handler's success path.
+ * A frame that failed to unpack (0x0003) never gets this far, and another
+ * IP's command (0x0001/0x0002) returns before the touch. */
+static int check_login_required(opcd_state_t *st, uint32_t client_ip,
                                 uint16_t *result, uint16_t *err)
 {
     if (!st->logged_in) {
@@ -61,6 +67,7 @@ static int check_login_required(const opcd_state_t *st, uint32_t client_ip,
         *err    = OPC_ERR_LOGIN_CONDITION;
         return -1;
     }
+    session_touch(st);
     return 0;
 }
 
@@ -102,8 +109,8 @@ void opcd_session_logout(opcd_state_t *st)
 /* Reject indication recipients that are not plain unicast. 0.0.0.0, the
  * 224.0.0.0/4 multicast block, and the 255.255.255.255 broadcast address
  * would let SetIndicationConfig aim the periodic stream at a group/broadcast
- * (amplifier). Arbitrary unicast is allowed per spec (Indication IP Address).
- * `ip_host` is host byte order. */
+ * (amplifier). Whether a unicast recipient is reachable is a separate test,
+ * indication_recipient_reachable() (#159). `ip_host` is host byte order. */
 static bool valid_unicast_ipv4(uint32_t ip_host)
 {
     if (ip_host == 0u)                          return false;  /* 0.0.0.0 */
@@ -126,6 +133,25 @@ static bool valid_netmask(uint32_t m)
 static bool valid_ipcfg_addr(uint32_t ip_host)
 {
     return valid_unicast_ipv4(ip_host) && (ip_host >> 24) != 127u;
+}
+
+/* #159 / spec §4.3.9 0x0012: the notification address must be on the device's
+ * own segment, i.e. reachable WITHOUT a gateway. The device routing table is
+ * the authority (platform lookup_direct_route): a connected subnet of either
+ * interface or a host route (peer_route's wired peers). No route, or a route
+ * through a gateway, is refused — the stream could not be delivered anyway —
+ * and so is the broadcast address of the matched subnet. Loopback is always
+ * deliverable (kernel local table, not part of the main table the lookup
+ * reads), which keeps loopback test flows working without a config knob. */
+static bool indication_recipient_reachable(uint32_t ip_host)
+{
+    if ((ip_host >> 24) == 127u) return true;
+    const opcd_platform_ops_t *plat = opcd_platform();
+    uint32_t mask = 0;
+    if (!plat || plat->lookup_direct_route(ip_host, &mask) != 0) return false;
+    /* /31 and /32 have no broadcast address */
+    if (mask < 0xFFFFFFFEu && ip_host == (ip_host | ~mask)) return false;
+    return true;
 }
 
 /* Allowed character set for passwords and ESSIDs, per DFK's written answer
@@ -164,7 +190,8 @@ static bool valid_opc_charset(const char *s)
  * prohibition, so GW=0 is spec-compliant; the ntp cause (0x0014) lists
  * 0.0.0.0 as invalid but Rev1.01 adds "(미설정값 제외)", so NTP=0 as "unset"
  * is spec-compliant too (Rev1.00 had this as a deviation — #35). The device
- * IP itself has no unset value: 0.0.0.0 → 0x0011. */
+ * IP 0.0.0.0 is the unset value too, but it never reaches this function: such
+ * an entry clears its slot instead (#163, handle_set_ip_config_list). */
 static uint16_t ipcfg_entry_error(const opc_ipcfg_entry_t *e, bool essid_terminated)
 {
     if (!valid_ipcfg_addr(e->ip_address))     return OPC_ERR_IPCFG_IP;        /* 0x0011 */
@@ -607,7 +634,17 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
          * without arming and therefore never commits. */
         if (st->ip_change_pending && !st->ip_change_commit_armed) {
             uint16_t n = st->ip_change_list_no;
-            if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS) {
+            if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS &&
+                !st->ip_list.present[n - 1]) {
+                /* #163: the reserved slot was emptied (SetIpConfigList with IP
+                 * 0.0.0.0) between ChangeIp and this Logout — re-check before
+                 * arming, like the 0x0050 clash re-check, and skip the apply. */
+                fprintf(stderr,
+                        "opcd: logout: IP change slot %u cleared before Logout — not applied\n", n);
+                OLOG_WARN("exec: IP change skipped (slot=%u cleared before Logout)", n);
+                st->ip_change_pending = false;
+                st->ip_change_list_no = 0;
+            } else if (n >= 1 && n <= OPC_IPCFG_LIST_MAX_SLOTS) {
                 st->ip_change_armed_entry  = st->ip_list.slots[n - 1];
                 st->ip_change_armed_no     = n;
                 st->ip_change_commit_armed = true;
@@ -631,9 +668,13 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
                                  uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                  ssize_t *rlen, uint16_t seq)
 {
-    (void)ip; (void)port;
+    (void)port;
     if (opc_get_basic_info_req_unpack(frame, flen) != 0) {
         /* Spec says this must always answer — best effort with current state. */
+    } else if (session_owns(st, ip)) {
+        /* #167: a query from the session IP counts as activity. Another IP's
+         * GetBasicInfo needs no Login, so it must not keep a dead session alive. */
+        session_touch(st);
     }
     const opcd_inventory_t *inv = opcd_inventory();
     opc_get_basic_info_ack_t ack = {
@@ -1016,7 +1057,12 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
                 result = OPC_RESULT_NG; err = OPC_ERR_SLOT_RANGE;
                 break;
             }
-            uint16_t verr = ipcfg_entry_error(e, (req.essid_terminated_mask >> i) & 1u);
+            /* #163: IP 0.0.0.0 = unset; the entry empties its slot and its other
+             * fields (Mask/GW/NTP/ESSID) are not validated. The slot-range check
+             * above and the boundary-flag rules below still apply. */
+            const bool clear_slot = (e->ip_address == 0);
+            uint16_t verr = clear_slot ? 0
+                : ipcfg_entry_error(e, (req.essid_terminated_mask >> i) & 1u);
             if (verr != 0) {
                 /* §3.3.6 value validation (D1) — entry rejected before any
                  * staging mutation. */
@@ -1044,8 +1090,13 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             }
 
             uint16_t slot = (uint16_t)(e->list_number - 1);
-            staging.slots[slot] = *e;
-            staging.present[slot] = 1;
+            if (clear_slot) {
+                memset(&staging.slots[slot], 0, sizeof staging.slots[slot]);
+                staging.present[slot] = 0;
+            } else {
+                staging.slots[slot] = *e;
+                staging.present[slot] = 1;
+            }
 
             if (flag == OPC_LIST_BOUNDARY_END ||
                 flag == OPC_LIST_BOUNDARY_START_END) {
@@ -1529,11 +1580,15 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
         if (req.info_bits & OPC_IND_BITS_RESERVED) {
             /* §3.3.9 0x0010: unassigned notification bit set (D1 family) */
             result = OPC_RESULT_NG; err = OPC_ERR_IND_BITS;
-        } else if (req.info_bits != 0 && !valid_unicast_ipv4(req.recipient_ip)) {
+        } else if (req.info_bits != 0 &&
+                   (!valid_unicast_ipv4(req.recipient_ip) ||
+                    !indication_recipient_reachable(req.recipient_ip))) {
             /* SEC-002: only a unicast recipient may receive indications.
              * Reject 0.0.0.0 / multicast / broadcast so the daemon cannot be
-             * pointed at a group/broadcast as an amplifier. State unchanged.
-             * Spec error cause: "IP 주소 이상" 0x0012 (D10). */
+             * pointed at a group/broadcast as an amplifier. #159: and only one
+             * the device reaches without a gateway (spec §4.3.9 "동일 IP
+             * 세그먼트"), so a routed or unreachable recipient is refused too.
+             * State unchanged. Spec error cause: "IP 주소 이상" 0x0012 (D10). */
             result = OPC_RESULT_NG; err = OPC_ERR_IND_RECIPIENT_IP;
         } else {
             st->indication_enabled         = (req.info_bits != 0);

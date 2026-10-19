@@ -46,6 +46,7 @@
 
 #include "platform.h"
 #include "chan_encode.h"
+#include "route_lookup.h"
 #include "json_util.h"
 #include "nl80211_parse.h"
 #include "ntp_parse.h"
@@ -390,6 +391,25 @@ static int nxp_get_dev_ipv4(int iface, uint32_t *ip_host,
     (void)nxp_json_ipv4(json, "gateway",    gateway_host);  /* null → 0 */
     free(json);
     return 0;
+}
+
+/* #159: gateway-less reachability from the kernel's main routing table
+ * (/proc/net/route — connected subnets and host routes; policy table 100 is
+ * not consulted: opcd's own datagrams use the main table). The longest-prefix
+ * logic lives in route_lookup.c so it is host-unit-testable. */
+static int nxp_lookup_direct_route(uint32_t dst_host, uint32_t *netmask_host)
+{
+    /* A procfs file reports size 0, so opc_json_slurp_file (fseek/ftell) would
+     * read nothing — read to EOF instead. 64 KiB holds hundreds of routes. */
+    static char text[65536];
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) return -errno;
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    int ferr = ferror(f);
+    fclose(f);
+    if (ferr) return -EIO;
+    text[n] = '\0';
+    return opcd_route_direct_lookup(text, dst_host, netmask_host);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1653,6 +1673,7 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .teardown              = nxp_teardown,
     .get_eth_mac           = nxp_get_eth_mac,
     .get_dev_ipv4          = nxp_get_dev_ipv4,
+    .lookup_direct_route   = nxp_lookup_direct_route,
     .get_wlan_mac          = nxp_get_wlan_mac,
     .get_essid             = nxp_get_essid,
     .get_firmware_version  = nxp_get_firmware_version,

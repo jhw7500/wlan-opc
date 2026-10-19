@@ -77,6 +77,40 @@ static int stub_get_dev_ipv4(int iface, uint32_t *ip_host,
     return 0;
 }
 
+/* #159 route table. Default (no stub_route_* call) = permissive: every
+ * destination is directly reachable (reported as a /32 host route), so the many
+ * handler tests that aim indications at arbitrary addresses keep working.
+ * stub_route_clear() switches to an explicit table (initially empty = no
+ * routes); stub_route_add() appends a route (gw 0 = direct, else via gateway).
+ * stub_route_reset() restores the permissive default. Longest prefix wins. */
+#define STUB_ROUTE_MAX 16
+static struct { uint32_t dest, mask, gw; } s_routes[STUB_ROUTE_MAX];
+static unsigned s_route_n;
+static bool     s_route_explicit;
+void stub_route_clear(void) { s_route_explicit = true; s_route_n = 0; }
+void stub_route_reset(void) { s_route_explicit = false; s_route_n = 0; }
+void stub_route_add(uint32_t dest, uint32_t mask, uint32_t gw)
+{
+    s_route_explicit = true;
+    if (s_route_n < STUB_ROUTE_MAX) {
+        s_routes[s_route_n].dest = dest; s_routes[s_route_n].mask = mask;
+        s_routes[s_route_n].gw = gw; s_route_n++;
+    }
+}
+
+static int stub_lookup_direct_route(uint32_t dst_host, uint32_t *netmask_host)
+{
+    if (!s_route_explicit) { *netmask_host = 0xFFFFFFFFu; return 0; }
+    int best = -1;
+    for (unsigned i = 0; i < s_route_n; i++) {
+        if ((dst_host & s_routes[i].mask) != s_routes[i].dest) continue;
+        if (best < 0 || s_routes[i].mask > s_routes[best].mask) best = (int)i;
+    }
+    if (best < 0 || s_routes[best].gw != 0) return -ENETUNREACH;
+    *netmask_host = s_routes[best].mask;
+    return 0;
+}
+
 static int stub_get_wlan_count(void)
 {
     /* SINGLE — see platform.h note: stub MUST return >=1 even though it
@@ -328,6 +362,7 @@ static const opcd_platform_ops_t g_stub_ops = {
     .teardown              = stub_teardown,
     .get_eth_mac           = stub_get_eth_mac,
     .get_dev_ipv4          = stub_get_dev_ipv4,
+    .lookup_direct_route   = stub_lookup_direct_route,
     .get_wlan_mac          = stub_get_wlan_mac,
     .get_essid             = stub_get_essid,
     .get_firmware_version  = stub_get_firmware_version,
