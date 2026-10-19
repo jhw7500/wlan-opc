@@ -444,6 +444,25 @@ static int do_get_devinfo_ip(opcd_state_t *st, uint32_t cip,
     return 0;
 }
 
+/* #165 helper: next indication on the recipient socket. Returns the
+ * indication id (frame bytes 2..3) or 0 when nothing arrives; for InitComplete
+ * *init_status receives the state value (else 0xFFFFFFFF). */
+static int next_ind(int fd, uint32_t *init_status)
+{
+    uint8_t rx[OPC_FRAME_MAX];
+    *init_status = 0xFFFFFFFFu;
+    if (wait_fd_readable(fd, 150) != 0) return 0;
+    ssize_t rn = recv(fd, rx, sizeof rx, 0);
+    if (rn < 4) return 0;
+    int id = (rx[2] << 8) | rx[3];
+    if (id == OPC_IND_INIT_COMPLETE) {
+        opc_ind_init_complete_t ic;
+        if (opc_ind_init_complete_unpack(rx, (size_t)rn, &ic) == 0)
+            *init_status = ic.status;
+    }
+    return id;
+}
+
 int main(void)
 {
     const uint32_t CIP = 0x7f000001;   /* 127.0.0.1, host order */
@@ -577,6 +596,7 @@ int main(void)
         int srv = bind_loopback_udp(NULL);
         int cli = bind_loopback_udp(&cli_port);
         ASSERT(srv >= 0 && cli >= 0, "#160 e2e: loopback sockets");
+        stub_set_link(0, true, 5180, 36);   /* associated: enable sends Ready/RadioUp/LoggedIn (#165) */
         uint8_t rx[OPC_FRAME_MAX];
         ssize_t rn;
         init_state(&st, OPC_PASSWORD_DEFAULT);
@@ -605,6 +625,77 @@ int main(void)
                (rn = recv(cli, rx, sizeof rx, 0)) > 0 &&
                opc_ind_keep_alive_unpack(rx, (size_t)rn, &ka) == 0,
                "#160 e2e: KeepAlive still emitted after logout");
+        stub_set_link(0, false, 0, 0);
+        close(srv);
+        close(cli);
+    }
+
+    /* 7c. #165: RadioUp(2) means "associated". Enable reports the current
+     *     state (Ready, plus RadioUp only if already associated); otherwise
+     *     RadioUp follows the first real association, once per config. */
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cli_port);
+        ASSERT(srv >= 0 && cli >= 0, "#165: loopback sockets");
+        uint32_t v;
+        const uint8_t bits = OPC_IND_BIT_INIT_COMPLETE | OPC_IND_BIT_WLAN_STATUS_CHANGE;
+
+        /* not associated at enable: Ready, LoggedIn - no RadioUp */
+        stub_set_link(0, false, 0, 0);
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK, "#165: enabled while not associated");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY,
+               "#165: enable while unassociated sends Ready(1) first");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_LOGGED_IN,
+               "#165: enable while unassociated sends no RadioUp(2) (next is LoggedIn)");
+        ASSERT(next_ind(cli, &v) == 0, "#165: enable while unassociated sends nothing more");
+
+        /* first association -> RadioUp(2) then the WlanStatusChange */
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165: first association sends RadioUp(2)");
+        ASSERT(next_ind(cli, &v) == OPC_IND_WLAN_STATUS_CHANGE,
+               "#165: first association still sends WlanStatusChange");
+
+        /* disconnect / reconnect: WlanStatusChange only, no second RadioUp */
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_DISCONNECTED, 0x0224);
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        ASSERT(next_ind(cli, &v) == OPC_IND_WLAN_STATUS_CHANGE, "#165: disconnect reported");
+        ASSERT(next_ind(cli, &v) == OPC_IND_WLAN_STATUS_CHANGE, "#165: reconnect reported as status change only");
+        ASSERT(next_ind(cli, &v) == 0, "#165: RadioUp(2) is sent once per config");
+
+        /* re-sending the config restarts from Ready(1); RadioUp again on association */
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK, "#165: config re-sent");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY,
+               "#165: re-sent config restarts at Ready(1)");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_LOGGED_IN,
+               "#165: re-sent config while unassociated has no RadioUp");
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165: RadioUp(2) again after the config restart");
+        while (next_ind(cli, &v) != 0) {}   /* drain the status change */
+
+        /* already associated at enable: Ready then RadioUp immediately */
+        stub_set_link(0, true, 5180, 36);
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK, "#165: enabled while associated");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY,
+               "#165: enable while associated sends Ready(1)");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165: enable while associated sends RadioUp(2) right away");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_LOGGED_IN,
+               "#165: enable while associated then LoggedIn(3)");
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        ASSERT(next_ind(cli, &v) == OPC_IND_WLAN_STATUS_CHANGE,
+               "#165: association after an immediate RadioUp sends no second RadioUp");
+        ASSERT(next_ind(cli, &v) == 0, "#165: nothing further after the status change");
+
+        stub_set_link(0, false, 0, 0);
         close(srv);
         close(cli);
     }
