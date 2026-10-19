@@ -117,7 +117,7 @@ ID/Length 는 `protocol/ids.h`·`protocol/commands.h`·스펙 §3.3 검증값. E
 | ChangeIpAddress | `0x1003` | `change-ip --slot N` | 요 | 60 | 60 | OK(armed)→logout 후 적용 | slot→0x0010 ; 빈 슬롯→**0x0011** ; 리스트변경 중 경합→**0x0012** | §3.3.7 |
 | SetRadioConfig | `0x1004` | `set-radio --station --w1-band --w1-chlist --w1-mode --w1-bw [--w2-* --priority]` | 요 | 84 | 60 | OK + reboot 잔존(wpa freq 실수정) | station→0x0010 ; band(6G)→**0x0011** ; chlist/priority→0x0012 ; mode→**0x0013** ; bw→**0x0014** ; 적용실패→0x0050 | §3.3.8 |
 | SetIndicationConfig | `0x1005` | `set-indication --bits HEX --period S --to A.B.C.D:PORT` | 요 | 64 | 60 | unicast OK | 미할당 bit→0x0010 ; 비유니캐스트(0.0.0.0/mcast/bcast)→**0x0012** | §3.3.9 |
-| Reset | `0x2001` | `reset` | 요 | 0 | **60** ¹ | OK → opcd 재시작 | 미로그인→0x0001 ; 타 IP→0x0002 | §3.3.10 |
+| Reset | `0x2001` | `reset` | 요 | 0 | **60** ¹ | OK → ResetNotice → `wlan_reboot_policy.sh --source opc_reset --force` 재부팅(#164; exit≠0(실행기 기동 실패·중단)이나 실행 불가(126/127)면 재부팅 없이 opcd만 재시작, 20 s 초과나 stop job에 의한 클라이언트 종료는 재부팅 진행 중 — transient unit이 이어감) | 미로그인→0x0001 ; 타 IP→0x0002 | §3.3.10 |
 
 ¹ **검증 정정**: 스펙 도면은 Reset Ack `Length=0`이나 코드는 **60**을 사용한다
 (`protocol/commands.h:432` `OPC_RESET_ACK_LENGTH = 60`, "T11 resolved: spec '0' is a copy-paste
@@ -146,7 +146,7 @@ typo from Reset Req; 60 matches every other simple Ack"). 검증 기준 = **60**
 | Roaming | `0x0004` | 68 | SNR/RSSI/AP MAC/CH | 로밍 실행체 notify(UDP 127.0.0.1:50608)→opcd 합성(#64/#83) | ✅ 실타깃 입증(roam_notify 수동 + 2AP 라이브 로밍 ch36↔ch40) |
 | ApDisconnect | `0x0008` | 68 | Message ID(Disassoc 0x000a/Deauth 0x000c)+ReasonCode+AP MAC | **AP-주도 deauth만** | ⚠ 미입증(#47) |
 | FaultDetect | `0x0010` | 60 | Congestion ID(CPU 0x1/Mem 0x2/Disk 0x3/Net 0x4)+Val | 리소스 폭주 | ⚠ 실폭주 미입증 |
-| ResetNotice | `0x0020` | 60 | Reset Cause | reset 직전 | ✅ `reset_cause=0x00000001` |
+| ResetNotice | `0x0020` | 60 | Reset Cause | Reset Ack 직후, 재부팅 전(#164) | ✅ `reset_cause=0x00000001` (#164 이전 빌드 실측 — Ack→통지 순서는 재검증 필요) |
 | KeepAlive | `0x0080` | 88 | Timestamp(문자열) | period 마다(>0) | ✅ 동작 |
 
 ### 3-1. InitComplete 부팅 시퀀스
@@ -307,7 +307,7 @@ echo "== RESULT: $pass PASS / $fail FAIL =="
 | `set-ip-list` | `iplist.cfg` END 시 commit | 영구(NVRAM) | `cp iplist.cfg{,.bak}` → 검증 → 복원 → sha 대조 |
 | `set-radio` | **wpa_supplicant conf의 freq 실제 수정** | 영구(reboot 잔존) | OK 경로는 링크 끊김 가능 → **NG 경로 우선**(apply 전 거부, 링크 무영향) |
 | `change-ip` | nxp 백엔드가 **eth0 관리 IP 를 `ip addr` 로 실변경** | 휘발(reboot→`22-eth0.network` 복원; mlan /32 보존) | **OK(armed)는 logout 시 ssh 경로 IP 변경→끊김** → 콘솔 필요. 원격은 **conflict(0x0012) 거부 경로만** |
-| `reset` | opcd 재시작(`RestartSec=2`) | — | systemd 자동 복구. 사전 enabled 확인 |
+| `reset` | **보드 재부팅**(`wlan_reboot_policy.sh --source opc_reset --force`; MFG/uptime/cooldown/loop 게이트 우회, #164) | 휘발 상태 전부 초기화(ssh 세션 단절, change-ip 런타임 IP·set-indication 설정 소멸) | 재부팅 완료까지 대기(boot_id 변경 → opcd active → basic-info). 스크립트가 거부·부재면 재부팅 없이 opcd만 재시작(`RestartSec=2`) |
 | `set-indication` | 통지 수신처·Info·Period 설정, 켜진 동안 device-info 거부(0x0010) | 휘발; Logout·idle 만료에도 유지; 리셋/재기동·ChangeIp 적용·Info=0으로만 해제 | 정리는 `--bits 0x00` 뒤 `logout` 또는 opcd 재기동 |
 
 **황금 규칙**
@@ -326,7 +326,7 @@ L0/L1 와이어(64B 헤더 / Length=프레임−8 / offset 64, `--dump`·`--hex`
 login/logout · device-info(408) · **P0** 빈/오타 비번 0x0010 + 비번파일 sha 불변 ·
 **세션 배타** 2nd-host 0x0002 · indication 중 device-info 0x0010 ·
 **P1** 비유니캐스트 거부 0x0012(#34 정정) · **idle 자동로그아웃** 0x0001 ·
-KeepAlive 주기(teardown은 #160으로 폐기; Logout 뒤 지속은 실타깃 미검증 → 남은 갭) · ResetNotice 0x0020 · reset+systemd 재기동 ·
+KeepAlive 주기(teardown은 #160으로 폐기; Logout 뒤 지속은 실타깃 미검증 → 남은 갭) · ResetNotice 0x0020(#164 이전 빌드: 통지→Ack 순서) · reset+systemd 재기동(#164 이전 빌드 실측; **#164 재부팅 경로·Ack→통지 순서는 미측정 → 남은 갭**) ·
 set-ip-list START/END+conflict 0x0012 · netmask·6G freq 거부 · set-radio mode/bw/freq NG ·
 WlanStatusChange(#46) · **Roaming(0x0004) notify 경로**(#64/#83 — roam_notify 수동 트리거
 wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
@@ -335,6 +335,7 @@ wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
 
 | 우선 | 갭 | 차단 요인 | 검증 방법 |
 |---|---|---|---|
+| **P1** | **#164 Reset 재부팅 경로**: Ack → ResetNotice 1회(cause 0x01) 순서, boot_id 변경(실재부팅), 정상 리셋이 시그널 경로였는지, 스크립트 부재·실행기 실패 시 재부팅 없이 opcd 재시작 폴백 | 보드 재부팅(ssh 단절, 휘발 상태 초기화); 시그널 경로 근거는 영속 journal 필요 | `test-all.sh` §8(boot_id 대기 + 아래 근거) 또는 수동: boot_id 기록 → `vhlctl reset` → **순서는 `logger.log`의 `TX Reset ack seq=` 줄 < `IND ResetNotice(0x0020)` 줄**(리스너는 Ack를 못 본다) · 1회/cause는 `--hex listen` 캡처 · 시그널 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal"(없으면 시리얼 콘솔; 감사 로그 "reboot under way"는 rc 0 전부 동일해 구분 불가) · boot_id 변경; 폴백은 스크립트를 잠시 옮겨 두고 재시도 |
 | **P1** | `change-ip` 실 IP 적용 + power-cycle 복원 | OK 시 ssh 끊김 | **시리얼 콘솔**에서 logout 후 `ip addr` 확인, 재부팅 후 복원 |
 | **P1** | `set-radio` OK+persist & mode/bw/ch **실드라이버 반영** | wpa freq 실수정 | 콘솔에서 OK 후 reboot 잔존 + `iw dev mlan0 link` 대조 |
 | **P2** | ApDisconnect MAC(#47) | AP-주도 deauth 환경 필요 | AP 에서 강제 deauth 유발(테스트 AP) |

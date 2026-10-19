@@ -255,10 +255,18 @@ typedef struct opcd_platform_ops {
      * Non-zero = artifacts may be stale (logged; the IP change stands). */
     int  (*peer_route_refresh)(uint32_t ip_host, uint32_t netmask_host);
 
-    /* Deterministic reset notice → soft reboot ack path.
-     * opcd exits cleanly after Ack (main returns 0; systemd Restart=always
-     * handles the reboot). This hook lets the platform pre-emptively quiesce
-     * the radio so the next boot is clean. May be a no-op. */
+    /* Reset (0x2001, #164): called by main once the loop has exited — the
+     * Reset ack and the ResetNotice are on the wire and the NVRAM queue is
+     * reconciled. The platform starts the board reboot here (nxp: the
+     * package's wlan_reboot_policy.sh with --source opc_reset --force, bounded
+     * to 20 s; the script hands the reboot to a transient systemd unit that
+     * outlives the call). Return 0 when a reboot is under way — handed off
+     * (the client was stopped by the shutdown it started, or the bound
+     * expired after the hand-off) or held by another request (which may
+     * itself still refuse — not confirmable); non-zero when no reboot was
+     * started by this request (the script refused or could not be run). main
+     * still returns 0 in every case and systemd Restart=always brings opcd
+     * back when the board stays up. May be a no-op (stub). */
     int  (*prepare_reset)(void);
 
     /* Event multiplexing. event_fd() returns -1 if no async events are

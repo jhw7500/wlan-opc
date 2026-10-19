@@ -3,6 +3,7 @@
 #
 #   bash scripts/test-all.sh                 # 안전 전체 (set-radio 실적용 제외)
 #   RADIO_APPLY=1 bash scripts/test-all.sh   # set-radio OK 실적용까지 (동일 freq 재적용/자기복구) ⚠️콘솔권장
+#   §8 reset 은 보드를 **재부팅**한다(#164): boot_id 변경·opcd·basic-info 복귀를 RESET_REBOOT_WAIT_S(기본 180)초까지 기다린다.
 #
 # 안전장치: 시작 시 타겟 /usr/local/opc/etc 를 스냅샷, 종료(정상/중단) 시 복원 + opcd 재시작.
 # 링크위험(자기절단)으로 스킵: WlanStatusChange/ApDisconnect/FaultDetect (사유 출력).
@@ -27,12 +28,23 @@ skipn(){ printf '  SKIP  %s  (%s)\n' "$1" "$2"; skip=$((skip+1)); }
 # 복원은 반드시 백업(etc.testbak) 존재 확인 후에만 rm -rf — 백업 없이 etc를 지우면
 # 타겟 설정 디렉토리가 통째로 유실된다 (PR #65 리뷰: Codex P1 + Gemini CRITICAL).
 sec "SETUP: etc 스냅샷"
-snap=$(vhl_ssh 'rm -rf /usr/local/opc/etc.testbak; cp -a /usr/local/opc/etc /usr/local/opc/etc.testbak && echo snapshot-ok' 2>&1 | tail -1)
+# 이전 실행의 etc.testbak 이 남아 있으면 그것이 원본일 수 있다(§8 재부팅 중 복원 실패, #164) — 덮어쓰지 않고 중단.
+snap=$(vhl_ssh 'if [ -e /usr/local/opc/etc.testbak ]; then echo leftover-backup; elif cp -a /usr/local/opc/etc /usr/local/opc/etc.testbak; then echo snapshot-ok; else rm -rf /usr/local/opc/etc.testbak; echo snapshot-failed; fi' 2>&1 | tail -1)
 echo "  $snap"
-[ "$snap" = "snapshot-ok" ] || { echo "  스냅샷 실패 — 중단(타겟 미변경)"; exit 1; }
+case "$snap" in
+  snapshot-ok) ;;
+  leftover-backup) echo "  이전 실행의 복원이 끝나지 않았다(etc.testbak 잔존 — 원본일 수 있음). 타겟에서 내용을 확인한 뒤 cd /usr/local/opc && rm -rf etc && mv etc.testbak etc && systemctl restart opcd 로 수동 복원하고 재실행. 중단(타겟 미변경)"; exit 1 ;;
+  *) echo "  스냅샷 실패(부분 복사본은 삭제됨) — 중단(타겟 미변경)"; exit 1 ;;
+esac
 restore(){ echo; sec "TEARDOWN: etc 복원 + opcd 재시작"
-  vhl_ssh 'if [ -d /usr/local/opc/etc.testbak ]; then rm -rf /usr/local/opc/etc && { mv /usr/local/opc/etc.testbak /usr/local/opc/etc || cp -a /usr/local/opc/etc.testbak /usr/local/opc/etc; }; else echo "testbak 없음 — etc 보존"; fi; systemctl restart opcd; sleep 1; echo restored=$(systemctl is-active opcd)' 2>&1 | tail -1
-  $VHL logout >/dev/null 2>&1 || true; }
+  # §8 reset 이 보드를 재부팅하므로(#164) 여기서 ssh 가 닿지 않을 수 있다. 복원이 확인되지 않으면
+  # FAIL(비0 종료)로 알리고 etc.testbak(원본)은 타겟에 남긴다 — 다음 실행의 SETUP 이 그것을 보고 중단한다.
+  local r; r=$(vhl_ssh 'if [ -d /usr/local/opc/etc.testbak ]; then rm -rf /usr/local/opc/etc && { mv /usr/local/opc/etc.testbak /usr/local/opc/etc || cp -a /usr/local/opc/etc.testbak /usr/local/opc/etc; } && echo restore-ok; else echo "testbak 없음 — etc 보존"; fi; systemctl restart opcd; sleep 1; echo restored=$(systemctl is-active opcd)' 2>&1 | tr '\n' ' ')
+  echo "  $r"
+  $VHL logout >/dev/null 2>&1 || true
+  case "$r" in *restore-ok*|*"testbak 없음"*) ;;
+    *) printf '  \033[31mFAIL\033[0m  etc 복원 미확인 — 타겟에 etc.testbak(원본)이 남아 있을 수 있다. 보드가 올라온 뒤 수동 복원: cd /usr/local/opc && rm -rf etc && mv etc.testbak etc && systemctl restart opcd (etc 가 남아 있으면 mv 만으로는 etc/etc.testbak 으로 중첩된다).\n'; exit 1 ;;
+  esac; }
 trap restore EXIT
 
 # ============ 1. Login / Logout / 세션 ============
@@ -136,8 +148,12 @@ else
 fi
 
 # ============ 8. Reset (+ ResetNotice) ============
-sec "8. Reset / ResetNotice"
+# #164: reset 은 Ack → ResetNotice → wlan_reboot_policy.sh --force 로 **보드를 재부팅**한다(opcd 재시작이 아니다).
+# 그래서 boot_id 가 바뀌고 opcd 가 active 가 될 때까지 기다린 뒤에야 재도달을 확인하고 다음 절로 간다.
+# 돌아오지 않으면 FAIL 로 기록하고 계속한다(그러면 §9 와 TEARDOWN 복원도 실패할 수 있다 — 복원 실패는 비0 종료).
+sec "8. Reset / ResetNotice (보드 재부팅, #164)"
 $VHL login --password "$PW" >/dev/null 2>&1
+boot0=$(vhl_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null | tail -1)
 $VHL set-indication --bits 0x20 --period 0 --to "$VHLIP:$TEST_LISTEN_PORT" >/dev/null 2>&1  # ResetNotice
 timeout 6 "$VHLCTL_BIN" --hex listen --bind "0.0.0.0:$TEST_LISTEN_PORT" > "$LOG.rn" 2>&1 &
 LP=$!; sleep 1
@@ -145,8 +161,36 @@ chk "reset → OK"                             "OK"           $VHL reset
 sleep 3; wait $LP 2>/dev/null
 if grep -q "0x0020\|0020" "$LOG.rn" 2>/dev/null; then printf '  PASS  ResetNotice(0x0020) 수신\n'; pass=$((pass+1))
 else skipn "ResetNotice 수신" "타이밍/recipient volatile — journal로 확인"; fi
-vhl_ssh 'sleep 2; echo opcd=$(systemctl is-active opcd)' 2>&1 | tail -1
-chk "reset 후 systemd 재기동 + 재도달"       "vendor_code"  vhl basic-info
+RESET_REBOOT_WAIT_S="${RESET_REBOOT_WAIT_S:-180}"
+boot1=""; t0=$(date +%s)
+while [ $(( $(date +%s) - t0 )) -lt "$RESET_REBOOT_WAIT_S" ]; do
+  boot1=$(vhl_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null | tail -1)
+  if [ -n "$boot1" ] && [ "$boot1" != "$boot0" ] && [ "$(vhl_ssh 'systemctl is-active opcd' 2>/dev/null | tail -1)" = "active" ]; then break; fi
+  sleep 5
+done
+if [ -n "$boot0" ] && [ -n "$boot1" ] && [ "$boot1" != "$boot0" ]; then
+  printf '  PASS  reset 후 보드 재부팅(boot_id 변경) + opcd active (%ds)\n' "$(( $(date +%s) - t0 ))"; pass=$((pass+1))
+else
+  printf '  \033[31mFAIL\033[0m  reset 후 %ds 안에 보드가 돌아오지 않음 (boot0=%s boot1=%s) — 다음 절과 TEARDOWN 복원이 실패할 수 있다\n' "$RESET_REBOOT_WAIT_S" "${boot0:-?}" "${boot1:-?}"
+  fail=$((fail+1)); FAILED="${FAILED}\n  - reset 후 보드 재부팅"
+fi
+chk "reset 후 재도달(basic-info)"            "vendor_code"  vhl basic-info
+# 순서 근거: 리스너는 Ack 를 받지 않는다(별도 소켓). Ack → ResetNotice 순서는 opcd 감사 로그
+# (/var/log/cantops/logger.log, rsyslog — 재부팅 뒤에도 남음)에서 "TX Reset ack seq=" 줄이
+# "IND ResetNotice(0x0020)" 줄보다 앞에 있는지로 판정한다.
+ord=$(vhl_ssh "a=\$(grep -n 'TX Reset ack seq=' /var/log/cantops/logger.log | tail -1 | cut -d: -f1); n=\$(grep -n 'IND ResetNotice(0x0020)' /var/log/cantops/logger.log | tail -1 | cut -d: -f1); echo \"ack=\${a:-none} notice=\${n:-none}\"" 2>/dev/null | tail -1)
+echo "  logger.log: $ord"
+oa=${ord#ack=}; oa=${oa%% *}; on=${ord##*notice=}
+if [ -n "$oa" ] && [ -n "$on" ] && [ "$oa" != none ] && [ "$on" != none ] && [ "$oa" -lt "$on" ] 2>/dev/null; then
+  printf '  PASS  Ack(TX Reset ack) → ResetNotice(IND 0x0020) 순서 (logger.log 줄 %s < %s)\n' "$oa" "$on"; pass=$((pass+1))
+else
+  printf '  \033[31mFAIL\033[0m  Ack→ResetNotice 순서를 logger.log 에서 확인하지 못함 (%s)\n' "${ord:-ssh 실패}"; fail=$((fail+1)); FAILED="${FAILED}\n  - Ack→ResetNotice 순서(logger.log)"
+fi
+# 정상 리셋 경로 근거: "policy client terminated by signal" 은 reboot 가 시작된 뒤 opcd stderr(journal)에 찍히므로
+# 정책 스크립트의 journald 스냅샷(reboot 전)에는 없다. 영속 journal 이면 이전 부팅에서 읽고, 아니면 SKIP(시리얼 콘솔).
+sig=$(vhl_ssh "journalctl -b -1 -u opcd --no-pager 2>/dev/null | grep -c 'policy client terminated by signal'" 2>/dev/null | tail -1)
+if [ "${sig:-0}" -gt 0 ] 2>/dev/null; then printf '  PASS  정상 리셋 경로: 이전 부팅 journal 에 "policy client terminated by signal" (%s회)\n' "$sig"; pass=$((pass+1))
+else skipn "정상 리셋 경로(terminated by signal)" "이전 부팅 journal 없음(휘발 journald) — 시리얼 콘솔에서 확인"; fi
 
 # ============ 9. Roaming(0x04) — notify 경로 (링크 무영향) ============
 # 이 보드는 host-based 로밍(커널 CMD_ROAM 미발행) → 로밍 실행체가 opcd에 로컬 UDP

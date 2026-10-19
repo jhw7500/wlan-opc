@@ -81,7 +81,7 @@
 - **V1** Roaming/ApDisconnect (#47 — WlanStatusChange는 2026-06-16 와이어 캡처 검증)
 - **V10** NVRAM 120s fsync 예산(i.MX8MM eMMC) · **V11 power-cycle IP 복원 (2026-06-16 reboot로 검증됨)**
 - **V13~V17** (규제 NG 실동작 / ESSID 길이 경계 / mlan0 라우팅 소유 / DUAL 검출 / idle 경계)
-- `nxp_prepare_reset` no-op은 vtable 계약상 허용(필요성 미확정) · **V8** IP-only 세션 식별은 운영정책(SEC-001, 코드 범위 밖)
+- `nxp_prepare_reset`은 #164로 `wlan_reboot_policy.sh --source opc_reset --reason opc_reset_command --force`를 20 s 상한으로 호출(Ack → ResetNotice → 호출 순서; 시그널 종료·상한 초과 = 재부팅 진행 중, dedupe 충돌 = 다른 요청이 락 보유(미확인) → 0; exit≠0(거부)·126/127(실행 불가) = 재부팅 없음 → systemd 재기동 폴백) · **V8** IP-only 세션 식별은 운영정책(SEC-001, 코드 범위 밖)
 
 ---
 

@@ -771,6 +771,9 @@ int main(int argc, char **argv)
                                               us / 1000, us % 1000);
                             }
                         }
+                        /* #164: a Reset ack is on the wire now — the
+                         * ResetNotice follows it, sent from inside the loop. */
+                        opcd_post_ack(&st);
                     } else {
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);
                     }
@@ -824,8 +827,20 @@ int main(int argc, char **argv)
     st.store_async = NULL;
 
     if (st.should_reset) {
-        LOG("reset requested — exiting (systemd will restart)");
-        (void)plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
+        /* #164: the ack and the ResetNotice are already on the wire and the
+         * NVRAM queue is reconciled. The platform hook starts the board reboot
+         * (nxp: wlan_reboot_policy.sh --force, bounded) and returns 0 when a
+         * reboot is under way, non-zero when none was started (platform.h).
+         * Either way we exit 0: when no reboot was started, systemd's
+         * Restart=always at least brings opcd back. */
+        LOG("reset requested — running the platform reset hook, then exiting");
+        int prc = plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
+        if (prc != 0) {
+            LOG("reset: the platform hook started no reboot (rc=%d) — exiting for systemd restart", prc);
+            OLOG_ERR("stop: reset hook started no reboot (rc=%d) — exiting, systemd restarts opcd", prc);
+        } else {
+            OLOG_INFO("stop: reset hook reports a reboot under way or held by another request (not confirmable here) — exiting");
+        }
     }
     if (g_teardown) g_teardown();
     close(udp_fd);

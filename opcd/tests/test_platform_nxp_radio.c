@@ -90,6 +90,11 @@ int __wrap_execv(const char *path, char *const argv[])
     if (getenv("OPCD_NXP_FAIL_WLAN_APPLY") != NULL &&   /* #161: ESSID apply refused/failed */
         argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0)
         _exit(42);
+    if (argv[0] != NULL && strcmp(argv[0], "wlan_reboot_policy.sh") == 0) {   /* #164 outcomes of the real script */
+        if (getenv("OPCD_NXP_FAIL_RESET") != NULL)       _exit(2);      /* non-zero exit: systemd-run/executor failure (policy gates are bypassed by --force) */
+        if (getenv("OPCD_NXP_RESET_NOEXEC") != NULL)     _exit(127);    /* execv failure / command not found (bash 127) */
+        if (getenv("OPCD_NXP_RESET_SIGNALED") != NULL)   raise(SIGTERM); /* the reboot's stop job killed the systemd-run client */
+    }
     if (getenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT") != NULL &&   /* #161: helper installed the conf, then failed */
         argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0) {
         const char *conf = getenv("OPCD_TEST_CONF_PATH");
@@ -143,6 +148,18 @@ static void ipt_reset(const char *conf)
     ipt_put(IPT_TSYNCD, "[Time]\nNTP=10.0.0.9\n");
 }
 
+/* #164: does the captured stderr file contain needle? (small files only) */
+static int file_has(const char *path, const char *needle)
+{
+    static char buf[8192];
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
 static int read_log(char *buf, size_t cap)
 {
     int fd = open(g_exec_log, O_RDONLY);
@@ -189,6 +206,93 @@ int main(int argc, char **argv)
     opcd_platform_register();
     const opcd_platform_ops_t *ops = opcd_platform();
     ASSERT(ops != NULL, "NXP platform registered");
+
+    /* #164: capture opcd's stderr around one prepare_reset call so the
+     * classification wording (what on-target triage will read) is asserted,
+     * not just the return value. */
+    static int g_saved_err = -1;
+    #define ERR_CAPTURE_BEGIN(path) do { fflush(stderr); g_saved_err = dup(2); \
+        int efd_ = open((path), O_WRONLY | O_CREAT | O_TRUNC, 0600); dup2(efd_, 2); close(efd_); } while (0)
+    #define ERR_CAPTURE_END() do { fflush(stderr); dup2(g_saved_err, 2); close(g_saved_err); g_saved_err = -1; } while (0)
+    char errlog[128];
+    snprintf(errlog, sizeof errlog, "test_nxp_err_%ld.tmp", (long)getpid());
+    #define ERR_HAS(needle) file_has(errlog, (needle))
+
+    /* ---- #164: Reset → reboot through the package's reboot policy script.
+     * The fake helper models what the real script does (see nxp_prepare_reset):
+     * exit 0 = dedupe collision (another request holds the lock), SIGTERM'd
+     * client = the reboot's stop job reached it, exit 2 = a non-zero exit
+     * (systemd-run/executor failure; --force bypasses the policy gates), exit
+     * 127 = could not run (execv failure / command not found), no exit within the
+     * bound (400 ms in this build) = handed off and still running. ---- */
+    {
+        char log[2048];
+        int execs;
+        unlink(g_exec_log);
+        ERR_CAPTURE_BEGIN(errlog);
+        int zrc = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        ASSERT(zrc == 0 && ERR_HAS("another reboot request already holds the dedupe lock") && ERR_HAS("may still refuse"),
+               "#164 prepare_reset: script exit 0 (dedupe: another request holds the reboot lock) -> 0, logged as held-by-another-request, not as a reboot under way");
+        ASSERT(read_log(log, sizeof log) == 0 &&
+               strstr(log, "path=/proc/self/exe|wlan_reboot_policy.sh|--source|opc_reset|--reason|opc_reset_command|--force\n") != NULL,
+               "#164 prepare_reset: wlan_reboot_policy.sh --source opc_reset --reason opc_reset_command --force");
+        execs = 0;
+        for (const char *p = log; (p = strstr(p, "path=")) != NULL; p++) execs++;
+        ASSERT(execs == 1, "#164 prepare_reset: exactly one exec — the policy script, nothing else");
+
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_RESET_SIGNALED", "1", 1);
+        ERR_CAPTURE_BEGIN(errlog);
+        int src = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        unsetenv("OPCD_NXP_RESET_SIGNALED");
+        ASSERT(src == 0 && ERR_HAS("terminated by signal 15") && ERR_HAS("reboot under way"),
+               "#164 prepare_reset: client killed by SIGTERM (the shutdown's stop job) -> 0, logged as reboot under way");
+
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_FAIL_RESET", "1", 1);
+        ERR_CAPTURE_BEGIN(errlog);
+        int frc = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        unsetenv("OPCD_NXP_FAIL_RESET");
+        ASSERT(frc == 2 && ERR_HAS("exited 2") && ERR_HAS("no reboot started") && !ERR_HAS("refused") && !ERR_HAS("could not run"),
+               "#164 prepare_reset: script exit 2 (executor failure) -> 2, logged as no reboot started (neutral, not 'refused')");
+        execs = 0;
+        ASSERT(read_log(log, sizeof log) == 0 && strstr(log, "|wlan_reboot_policy.sh|") != NULL,
+               "#164 prepare_reset: the refused attempt was the policy script");
+        for (const char *p = log; (p = strstr(p, "path=")) != NULL; p++) execs++;
+        ASSERT(execs == 1 && strstr(log, "path=/sbin/") == NULL && strstr(log, "systemctl") == NULL,
+               "#164 prepare_reset: no direct reboot fallback after the script refuses");
+
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_RESET_NOEXEC", "1", 1);
+        ERR_CAPTURE_BEGIN(errlog);
+        int nrc = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        unsetenv("OPCD_NXP_RESET_NOEXEC");
+        ASSERT(nrc == 127 && ERR_HAS("could not run") && ERR_HAS("exit 127") && !ERR_HAS("executor aborted") && !ERR_HAS("exhausted"),
+               "#164 prepare_reset: exit 127 (could not run: execv failure / command not found) -> 127, logged as could-not-run, no reboot started");
+
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_EXEC_DELAY_MS", "1500", 1);        /* helper outlives the 400 ms test bound */
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int trc = ops->prepare_reset();
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        unsetenv("OPCD_NXP_EXEC_DELAY_MS");
+        long took_ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+        /* run_argv_bounded sends SIGTERM 150 ms before the bound, which ends the
+         * sleeping fake helper, so the call returns between 250 and 400 ms —
+         * well before the helper's own 1500 ms would have elapsed. */
+        ASSERT(trc == 0 && took_ms >= 200 && took_ms < 1400,
+               "#164 prepare_reset: script still running at the bound -> 0 (handed off, continuing in the transient unit), returned at the bound");
+        unlink(g_exec_log);
+        unlink(errlog);
+    }
+    #undef ERR_HAS
+    #undef ERR_CAPTURE_BEGIN
+    #undef ERR_CAPTURE_END
 
     /* ---- #161/#162: ChangeIpAddress apply — ESSID marker, Gateway, NTP ---- */
     {

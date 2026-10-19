@@ -1646,6 +1646,51 @@ int main(void)
         close(cli);
     }
 
+    /* ---- #164: Reset — Ack first, ResetNotice right after it, from the loop ---- */
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cli_port);
+        ASSERT(srv >= 0 && cli >= 0, "#164 reset: loopback sockets");
+        uint32_t v;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, OPC_IND_BIT_RESET_NOTICE, 0);
+        ASSERT(r == OPC_RESULT_OK, "#164 reset: ResetNotice enabled");
+        while (next_ind(cli, &v) != 0) {}
+        uint8_t rf[OPC_FRAME_MAX], rr[OPC_FRAME_MAX], rxn[OPC_FRAME_MAX];
+        ssize_t rfn = opc_reset_req_pack(rf, sizeof rf, 77), rrl = -1;
+        int rdrc = opcd_dispatch(&st, rf, (size_t)rfn, CIP, 5000, rr, sizeof rr, &rrl);
+        opc_reset_ack_t rack;
+        ASSERT(rdrc == 0 && rrl > 0 && opc_reset_ack_unpack(rr, (size_t)rrl, &rack) == 0 &&
+               rack.result == OPC_RESULT_OK && st.should_reset,
+               "#164 reset: ack OK and should_reset set");
+        ASSERT(next_ind(cli, &v) == 0 && !st.reset_notice_sent,
+               "#164 reset: the handler itself sends no ResetNotice (it must follow the ack)");
+        opcd_post_ack(&st);
+        ASSERT(wait_fd_readable(cli, 500) == 0, "#164 reset: ResetNotice arrives after opcd_post_ack");
+        ssize_t rnn = recv(cli, rxn, sizeof rxn, 0);
+        opc_ind_reset_notice_t rnote;
+        ASSERT(rnn > 0 && ((rxn[2] << 8) | rxn[3]) == OPC_IND_RESET_NOTICE &&
+               opc_ind_reset_notice_unpack(rxn, (size_t)rnn, &rnote) == 0 &&
+               rnote.reset_cause == OPC_RESET_CAUSE_USER && st.reset_notice_sent,
+               "#164 reset: ResetNotice(cause USER) goes out after the ack");
+        opcd_post_ack(&st);
+        ASSERT(next_ind(cli, &v) == 0, "#164 reset: a later ack in the same drain does not repeat the notice");
+        /* no Reset acknowledged → post_ack sends nothing */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, OPC_IND_BIT_RESET_NOTICE, 0);
+        while (next_ind(cli, &v) != 0) {}
+        opcd_post_ack(&st);
+        ASSERT(r == OPC_RESULT_OK && next_ind(cli, &v) == 0 && !st.reset_notice_sent,
+               "#164 reset: post_ack without an acknowledged Reset sends nothing");
+        close(srv);
+        close(cli);
+    }
+
     /* ---- PERF-001: async NVRAM persist → deferred Set* ack ---- */
 
     {

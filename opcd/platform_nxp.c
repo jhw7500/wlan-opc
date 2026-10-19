@@ -68,6 +68,18 @@
 #ifndef OPC_WLAN_APPLY_SH
 #define OPC_WLAN_APPLY_SH        "/usr/local/scripts/opc_wlan_apply.sh"
 #endif
+#ifndef OPC_REBOOT_POLICY_SH
+#define OPC_REBOOT_POLICY_SH     "/usr/local/scripts/wlan_reboot_policy.sh"
+#endif
+/* #164: bound on the reboot-policy script. Its worst case (journal snapshot
+ * 10 s, sync 2 s, probes, do_reboot 10+5+5 s) is about 36 s — longer than
+ * opcd.service's WatchdogSec=30s, and the loop that pings the watchdog has
+ * exited by the time prepare_reset runs. The reboot itself runs in the
+ * transient unit the script hands off to (systemd-run --wait), which outlives
+ * this client, so the bound cuts only our wait, never the reboot. */
+#ifndef OPC_RESET_SCRIPT_TIMEOUT_MS
+#define OPC_RESET_SCRIPT_TIMEOUT_MS 20000
+#endif
 
 /* ChangeIpAddress replaces eth0's management IP at runtime via `ip addr`.
  * Verified on-target: systemd-networkd does NOT revert the change (a .network
@@ -766,10 +778,17 @@ static int nxp_get_link(int idx, opcd_platform_link_t *out)
 /* Run argv[] (path = absolute binary, argv[0] = program name) to completion
  * within timeout_ms. The helper owns a process group so timeout cleanup also
  * reaches driver subprocesses: SIGTERM gives the shell a short in-budget
- * cleanup window, then SIGKILL enforces the original hard deadline. */
-static int run_argv_bounded(const char *label, const char *path,
-                            char *const argv[], long timeout_ms)
+ * cleanup window, then SIGKILL enforces the original hard deadline.
+ * Returns 0 (exited 0), -EPROTO (exited non-zero or killed by a signal),
+ * -ETIMEDOUT (our deadline fired) or -errno (fork/setpgid/waitpid failure).
+ * wstatus_out, when given, receives the raw waitpid status for the -EPROTO
+ * and 0 cases and -1 otherwise, so a caller can tell an exit code from a
+ * signal (#164 needs that for the reboot policy script). */
+static int run_argv_bounded_status(const char *label, const char *path,
+                                   char *const argv[], long timeout_ms,
+                                   int *wstatus_out)
 {
+    if (wstatus_out) *wstatus_out = -1;
     /* opcd blocks INT/TERM for signalfd; helpers must receive our timeout
      * TERM, so clear the inherited mask in the child only. */
     sigset_t empty_mask;
@@ -880,12 +899,19 @@ static int run_argv_bounded(const char *label, const char *path,
         struct timespec ts = { .tv_sec = 0, .tv_nsec = sleep_ms * 1000L * 1000L };
         nanosleep(&ts, NULL);
     }
+    if (wstatus_out) *wstatus_out = status;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "opcd: %s: '%s' failed (status=0x%x)\n",
                 label, path, (unsigned)status);
         return -EPROTO;
     }
     return 0;
+}
+
+static int run_argv_bounded(const char *label, const char *path,
+                            char *const argv[], long timeout_ms)
+{
+    return run_argv_bounded_status(label, path, argv, timeout_ms, NULL);
 }
 
 /* Run opc_wlan_apply.sh synchronously with any non-empty freq/mode/bw/ssid
@@ -1391,7 +1417,73 @@ static int nxp_peer_route_refresh(uint32_t ip_host, uint32_t netmask_host)
 
 static int nxp_prepare_reset(void)
 {
-    return 0;
+    /* #164: Reset = reboot the board through the package's reboot policy
+     * script. --force bypasses the MFG/uptime/cooldown/loop gates (an operator
+     * asked for it) but not the dedupe lock. The script hands the work to a
+     * transient unit and waits for it; the result is classified below. When
+     * no reboot was started, main exits for systemd to restart opcd — there
+     * is no reboot by other means. */
+    const char *argv[] = { "wlan_reboot_policy.sh", "--source", "opc_reset",
+                           "--reason", "opc_reset_command", "--force", NULL };
+    int wstatus = -1;
+    int rc = run_argv_bounded_status("opc_reset", OPC_REBOOT_POLICY_SH,
+                                     (char *const *)argv,
+                                     OPC_RESET_SCRIPT_TIMEOUT_MS, &wstatus);
+    /* What the real script can produce (wlan-package wlan_reboot_policy.sh,
+     * run through `systemd-run --wait`, which propagates the transient unit's
+     * status): exit 0 only from its dedupe lock — a reboot was already in
+     * progress (held by a request that may itself still refuse) and this
+     * request started nothing; a non-zero exit when it could not be run
+     * (126/127 — its own exhaustion code 127 cannot arrive inside the bound)
+     * or systemd-run/the executor failed (with --force none of the policy
+     * gates applies, so their 10-14 codes cannot arrive); and no exit at all
+     * on the normal success path — the
+     * shutdown it started stops opcd.service, whose stop job SIGTERMs the
+     * systemd-run client in our process group (WIFSIGNALED), or our bound
+     * expires first (-ETIMEDOUT) while the sequence continues in the
+     * transient unit. So 0 here means "a reboot is under way or held by
+     * another request" (signaled client, timeout after the hand-off, dedupe
+     * collision) and non-zero means "no reboot started by this request"
+     * (exit N, or the script could not be run). A sequence that exhausts
+     * only after the bound cannot be told from one that rebooted; by then
+     * systemd has restarted opcd and the board is simply still up. */
+    if (rc == 0) {
+        /* The lock is taken before the gates a non-forced caller (e.g. the
+         * wifi_init emergency path) can still fail at, so the holder may yet
+         * refuse: this is "another request holds the reboot", not a reboot
+         * confirmed under way. */
+        fprintf(stderr, "opcd: opc_reset: policy script exited 0 — another reboot request already holds the dedupe lock; this request started nothing and that request may still refuse (not confirmable from here)\n");
+        return 0;
+    }
+    if (rc == -ETIMEDOUT) {
+        fprintf(stderr, "opcd: opc_reset: %s still running after %d ms — reboot handed off to the transient unit and continuing there (not confirmable from here)\n",
+                OPC_REBOOT_POLICY_SH, (int)OPC_RESET_SCRIPT_TIMEOUT_MS);
+        return 0;
+    }
+    if (rc == -EPROTO && wstatus != -1 && WIFSIGNALED(wstatus)) {
+        fprintf(stderr, "opcd: opc_reset: policy client terminated by signal %d (the reboot's stop job reaches it this way) — reboot under way\n",
+                WTERMSIG(wstatus));
+        return 0;
+    }
+    if (rc == -EPROTO && wstatus != -1 && WIFEXITED(wstatus)) {
+        int code = WEXITSTATUS(wstatus);
+        /* run_argv_bounded's child reports an execv failure as _exit(127)
+         * and bash reports a missing command (systemd-run) as 127 / a
+         * non-executable one as 126; the script's own exhaustion code (also
+         * 127) cannot arrive inside the bound — do_reboot sleeps 20 s after
+         * launching /sbin/reboot before returning it — so inside the bound
+         * 126/127 mean "could not run", everything else "no reboot started"
+         * (systemd-run/executor failure — the policy gates are bypassed). */
+        if (code == 126 || code == 127)
+            fprintf(stderr, "opcd: opc_reset: could not run %s (exit %d: execv failure or command not found) — no reboot started\n",
+                    OPC_REBOOT_POLICY_SH, code);
+        else
+            fprintf(stderr, "opcd: opc_reset: policy script exited %d — no reboot started (with --force the policy gates do not apply; a non-zero status here means systemd-run could not start the executor, or the executor aborted)\n", code);
+        return code != 0 ? code : -EPROTO;
+    }
+    fprintf(stderr, "opcd: opc_reset: could not run %s (rc=%d) — no reboot started\n",
+            OPC_REBOOT_POLICY_SH, rc);
+    return rc;
 }
 
 static int nxp_event_fd(void)

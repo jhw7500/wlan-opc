@@ -256,6 +256,7 @@ typedef struct opcd_state {
     int      udp_fd;
     bool     should_exit;
     bool     should_reset;          /* Reset handler sets this — main loop exits with 0 */
+    bool     reset_notice_sent;     /* #164: the ResetNotice already went out after the Reset ack (opcd_post_ack) */
 } opcd_state_t;
 
 #ifdef __cplusplus
