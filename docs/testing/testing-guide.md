@@ -719,5 +719,19 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   `platform_nxp.c`, execv 가로채기로 호출 순서·인자·실패/설치 후 실패 시 표식 상태·onlink 확인). **실기에서만 확인
   가능**: 변경→reconfigure 후 ESSID 유지→재부팅 후 IP·ESSID 원복, 기본 경로·timesyncd drop-in 실동작, `opcd -R`이
   wifi_init.sh의 conf 변환과 wpa_supplicant보다 먼저 도는 유닛 순서(wlan-package#362; -R은 conf writer lock을 잡지 않음).
-  `reset`은 opcd 재시작(systemd RestartSec 2s).
+  `reset`(#164)은 Ack → ResetNotice → `wlan_reboot_policy.sh --source opc_reset --reason opc_reset_command --force`(20 s 상한)로
+  보드를 재부팅한다. 스크립트는 재부팅을 transient unit(`systemd-run --wait`)에 넘기므로 정상 경로에서 0으로 끝나지 않는다:
+  재부팅의 stop job이 opcd 쪽 클라이언트를 SIGTERM으로 끊거나(시그널 종료) 20 s 상한이 먼저 지나며, 둘 다 "재부팅 진행 중"으로
+  분류돼 opcd는 exit 0으로 끝난다. exit 0은 dedupe 락 충돌뿐이다(다른 요청이 락을 쥐고 있음 — 그 요청이 자기 게이트에서 거부할
+  수도 있어 "미확인"으로 적는다). exit≠0일 때만 재부팅 없이 opcd만 재시작된다(systemd RestartSec 2s, 감사 로그 "reset hook started
+  no reboot"): `--force` 아래서는 정책 게이트(10-14)가 적용되지 않으므로 exit≠0은 systemd-run이 실행기를 못 띄웠거나 실행기가 중단된
+  경우이고, 126/127은 실행 불가(스크립트의 소진 코드 127은 상한 안에 도달할 수 없다)다. 상한 뒤에
+  재부팅 경로가 모두 소진되는 경우는 opcd에서 구분할 수 없다(그때는 보드가 그대로 살아 있고 opcd는 이미 재시작됨). `--force`는
+  MFG/uptime/cooldown/loop 게이트를 건너뛰지만 dedupe 락은 건너뛰지 않는다. 실기 확인 항목: Ack 뒤 ResetNotice 수신 순서,
+  재부팅 발생, 정상 리셋의 경로, 스크립트 부재 시 재시작 폴백. **근거는 판정 가능한 출처로**: 순서는 `--hex listen` 리스너가 Ack를
+  받지 않으므로(별도 소켓) `/var/log/cantops/logger.log`에서 `TX Reset ack seq=` 줄이 `IND ResetNotice(0x0020)` 줄보다 앞인지로,
+  통지 1회·cause 0x01은 리스너 캡처로, 정상 리셋 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal"로 본다
+  (reboot 뒤에 찍히므로 정책 스크립트의 journald 스냅샷에는 없고 영속 journal이 필요; 아니면 시리얼 콘솔). 감사 로그의 "reboot under
+  way or held by another request"는 rc 0의 모든 경우에 같아 경로를 구분하지 못한다. **`test-all.sh` §8은 보드를 재부팅시키고
+  boot_id 변경·opcd·basic-info 재도달을 기다린 뒤 이 두 근거를 확인한다**(SETUP은 이전 실행의 `etc.testbak`이 남아 있으면 중단, TEARDOWN 복원 실패는 FAIL).
 - 실장치 배포 시 **반드시 크로스빌드**(`make arm64 PLATFORM=nxp` → `build/arm64/`), 배포 전 바이너리 백업 권장.

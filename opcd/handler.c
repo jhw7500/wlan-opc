@@ -1686,8 +1686,12 @@ static int handle_reset(opcd_state_t *st, const uint8_t *frame, size_t flen,
     if (opc_reset_req_unpack(frame, flen) != 0) {
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
-        opcd_ind_reset_notice(st, OPC_RESET_CAUSE_USER);
-        st->should_reset = true;     /* main loop will exit(0) after sending ack */
+        /* #164 order: Ack → ResetNotice → reboot. The notice is sent by
+         * opcd_post_ack once the main loop has put this ack on the wire, and
+         * from inside the loop on purpose: the shutdown ResetNotice path
+         * (opcd.c, signalfd) is no longer serviced once the loop has exited
+         * for prepare_reset(), so it cannot carry this notice. */
+        st->should_reset = true;     /* main loop exits; prepare_reset() reboots */
     }
     opc_reset_ack_t ack = { .result = result, .error_cause = err };
     emit_ack(rlen, opc_reset_ack_pack(resp, rcap, seq, &ack));
@@ -1776,6 +1780,17 @@ int opcd_dispatch(opcd_state_t *st,
     }
     *resp_len = 0;   /* unknown request id, or a table row with no handler */
     return -1;
+}
+
+/* #164: the Reset ack must precede the ResetNotice that announces the reboot,
+ * so the notice is sent here, right after the main loop's sendto, and only
+ * once — later acks in the same drain must not repeat it. */
+void opcd_post_ack(opcd_state_t *st)
+{
+    if (st->should_reset && !st->reset_notice_sent) {
+        st->reset_notice_sent = true;
+        (void)opcd_ind_reset_notice(st, OPC_RESET_CAUSE_USER);
+    }
 }
 
 void opcd_apply_pending_ip_change(opcd_state_t *st)

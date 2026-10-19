@@ -29,6 +29,10 @@ int opcd_dispatch(opcd_state_t *st,
 
 /* After Logout response has been transmitted, apply any pending ChangeIp. */
 void opcd_apply_pending_ip_change(opcd_state_t *st);
+/* #164: called by the main loop right after a response datagram was sent.
+ * Sends the ResetNotice (cause USER) once when a Reset was acknowledged —
+ * after the ack, from inside the loop. No-op otherwise. */
+void opcd_post_ack(opcd_state_t *st);
 
 /* D9: after a SetRadioConfig NG ack has been transmitted, re-apply the last-good
  * radio config the handler armed on an apply failure (deferred best-effort
