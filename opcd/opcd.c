@@ -771,8 +771,11 @@ int main(int argc, char **argv)
                                               us / 1000, us % 1000);
                             }
                         }
-                        /* #164: a Reset ack is on the wire now — the
-                         * ResetNotice follows it, sent from inside the loop. */
+                        /* #164: the Reset ack was just handed to sendto (a
+                         * failed or short send is logged above but does not
+                         * hold the notice back — the reboot it announces
+                         * proceeds regardless) — the ResetNotice follows it,
+                         * sent from inside the loop. */
                         opcd_post_ack(&st);
                     } else {
                         LOG("frame dropped (rc=%d rn=%zd)", rc, rn);

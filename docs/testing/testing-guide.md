@@ -721,11 +721,13 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   wifi_init.sh의 conf 변환과 wpa_supplicant보다 먼저 도는 유닛 순서(wlan-package#362; -R은 conf writer lock을 잡지 않음).
   `reset`(#164)은 Ack → ResetNotice → `wlan_reboot_policy.sh --source opc_reset --reason opc_reset_command --force`(20 s 상한)로
   보드를 재부팅한다. 스크립트는 재부팅을 transient unit(`systemd-run --wait`)에 넘기므로 정상 경로에서 0으로 끝나지 않는다:
-  재부팅의 stop job이 opcd 쪽 클라이언트를 SIGTERM으로 끊거나(시그널 종료) 20 s 상한이 먼저 지나며, 둘 다 "재부팅 진행 중"으로
+  재부팅의 stop job이 opcd 쪽 클라이언트를 SIGTERM으로 끊거나(SIGTERM 종료만 그렇게 분류하고, 다른 시그널 종료는 hand-off의 증거가
+  아니라 "미확인"→재시작 폴백) 20 s 상한이 먼저 지나며, 둘 다 "재부팅 진행 중"으로
   분류돼 opcd는 exit 0으로 끝난다. exit 0은 dedupe 락 충돌뿐이다(다른 요청이 락을 쥐고 있음 — 그 요청이 자기 게이트에서 거부할
-  수도 있어 "미확인"으로 적는다). exit≠0일 때만 재부팅 없이 opcd만 재시작된다(systemd RestartSec 2s, 감사 로그 "reset hook started
+  수도 있어 "미확인"으로 적는다). exit≠0이면 재부팅 없이 opcd만 재시작된다(systemd RestartSec 2s, 감사 로그 "reset hook started
   no reboot"): `--force` 아래서는 정책 게이트(10-14)가 적용되지 않으므로 exit≠0은 systemd-run이 실행기를 못 띄웠거나 실행기가 중단된
-  경우이고, 126/127은 실행 불가(스크립트의 소진 코드 127은 상한 안에 도달할 수 없다)다. 상한 뒤에
+  경우이고, 126/127은 실행 불가(스크립트의 소진 코드 127은 상한 안에 도달할 수 없다)다. fork/setpgid 실패(-errno)와 SIGTERM이 아닌
+  시그널 종료도 재부팅 없이 끝나며, exit 0 뒤 락을 쥔 다른 요청이 거부하는 경우는 opcd에서 알 수 없다. 상한 뒤에
   재부팅 경로가 모두 소진되는 경우는 opcd에서 구분할 수 없다(그때는 보드가 그대로 살아 있고 opcd는 이미 재시작됨). `--force`는
   MFG/uptime/cooldown/loop 게이트를 건너뛰지만 dedupe 락은 건너뛰지 않는다. 실기 확인 항목: Ack 뒤 ResetNotice 수신 순서,
   재부팅 발생, 정상 리셋의 경로, 스크립트 부재 시 재시작 폴백. **근거는 판정 가능한 출처로**: 순서는 `--hex listen` 리스너가 Ack를

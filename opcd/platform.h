@@ -264,7 +264,9 @@ typedef struct opcd_platform_ops {
      * (the client was stopped by the shutdown it started, or the bound
      * expired after the hand-off) or held by another request (which may
      * itself still refuse — not confirmable); non-zero when no reboot was
-     * started by this request (the script refused or could not be run). main
+     * started by this request: the script could not be run, systemd-run or
+     * its executor failed (with --force the policy gates do not apply), or
+     * the client died by a signal other than the stop job's SIGTERM. main
      * still returns 0 in every case and systemd Restart=always brings opcd
      * back when the board stays up. May be a no-op (stub). */
     int  (*prepare_reset)(void);

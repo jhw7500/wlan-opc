@@ -283,6 +283,28 @@ static void test_ch_cache_seed_at_init(void)
     g_iface_freq_query = nxp_get_iface_freq;
 }
 
+static unsigned fake_iface_index(const char *name)
+{
+    return strcmp(name, "mlan0") == 0 ? 7u : 0u;   /* mlan1 absent */
+}
+
+/* Reviewer B on PR #173: the seed test above calls nl_seed_ch_cache_idx
+ * directly, so a dropped nl_seed_ch_cache() call in nxp_init was invisible.
+ * Drive the real init with both lookups substituted. Runs last. */
+static void test_seed_wiring_through_init(void)
+{
+    nl_note_ch(0, 0); nl_note_ch(1, 0);
+    g_iface_index_lookup = fake_iface_index;
+    g_iface_freq_query   = fake_iface_freq;
+    int rc = nxp_init();
+    expect_disc_ch(0, 0x0224, "#166 seed wiring: nxp_init seeds mlan0 from the live interface");
+    expect_disc_ch(1, 0xFFFF, "#166 seed wiring: an absent mlan1 stays unseeded");
+    if (rc != 0) { fprintf(stderr, "FAIL #166 seed wiring: nxp_init returned %d\n", rc); failures++; }
+    nxp_teardown();
+    g_iface_index_lookup = if_nametoindex;
+    g_iface_freq_query   = nxp_get_iface_freq;
+}
+
 static void test_disconnect_channel(void)
 {
     /* no association history since start -> 0xFFFF on both interfaces */
@@ -323,6 +345,7 @@ int main(void)
     test_untrusted_frames();
     test_roaming_without_link_readback();
     test_ch_cache_seed_at_init();
+    test_seed_wiring_through_init();
     if (failures) {
         fprintf(stderr, "%d AP disconnect checks failed\n", failures);
         return 1;

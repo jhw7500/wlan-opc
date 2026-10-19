@@ -1233,10 +1233,12 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
              * apply imminently — or deferred its decision to the in-flight
              * IP-list write, after which on_ready arms it; refuse to stage a
              * new change so a returned OK is never silently dropped by that
-             * apply's clear (#43, Codex review). Only reachable in a same-drain
-             * race — the armed commit is about to switch the device IP
-             * regardless. This also keeps the armed window exclusive: no live
-             * pending state exists for the apply to discard. */
+             * apply's clear (#43, Codex review). Reachable in a same-drain race
+             * and, for a deferred decision, anywhere in the IP-list write
+             * window — the commit is about to switch the device IP regardless,
+             * and the apply then ends the session that logged in meanwhile.
+             * This also keeps the armed window exclusive: no live pending
+             * state exists for the apply to discard. */
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
         } else if (st->ip_list_staging_active) {
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
@@ -1687,7 +1689,8 @@ static int handle_reset(opcd_state_t *st, const uint8_t *frame, size_t flen,
         result = OPC_RESULT_NG; err = OPC_ERR_PACKET_SIZE;
     } else if (check_login_required(st, ip, &result, &err) == 0) {
         /* #164 order: Ack → ResetNotice → reboot. The notice is sent by
-         * opcd_post_ack once the main loop has put this ack on the wire, and
+         * opcd_post_ack right after the main loop's ack sendto (whether or not
+         * that send succeeded — the reboot proceeds regardless), and
          * from inside the loop on purpose: the shutdown ResetNotice path
          * (opcd.c, signalfd) is no longer serviced once the loop has exited
          * for prepare_reset(), so it cannot carry this notice. */
@@ -1826,6 +1829,18 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
         OLOG_INFO("exec: IP change applied (slot=%u) — indication target invalidated",
                   st->ip_change_armed_no);
         st->indication_enabled = false;   /* IP changed → indication target invalid */
+        /* A session established at the OLD address cannot reach the device any
+         * more. The direct path has none (the Logout that armed this commit
+         * ended it and the drain stopped), but a Logout whose decision was
+         * deferred to the IP-list write lets a fresh Login land in that window
+         * (handle_login keeps the staged change for it): end that session here,
+         * after the indication target is dropped (so no LoggedOut notice goes
+         * out), instead of leaving the new address locked out until
+         * login_idle_s (F2 tribunal A-R1-001, Codex on PR #173). */
+        if (st->logged_in) {
+            OLOG_INFO("exec: IP change applied — session held at the old address ended");
+            opcd_session_logout(st);
+        }
         /* peer_route (#122): the address moved on mlan0; eth0's /32 mirror,
          * the table-100 link route and the peer host-route src still name
          * the OLD address until refreshed. Best-effort — the IP itself is

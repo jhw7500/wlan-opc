@@ -2937,6 +2937,7 @@ int main(void)
             ASSERT(stub_apply_ip_calls() == 0 && !st.ip_change_commit_armed &&
                    !st.ip_change_pending && st.ip_change_list_no == 0 && !st.ip_change_logout_deferred,
                    "#163 async: the committed clear cancels the reserved change (on_ready skip, slot cleared) -> IP change not applied");
+            ASSERT(st.logged_in, "#163 async: with nothing applied, the session logged in during the window stays");
             ASSERT(wait_fd_readable(cli, 5000) == 0, "#163 async: deferred clear ack arrived");
             zrn = recv(cli, zrx, sizeof zrx, 0);
             ASSERT(zrn > 0 && !st.ip_list.present[1], "#163 async: slot 2 cleared in the committed list after completion");
@@ -2991,6 +2992,8 @@ int main(void)
             opcd_apply_pending_ip_change(&st);
             ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_ip() == 0xC0A80166,
                    "#163 async/fail: the reserved change is applied with the committed entry");
+            ASSERT(!st.logged_in,
+                   "#163 async/fail: the session logged in during the deferred window is ended by the apply (it was bound to the old address)");
             ASSERT(wait_fd_readable(cli, 5000) == 0, "#163 async/fail: deferred clear ack arrived");
             zrn = recv(cli, zrx, sizeof zrx, 0);
             opc_set_ip_config_list_ack_t zack;

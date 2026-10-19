@@ -1442,8 +1442,8 @@ static int nxp_prepare_reset(void)
      * systemd-run client in our process group (WIFSIGNALED), or our bound
      * expires first (-ETIMEDOUT) while the sequence continues in the
      * transient unit. So 0 here means "a reboot is under way or held by
-     * another request" (signaled client, timeout after the hand-off, dedupe
-     * collision) and non-zero means "no reboot started by this request"
+     * another request" (client killed by SIGTERM, timeout after the hand-off,
+     * dedupe collision) and non-zero means "no reboot started by this request"
      * (exit N, or the script could not be run). A sequence that exhausts
      * only after the bound cannot be told from one that rebooted; by then
      * systemd has restarted opcd and the board is simply still up. */
@@ -1461,9 +1461,16 @@ static int nxp_prepare_reset(void)
         return 0;
     }
     if (rc == -EPROTO && wstatus != -1 && WIFSIGNALED(wstatus)) {
-        fprintf(stderr, "opcd: opc_reset: policy client terminated by signal %d (the reboot's stop job reaches it this way) — reboot under way\n",
-                WTERMSIG(wstatus));
-        return 0;
+        int sig = WTERMSIG(wstatus);
+        if (sig == SIGTERM) {
+            fprintf(stderr, "opcd: opc_reset: policy client terminated by signal %d (SIGTERM: the reboot's stop job reaches it this way) — reboot under way\n", sig);
+            return 0;
+        }
+        /* Any other signal (SIGSEGV, SIGKILL/OOM, an operator's kill) says
+         * nothing about a hand-off — the client may have died before the
+         * transient unit existed (Codex on PR #174). */
+        fprintf(stderr, "opcd: opc_reset: policy client killed by signal %d — not the stop job's SIGTERM, no reboot confirmed\n", sig);
+        return -EPROTO;
     }
     if (rc == -EPROTO && wstatus != -1 && WIFEXITED(wstatus)) {
         int code = WEXITSTATUS(wstatus);
@@ -1684,11 +1691,17 @@ static void nl_seed_ch_cache_idx(int idx, unsigned ifindex)
     nl_note_ch(idx, opc_chan_field(freq, ch));
 }
 
+/* The interface-name lookup is indirect for the same reason: the host test
+ * can then drive the real nxp_init and prove the seed is wired into it
+ * (Reviewer B on PR #173: the earlier test called nl_seed_ch_cache_idx
+ * directly, so dropping the call from nxp_init went undetected). */
+static unsigned (*g_iface_index_lookup)(const char *name) = if_nametoindex;
+
 static void nl_seed_ch_cache(void)
 {
     static const char *const names[NXP_WLAN_COUNT_MAX] = { "mlan0", "mlan1" };
     for (int idx = 0; idx < NXP_WLAN_COUNT_MAX; idx++)
-        nl_seed_ch_cache_idx(idx, if_nametoindex(names[idx]));
+        nl_seed_ch_cache_idx(idx, g_iface_index_lookup(names[idx]));
 }
 
 static void nl_clear_ap_disc_hint(int idx)
