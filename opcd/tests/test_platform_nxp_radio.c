@@ -90,6 +90,20 @@ int __wrap_execv(const char *path, char *const argv[])
     if (getenv("OPCD_NXP_FAIL_WLAN_APPLY") != NULL &&   /* #161: ESSID apply refused/failed */
         argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0)
         _exit(42);
+    if (getenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT") != NULL &&   /* #161: helper installed the conf, then failed */
+        argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0) {
+        const char *conf = getenv("OPCD_TEST_CONF_PATH");
+        const char *ssid = NULL;
+        for (size_t i = 1; argv[i] != NULL && argv[i + 1] != NULL; i++)
+            if (strcmp(argv[i], "ssid") == 0) ssid = argv[i + 1];
+        if (strcmp(getenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT"), "foreign") == 0)
+            ssid = "site-X";                         /* another writer's value, not the request */
+        if (conf != NULL && ssid != NULL) {
+            FILE *f = fopen(conf, "w");
+            if (f) { fprintf(f, "network={\n    ssid=\"%s\"\n}\n", ssid); fclose(f); }
+        }
+        _exit(6);
+    }
     _exit(0);
 }
 
@@ -192,11 +206,15 @@ int main(int argc, char **argv)
         ipt_reset("network={\n    ssid=\"site-A\"\n    freq_list=2412\n}\n");
         ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#162 apply_ip_change succeeds");
         ASSERT(read_log(log, sizeof log) == 0, "#162 apply invocations captured");
-        const char *p_ip  = strstr(log, "ip addr add 192.168.1.101/24 dev eth0");
+        const char *p_ip  = strstr(log, "ip addr replace 192.168.1.101/24 dev eth0");
         const char *p_gw  = strstr(log, "ip route replace default via 192.168.1.1 dev eth0");
-        ASSERT(p_ip != NULL, "#162 IP address still applied");
+        ASSERT(p_ip != NULL, "#162 IP address applied with `ip addr replace` (re-selecting the current address is not EEXIST)");
+        ASSERT(strstr(log, "ip addr replace 192.168.1.101/24 dev eth0 && ip -4 -o addr show dev eth0 | "
+                           "grep -q 'inet 192.168.1.101/24 .*scope global' && ip -4 addr show dev eth0 | awk") != NULL,
+               "#162 other addresses are deleted only after the new one is verified present at global scope (host-scope /32 mirror guard)");
         ASSERT(p_gw != NULL && p_ip != NULL && p_gw > p_ip,
                "#162 Gateway: default route applied (volatile `ip route`) after the address");
+        ASSERT(strstr(log, "onlink") == NULL, "#162 Gateway: no onlink for an in-subnet gateway");
         ASSERT(strstr(log, "systemctl --no-block try-restart systemd-timesyncd.service") != NULL,
                "#162 NTP: timesyncd re-reads its volatile drop-in");
         ASSERT(ipt_slurp(IPT_DROPIN) != NULL &&
@@ -212,6 +230,8 @@ int main(int argc, char **argv)
                "#161 marker holds the original ESSID and the applied slot");
         ASSERT(mk != NULL && strstr(mk, "applied=\"site-A\"\n") != NULL,
                "#161 marker is committed after a successful ESSID apply (conf token recorded)");
+        ASSERT(mk != NULL && strstr(mk, "target=736974652d42\n") != NULL,
+               "#161 marker records the requested SSID (target= hex) before the apply");
 
         ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
         setenv("OPCD_NXP_FAIL_WLAN_APPLY", "1", 1);
@@ -221,6 +241,31 @@ int main(int argc, char **argv)
                access(IPT_MARKER, F_OK) != 0,
                "#161 failed ESSID apply disarms the marker (nothing for -R to revert)");
         unsetenv("OPCD_NXP_FAIL_WLAN_APPLY");
+
+        ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        setenv("OPCD_TEST_CONF_PATH", IPT_CONF, 1);
+        setenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT", "1", 1);
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#161 apply failed after the conf install: IP result stays success");
+        mk = ipt_slurp(IPT_MARKER);
+        ASSERT(mk != NULL && strstr(mk, "essid=\"site-A\"\n") != NULL && strstr(mk, "applied=\"site-B\"\n") != NULL,
+               "#161 apply failed after the conf install -> marker settled with the installed token (restorable)");
+        ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        setenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT", "foreign", 1);
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#161 apply failed while another writer changed the conf: IP result stays success");
+        ASSERT(access(IPT_MARKER, F_OK) != 0,
+               "#161 apply failed with a foreign ssid in the conf -> nothing committed, uncommitted marker removed");
+        unsetenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT");
+        unsetenv("OPCD_TEST_CONF_PATH");
+
+        ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        e.subnet_mask = 0xFFFFFFFFu;               /* /32 host slot, off-block gateway (P2P) */
+        e.default_gateway = 0x0A000001u;           /* 10.0.0.1 */
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#162 /32 slot apply succeeds");
+        ASSERT(read_log(log, sizeof log) == 0 &&
+               strstr(log, "ip route replace default via 10.0.0.1 dev eth0 onlink") != NULL,
+               "#162 Gateway: a /32 slot installs its off-block gateway with onlink");
+        e.subnet_mask = 0xFFFFFF00u;
+        e.default_gateway = 0xC0A80101u;
 
         ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
         ASSERT(ops->apply_ip_change(&e, 1, 4) == 0, "#162 apply on mlan0 succeeds");

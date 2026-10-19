@@ -1196,16 +1196,25 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_
 
     /* add BEFORE delete so a failed add leaves the current management IP in
      * place (delete-then-add could strand eth0 with no management address, with
-     * no recovery short of reboot). On add success, remove every OTHER
-     * scope-global non-/32 address — keep=new and wifi_init.sh's /32 are
-     * excluded. ipbuf is digits-and-dots and prefix is 1..32 — injection-safe. */
-    char cmd[352];
+     * no recovery short of reboot). `replace` rather than `add`: re-selecting
+     * the address the interface already has must not fail with EEXIST, or the
+     * gateway/NTP below would be skipped although only they changed. But
+     * `replace` matches an existing address by local/prefix only and never
+     * changes its scope, so when the slot equals an address the interface
+     * already carries at host scope (wifi_init.sh's /32 mirror of the mlan0
+     * IP on eth0) it exits 0 WITHOUT creating a global address — hence the
+     * middle step: delete nothing unless the address is now present at global
+     * scope. Then remove every OTHER scope-global non-/32 address — keep=new
+     * and wifi_init.sh's /32 are excluded. ipbuf is digits-and-dots and prefix
+     * is 1..32 — injection-safe. */
+    char cmd[448];
     int n = snprintf(cmd, sizeof cmd,
-        "ip addr add %s/%d dev %s && "
+        "ip addr replace %s/%d dev %s && "
+        "ip -4 -o addr show dev %s | grep -q 'inet %s/%d .*scope global' && "
         "ip -4 addr show dev %s | "
         "awk -v keep=%s/%d '/scope global/&&!/\\/32/&&$2!=keep{print $2}' | "
         "xargs -r -I{} ip addr del {} dev %s",
-        ipbuf, prefix, dev, dev, ipbuf, prefix, dev);
+        ipbuf, prefix, dev, dev, ipbuf, prefix, dev, ipbuf, prefix, dev);
     if (n < 0 || (size_t)n >= sizeof cmd) {
         fprintf(stderr, "opcd: nxp_apply_ip_change: command too long\n");
         return -ENAMETOOLONG;
@@ -1226,10 +1235,14 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_
         uint32_t gw = slot->default_gateway;
         uint8_t  ghi = (uint8_t)((gw >> 24) & 0xff);
         if (gw != 0 && gw != 0xFFFFFFFFu && ghi != 127 && ghi < 224) {
-            char gwbuf[16], gcmd[96];
+            char gwbuf[16], gcmd[112];
             snprintf(gwbuf, sizeof gwbuf, "%u.%u.%u.%u",
                      (gw >> 24) & 0xff, (gw >> 16) & 0xff, (gw >> 8) & 0xff, gw & 0xff);
-            snprintf(gcmd, sizeof gcmd, "ip route replace default via %s dev %s", gwbuf, dev);
+            /* A /32 slot (handler.c accepts an off-block gateway for the
+             * point-to-point case) has no gateway inside its prefix; without
+             * `onlink` the kernel rejects the nexthop as unreachable. */
+            snprintf(gcmd, sizeof gcmd, "ip route replace default via %s dev %s%s", gwbuf, dev,
+                     prefix == 32 ? " onlink" : "");
             const char *gargv[] = { "sh", "-c", gcmd, NULL };
             int grc = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
                                        (char *const *)gargv, IP_CHANGE_TIMEOUT_MS);
@@ -1256,7 +1269,7 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_
         snprintf(essid_buf, sizeof essid_buf, "%.*s",
                  (int)sizeof slot->essid, slot->essid);
         int mrc = opc_essid_marker_arm(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0,
-                                       slot_no, time(NULL));
+                                       slot_no, time(NULL), essid_buf);
         if (mrc != 0) {
             fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' NOT applied — restore marker "
                     "unavailable (%d), a persistent change could not be undone at reboot\n",
@@ -1266,21 +1279,30 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_
                                          OPC_WLAN_APPLY_TIMEOUT_MS);
             if (erc == 0) {
                 /* Record the token the apply actually wrote: `opcd -R` reverts
-                 * only a conf that still holds it, never a later change by
-                 * another writer. A power cut between the apply and this
-                 * commit leaves an uncommitted marker, which -R drops without
-                 * editing (the ESSID then stays — logged, not reverted). */
+                 * only a conf that still holds it (or that decodes to the
+                 * requested SSID recorded at arm, for a power cut between the
+                 * helper's conf install and this commit), never a later change
+                 * by another writer. */
                 int crc = opc_essid_marker_commit(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0);
                 fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply (wpa_cli), marker %s\n",
                         essid_buf, crc == 0 ? "committed"
-                                            : "commit FAILED — -R will not revert this ESSID");
+                                            : "commit FAILED — -R reverts it only while the conf "
+                                              "still decodes to the requested ssid");
             } else {
-                /* Nothing was applied: an uncommitted marker must not survive
-                 * to revert a change that never happened (a committed one from
-                 * an earlier successful ChangeIp in this chain stays). */
-                int drc = opc_essid_marker_disarm(OPC_PATH_ESSID_MARKER);
+                /* The helper may have installed the new conf before failing
+                 * (rollback failure exits 6; TERM at the timeout lands after
+                 * the install) — re-read it. Unchanged: an uncommitted marker
+                 * must not survive to revert a change that never happened (a
+                 * committed one from an earlier ChangeIp in this chain stays).
+                 * Changed to the requested ssid: commit it so -R can still
+                 * revert. Changed to anything else: another writer, not ours. */
+                int src = opc_essid_marker_settle(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0);
                 fprintf(stderr, "opcd: nxp_apply_ip_change: essid='%s' apply FAILED (%d), marker %s\n",
-                        essid_buf, erc, drc == 0 ? "disarmed" : "disarm FAILED");
+                        essid_buf, erc,
+                        src == 1 ? "committed — the conf already holds the requested ssid"
+                        : src == 0 ? "conf unchanged — uncommitted marker removed / committed chain kept"
+                        : src == 2 ? "conf changed by another writer — not committed"
+                                   : "settle FAILED");
             }
         }
     }

@@ -707,13 +707,17 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   `ip addr`로 **실제 변경**(런타임만 — reboot 시 22-eth0.network로 복원되는 휘발성, wifi_init.sh의 mlan /32는 보존).
   리스트의 Gateway(0.0.0.0 제외)는 관리 IF의 기본 경로(`ip route replace default`), NTP(0.0.0.0 제외)는
   `/run` timesyncd drop-in로 역시 휘발 적용한다(#162). ESSID는 wpa conf 편집이라 비휘발이므로 편집 직전에
-  `/usr/local/opc/etc/changeip_essid.restore` 표식(원래 `ssid=`·슬롯·시각)을 먼저 쓰고, 적용 성공 뒤 conf의 현재
-  `ssid=` 토큰을 `applied=`로 커밋한다(실패 시 미커밋 표식은 삭제). 부팅 시 `opcd -R`이 conf가 그 커밋값을 그대로
-  갖고 있을 때만 원래 값으로 되돌리고(#161), 값이 다르면(다른 작성자가 바꿈·커밋 전 중단) 표식만 지우고 conf는
-  손대지 않는다(rc=2 로그). drop-in은 `NTP=`(빈 값)로 /etc 목록을 먼저 비운 뒤 서버를 넣는다. 호스트 검증:
-  `test_essid_marker`(표식 arm/commit/disarm/restore·외부 변경·전원 차단 모사)와 `test_platform_nxp_radio`(실제
-  `platform_nxp.c`, execv 가로채기로 호출 순서·인자·실패 시 disarm 확인). **실기에서만 확인 가능**:
-  변경→reconfigure 후 ESSID 유지→재부팅 후 IP·ESSID 원복, 기본 경로·timesyncd drop-in 실동작, `opcd -R`이
-  wifi_init.sh의 conf 변환과 wpa_supplicant보다 먼저 도는 유닛 순서(패키지 쪽; -R은 conf writer lock을 잡지 않음).
+  `/usr/local/opc/etc/changeip_essid.restore` 표식(원래 `ssid=`·슬롯·시각·요청 SSID `target=` hex)을 먼저 쓰고,
+  적용 성공 뒤 conf의 현재 `ssid=` 토큰을 `applied=`로 커밋한다. 실패·타임아웃이면 conf를 다시 읽어 요청 SSID로
+  디코드되면 커밋, 다른 값(다른 작성자)이면 커밋하지 않고(미커밋 표식 삭제·커밋 체인은 target 제거), 안 바뀌었으면
+  미커밋 표식 삭제·커밋 체인은 target 제거(`settle`). SIGKILL 뒤 자식 rename(2) 한 번의 창은 잔여. 부팅 시 `opcd -R`이 conf가 커밋값이거나 `target=`으로 디코드될 때만
+  원래 값으로 되돌리고(#161; 커밋 전 전원 차단도 복원), 그 밖의 값이면(다른 작성자) 표식만 지우고 conf는 손대지
+  않는다(rc=2 로그). 주소는 `ip addr replace` 뒤 global scope 존재를 확인한 다음에만 다른 주소를 지우고(같은 IP 재선택 시 EEXIST 없이
+  GW·NTP 적용, host-scope /32 미러와 같은 IP면 실패), /32 슬롯의 게이트웨이는
+  `onlink`. drop-in은 `NTP=`(빈 값)로 /etc 목록을 먼저 비운 뒤 서버를 넣는다. 호스트 검증: `test_essid_marker`(표식
+  arm/commit/settle/disarm/restore·외부 변경·전원 차단·hex 토큰 모사)와 `test_platform_nxp_radio`(실제
+  `platform_nxp.c`, execv 가로채기로 호출 순서·인자·실패/설치 후 실패 시 표식 상태·onlink 확인). **실기에서만 확인
+  가능**: 변경→reconfigure 후 ESSID 유지→재부팅 후 IP·ESSID 원복, 기본 경로·timesyncd drop-in 실동작, `opcd -R`이
+  wifi_init.sh의 conf 변환과 wpa_supplicant보다 먼저 도는 유닛 순서(wlan-package#362; -R은 conf writer lock을 잡지 않음).
   `reset`은 opcd 재시작(systemd RestartSec 2s).
 - 실장치 배포 시 **반드시 크로스빌드**(`make arm64 PLATFORM=nxp` → `build/arm64/`), 배포 전 바이너리 백업 권장.

@@ -296,8 +296,8 @@ int main(int argc, char **argv)
             int rr = opc_essid_marker_restore(OPC_PATH_ESSID_MARKER, OPC_PATH_WPA_CONF_MLAN0);
             fprintf(stderr, "opcd: -R ChangeIp ESSID restore: %s (rc=%d)\n",
                     rr == 1 ? "original ESSID restored" :
-                    rr == 2 ? "marker dropped, conf NOT edited — ssid= is not the value "
-                              "ChangeIp applied (changed by another writer, or apply not committed)" :
+                    rr == 2 ? "marker dropped, conf NOT edited — ssid= is neither the value "
+                              "ChangeIp applied nor the one it requested (changed by another writer)" :
                     rr == 0 ? "nothing to restore" : "FAILED", rr);
             return rr < 0 ? 1 : 0;
         }

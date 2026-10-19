@@ -87,12 +87,13 @@ static int find_ssid(const char *conf, const char **vs, const char **ve)
     return count;
 }
 
-/* Marker body: "essid=<orig>\nslot=N\ntime=T\n" and, once commit ran,
- * "applied=<token>\n". essid= must be the first line; the others are
- * single lines in any order. */
+/* Marker body: "essid=<orig>\nslot=N\ntime=T\n", optionally "target=<hex of
+ * the requested SSID bytes>\n" (arm) and "applied=<token>\n" (commit/settle).
+ * essid= must be the first line; the others are single lines in any order. */
 typedef struct {
     char essid[TOKEN_MAX];
-    char applied[TOKEN_MAX];        /* "" until commit */
+    char applied[TOKEN_MAX];        /* "" until commit/settle */
+    char target_hex[TOKEN_MAX];     /* "" when arm had no requested SSID */
     unsigned slot;
     long long time;
 } marker_t;
@@ -123,23 +124,21 @@ static int marker_parse(const char *body, marker_t *m)
     memset(m, 0, sizeof *m);
     if (strncmp(body, "essid=", 6) != 0) return -EINVAL;   /* not ours */
     if (line_value(body, "essid=", m->essid, sizeof m->essid) != 0) return -EINVAL;
-    int rc = line_value(body, "applied=", m->applied, sizeof m->applied);
-    if (rc == -EINVAL) return -EINVAL;
+    if (line_value(body, "applied=", m->applied, sizeof m->applied) == -EINVAL) return -EINVAL;
+    if (line_value(body, "target=", m->target_hex, sizeof m->target_hex) == -EINVAL) return -EINVAL;
     char num[32];
     if (line_value(body, "slot=", num, sizeof num) == 0) m->slot = (unsigned)strtoul(num, NULL, 10);
     if (line_value(body, "time=", num, sizeof num) == 0) m->time = strtoll(num, NULL, 10);
     return 0;
 }
 
-static int marker_write(const char *path, const char *essid, unsigned slot_no,
-                        long long now, const char *applied)
+static int marker_write(const char *path, const marker_t *m)
 {
-    char body[2 * TOKEN_MAX + 96];
-    int bl = (applied && applied[0])
-        ? snprintf(body, sizeof body, "essid=%s\nslot=%u\ntime=%lld\napplied=%s\n",
-                   essid, slot_no, now, applied)
-        : snprintf(body, sizeof body, "essid=%s\nslot=%u\ntime=%lld\n",
-                   essid, slot_no, now);
+    char body[3 * TOKEN_MAX + 96];
+    int bl = snprintf(body, sizeof body, "essid=%s\nslot=%u\ntime=%lld\n%s%s%s%s%s%s",
+                      m->essid, m->slot, m->time,
+                      m->target_hex[0] ? "target=" : "", m->target_hex, m->target_hex[0] ? "\n" : "",
+                      m->applied[0] ? "applied=" : "", m->applied, m->applied[0] ? "\n" : "");
     if (bl < 0 || (size_t)bl >= sizeof body) return -ENAMETOOLONG;
     return write_atomic(path, body, (size_t)bl, 0600);
 }
@@ -166,83 +165,169 @@ static int marker_unlink(const char *marker_path)
     return 0;
 }
 
+static int hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Does the conf token denote exactly the SSID bytes in target_hex? The helper
+ * writes "<ssid>" when the SSID is safe to quote and bare hex otherwise
+ * (wifi_ssid_to_conf_value); wpa_supplicant reads a quoted value literally.
+ * P"..." (printf-escaped) is not produced by the helper and never matches. */
+static int token_is_ssid(const char *tok, const char *target_hex)
+{
+    size_t tl = strlen(tok), hl = strlen(target_hex);
+    if (hl == 0 || hl % 2) return 0;
+    if (tl >= 2 && tok[0] == '"' && tok[tl - 1] == '"') {
+        if (tl - 2 != hl / 2) return 0;
+        for (size_t i = 0; i < hl / 2; i++) {
+            int hi = hexval(target_hex[2 * i]), lo = hexval(target_hex[2 * i + 1]);
+            if (hi < 0 || lo < 0 || (unsigned char)tok[1 + i] != (unsigned)(hi * 16 + lo)) return 0;
+        }
+        return 1;
+    }
+    if (tl != hl) return 0;
+    for (size_t i = 0; i < hl; i++) {
+        int a = hexval(tok[i]), b = hexval(target_hex[i]);
+        if (a < 0 || b < 0 || a != b) return 0;
+    }
+    return 1;
+}
+
+static int load_marker(const char *marker_path, marker_t *m)
+{
+    int err = 0;
+    char *body = slurp(marker_path, &err);
+    if (!body) return -err;
+    int rc = marker_parse(body, m);
+    free(body);
+    return rc;
+}
+
 int opc_essid_marker_arm(const char *marker_path, const char *conf_path,
-                         unsigned slot_no, time_t now)
+                         unsigned slot_no, time_t now, const char *requested_ssid)
 {
     char cur[TOKEN_MAX];
     int rc = conf_token(conf_path, cur, sizeof cur);
     if (rc != 0) return rc;
 
-    /* Keep the first original only while the conf still holds the value this
-     * chain committed. Anything else (uncommitted marker, foreign change)
-     * starts a new chain from the current conf value. */
-    int err = 0, keep = 0;
-    marker_t m;
-    char *old = slurp(marker_path, &err);
-    if (old) {
-        if (marker_parse(old, &m) == 0 && m.applied[0] && strcmp(m.applied, cur) == 0) keep = 1;
-        free(old);
+    /* Keep the first original while the conf holds a value this chain wrote:
+     * the committed token, or the SSID it last requested (an apply whose
+     * commit never ran — crash or write error between the helper's exit and
+     * commit/settle). The same ownership predicate restore() uses. Anything
+     * else is another writer's value and starts a new chain from it. */
+    marker_t m, old;
+    memset(&m, 0, sizeof m);
+    if (load_marker(marker_path, &old) == 0 &&
+        ((old.applied[0] && strcmp(old.applied, cur) == 0) ||
+         (old.target_hex[0] && token_is_ssid(cur, old.target_hex)))) {
+        snprintf(m.essid, sizeof m.essid, "%s", old.essid);
+        snprintf(m.applied, sizeof m.applied, "%s", cur);   /* a late commit of what landed */
+    } else {
+        snprintf(m.essid, sizeof m.essid, "%s", cur);
     }
-    if (keep) return marker_write(marker_path, m.essid, slot_no, (long long)now, m.applied);
-    return marker_write(marker_path, cur, slot_no, (long long)now, NULL);
+    m.slot = slot_no;
+    m.time = (long long)now;
+    if (requested_ssid && requested_ssid[0]) {
+        size_t n = strlen(requested_ssid);
+        if (2 * n >= sizeof m.target_hex) return -ENAMETOOLONG;
+        for (size_t i = 0; i < n; i++)
+            snprintf(m.target_hex + 2 * i, 3, "%02x", (unsigned char)requested_ssid[i]);
+    }
+    return marker_write(marker_path, &m);
 }
 
 int opc_essid_marker_commit(const char *marker_path, const char *conf_path)
 {
-    int err = 0;
-    char *old = slurp(marker_path, &err);
-    if (!old) return -err;
     marker_t m;
-    int rc = marker_parse(old, &m);
-    free(old);
+    int rc = load_marker(marker_path, &m);
     if (rc != 0) return rc;
-    char cur[TOKEN_MAX];
-    rc = conf_token(conf_path, cur, sizeof cur);
+    rc = conf_token(conf_path, m.applied, sizeof m.applied);
     if (rc != 0) return rc;
-    return marker_write(marker_path, m.essid, m.slot, m.time, cur);
+    return marker_write(marker_path, &m);
 }
 
 int opc_essid_marker_disarm(const char *marker_path)
 {
-    int err = 0;
-    char *old = slurp(marker_path, &err);
-    if (!old) return err == ENOENT ? 0 : -err;
     marker_t m;
-    int rc = marker_parse(old, &m);
-    free(old);
+    int rc = load_marker(marker_path, &m);
+    if (rc == -ENOENT) return 0;
     if (rc != 0) return rc;                         /* unusable: left for -R to report */
     if (m.applied[0]) return 0;                     /* earlier successful apply stays */
     return marker_unlink(marker_path);
 }
 
+int opc_essid_marker_settle(const char *marker_path, const char *conf_path)
+{
+    marker_t m;
+    int rc = load_marker(marker_path, &m);
+    if (rc == -ENOENT) return 0;
+    if (rc != 0) return rc;
+    char cur[TOKEN_MAX];
+    rc = conf_token(conf_path, cur, sizeof cur);
+    if (rc != 0) return rc;
+    const char *pre = m.applied[0] ? m.applied : m.essid;
+    if (strcmp(cur, pre) == 0) {                    /* the helper changed nothing */
+        if (!m.applied[0]) return marker_unlink(marker_path);
+        /* Committed chain: the failed request's target identifies nothing
+         * this chain wrote any more — drop it, or a later writer storing that
+         * SSID would be reverted at boot. */
+        m.target_hex[0] = '\0';
+        return marker_write(marker_path, &m);
+    }
+    if (m.target_hex[0] && token_is_ssid(cur, m.target_hex)) {
+        /* The helper installed the requested SSID before failing (rollback
+         * failure, TERM at the timeout): keep it restorable. */
+        snprintf(m.applied, sizeof m.applied, "%s", cur);
+        rc = marker_write(marker_path, &m);
+        return rc != 0 ? rc : 1;
+    }
+    /* Someone else wrote the conf while the apply was blocked or failing
+     * (the helper only ever writes the requested SSID): not ours. An
+     * uncommitted marker goes; a committed chain stays without the target,
+     * so -R drops it as a foreign change instead of reverting it. */
+    if (!m.applied[0]) {
+        rc = marker_unlink(marker_path);
+        return rc != 0 ? rc : 2;
+    }
+    m.target_hex[0] = '\0';
+    rc = marker_write(marker_path, &m);
+    return rc != 0 ? rc : 2;
+}
+
 int opc_essid_marker_restore(const char *marker_path, const char *conf_path)
 {
-    int err = 0;
-    char *mk = slurp(marker_path, &err);
-    if (!mk) return err == ENOENT ? 0 : -err;
     marker_t m;
-    int rc = marker_parse(mk, &m);
-    free(mk);
+    int rc = load_marker(marker_path, &m);
+    if (rc == -ENOENT) return 0;
     if (rc != 0) return rc;
 
+    int err = 0;
     char *conf = slurp(conf_path, &err);
     if (!conf) return -err;
     const char *vs = NULL, *ve = NULL;
     if (find_ssid(conf, &vs, &ve) != 1) { free(conf); return -EINVAL; }
-
-    /* The conf must hold exactly what this chain applied (or, uncommitted,
-     * still the original). Otherwise someone else wrote it, or the apply
-     * never reached commit: never revert a change this marker did not make. */
-    const char *expect = m.applied[0] ? m.applied : m.essid;
     size_t cl = (size_t)(ve - vs);
-    if (cl != strlen(expect) || memcmp(vs, expect, cl) != 0) {
+    if (cl >= TOKEN_MAX) { free(conf); return -EINVAL; }
+    char cur[TOKEN_MAX];
+    memcpy(cur, vs, cl);
+    cur[cl] = '\0';
+
+    if (strcmp(cur, m.essid) == 0) {                /* already the original */
+        free(conf);
+        return marker_unlink(marker_path);
+    }
+    /* Revert only a value this chain wrote: the committed token, or (an apply
+     * interrupted between the conf install and commit) the requested SSID. */
+    int ours = (m.applied[0] && strcmp(cur, m.applied) == 0) ||
+               (m.target_hex[0] && token_is_ssid(cur, m.target_hex));
+    if (!ours) {
         free(conf);
         rc = marker_unlink(marker_path);
         return rc != 0 ? rc : 2;
-    }
-    if (!m.applied[0] || strcmp(m.applied, m.essid) == 0) {   /* nothing to put back */
-        free(conf);
-        return marker_unlink(marker_path);
     }
 
     size_t head = (size_t)(vs - conf), tail = strlen(ve);

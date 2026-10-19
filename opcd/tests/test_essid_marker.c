@@ -39,6 +39,9 @@ static char *slurp(const char *path)
 }
 
 static int exists(const char *p) { return access(p, F_OK) == 0; }
+/* NULL-safe: a missing file never matches (slurp returns NULL). */
+static int marker_has(const char *needle) { char *m = slurp(g_marker); return m != NULL && strstr(m, needle) != NULL; }
+static int conf_has(const char *needle)   { char *c = slurp(g_conf);   return c != NULL && strstr(c, needle) != NULL; }
 
 static const char CONF_ORIG[] =
     "ctrl_interface=/var/run/wpa_supplicant\n"
@@ -58,7 +61,9 @@ static void fresh(const char *conf)
     unlink(tmp);
     put(g_conf, conf);
 }
-static int arm(unsigned slot, time_t now) { return opc_essid_marker_arm(g_marker, g_conf, slot, now); }
+static int arm(unsigned slot, time_t now) { return opc_essid_marker_arm(g_marker, g_conf, slot, now, NULL); }
+static int arm_to(unsigned slot, time_t now, const char *ssid) { return opc_essid_marker_arm(g_marker, g_conf, slot, now, ssid); }
+static int settle(void)                   { return opc_essid_marker_settle(g_marker, g_conf); }
 static int commit(void)                   { return opc_essid_marker_commit(g_marker, g_conf); }
 static int disarm(void)                   { return opc_essid_marker_disarm(g_marker); }
 static int restore_(void)                 { return opc_essid_marker_restore(g_marker, g_conf); }
@@ -100,9 +105,9 @@ int main(void)
     ASSERT(m && strstr(m, "slot=9\n"), "#161 arm: repeat arm records the latest slot");
 
     /* the repeat apply fails: disarm keeps the committed chain, restore uses it. */
-    ASSERT(disarm() == 0 && exists(g_marker) && strstr(slurp(g_marker), "applied=\"site-B\"\n"),
+    ASSERT(disarm() == 0 && exists(g_marker) && marker_has("applied=\"site-B\"\n"),
            "#161 disarm: a committed chain survives a later failed apply");
-    ASSERT(restore_() == 1 && strstr(slurp(g_conf), "ssid=\"site-A\"\n") && !exists(g_marker),
+    ASSERT(restore_() == 1 && conf_has("ssid=\"site-A\"\n") && !exists(g_marker),
            "#161 restore: committed chain -> original back after the failed repeat");
 
     /* chain broken by another writer: arm starts a new chain from the current conf. */
@@ -182,15 +187,97 @@ int main(void)
     ASSERT(restore_() == 0 && strcmp(slurp(g_conf), CONF_ORIG) == 0 && !exists(g_marker),
            "#161 powercut: marker present + conf not yet edited -> nothing applied, marker removed");
     fresh(CONF_ORIG);
-    ASSERT(arm(2, 6) == 0, "#161 powercut2 setup: arm");
+    ASSERT(arm(2, 6) == 0, "#161 powercut2 setup: arm (no requested SSID recorded)");
     put(g_conf, CONF_B);                            /* edit completed, cut before commit */
     ASSERT(restore_() == 2 && strcmp(slurp(g_conf), CONF_B) == 0 && !exists(g_marker),
-           "#161 powercut: edit done but not committed -> not reverted (unverifiable), marker removed");
+           "#161 powercut: edit done, not committed, no target -> not reverted, marker removed");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(2, 6, "site-B") == 0, "#161 powercut2b setup: arm with the requested SSID");
+    m = slurp(g_marker);
+    ASSERT(m && strstr(m, "target=736974652d42\n"), "#161 arm: requested SSID recorded as target= hex");
+    put(g_conf, CONF_B);                            /* helper installed the conf, cut before commit */
+    ASSERT(restore_() == 1 && strcmp(slurp(g_conf), "network={\n    ssid=\"site-A\"\n}\n") == 0 && !exists(g_marker),
+           "#161 powercut: edit done, not committed, conf decodes to the requested SSID -> original back");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(2, 6, "site-B") == 0, "#161 powercut2c setup: arm with the requested SSID");
+    put(g_conf, CONF_FOREIGN);                      /* someone else wrote a different SSID */
+    ASSERT(restore_() == 2 && strcmp(slurp(g_conf), CONF_FOREIGN) == 0 && !exists(g_marker),
+           "#161 restore: uncommitted + conf is neither original nor requested -> untouched, marker removed");
+    fresh("network={\n    ssid=\"site-A\"\n}\n");
+    ASSERT(arm_to(2, 6, "si\"te") == 0, "#161 hex-target setup: arm with an SSID the helper renders as hex");
+    put(g_conf, "network={\n    ssid=736922746\n}\n");    /* odd length: not a hex token */
+    ASSERT(restore_() == 2 && conf_has("ssid=736922746\n") && !exists(g_marker),
+           "#161 restore: malformed hex token is not matched");
+    fresh("network={\n    ssid=\"site-A\"\n}\n");
+    ASSERT(arm_to(2, 6, "si\"te") == 0, "#161 hex-target setup 2: arm");
+    put(g_conf, "network={\n    ssid=7369227465\n}\n");    /* hex of si"te, as the helper writes it */
+    ASSERT(restore_() == 1 && conf_has("ssid=\"site-A\"\n") && !exists(g_marker),
+           "#161 restore: hex-rendered conf token decodes to the requested SSID -> original back");
+
+    /* settle after a failed apply: unchanged conf -> like disarm; changed conf -> committed. */
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(3, 7, "site-B") == 0, "#161 settle setup: arm");
+    ASSERT(settle() == 0 && !exists(g_marker), "#161 settle: conf unchanged after a failed apply -> uncommitted marker removed");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(3, 7, "site-B") == 0, "#161 settle2 setup: arm");
+    put(g_conf, CONF_B);                            /* helper installed the conf, then failed (exit 6 / TERM) */
+    ASSERT(settle() == 1 && marker_has("applied=\"site-B\"\n"),
+           "#161 settle: conf changed although the apply failed -> token committed");
+    ASSERT(restore_() == 1 && strcmp(slurp(g_conf), "network={\n    ssid=\"site-A\"\n}\n") == 0 && !exists(g_marker),
+           "#161 settle: the committed failed apply is restored at boot");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(3, 7, "site-B") == 0 && (put(g_conf, CONF_B), commit() == 0), "#161 settle3 setup: committed chain");
+    ASSERT(arm_to(4, 8, "site-C") == 0, "#161 settle3 setup: repeat arm");
+    ASSERT(settle() == 0 && marker_has("applied=\"site-B\"\n") && marker_has("essid=\"site-A\"\n") &&
+           !marker_has("target="),
+           "#161 settle: failed repeat apply with an unchanged conf keeps the committed chain without the failed target");
+    put(g_conf, "network={\n    ssid=\"site-C\"\n}\n");       /* an operator later stores that very SSID */
+    ASSERT(restore_() == 2 && conf_has("ssid=\"site-C\"\n") && !exists(g_marker),
+           "#161 restore: a later foreign write of a failed request's SSID is not reverted");
+
+    /* a later ChangeIp in the same boot after an apply whose commit never ran
+     * (crash / write error between the helper's exit and commit): the chain
+     * continues from the recorded target, so the first original survives. */
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(1, 1, "site-B") == 0, "#161 uncommitted-chain setup: arm");
+    put(g_conf, CONF_B);                            /* helper installed site-B; opcd died before commit */
+    ASSERT(arm_to(2, 2, "site-C") == 0, "#161 arm: ok after an uncommitted apply of the requested SSID");
+    m = slurp(g_marker);
+    ASSERT(m && strstr(m, "essid=\"site-A\"\n") && strstr(m, "applied=\"site-B\"\n") && strstr(m, "target=736974652d43\n"),
+           "#161 arm: continues the chain from the uncommitted target and records it as applied");
+    ASSERT(settle() == 0 && marker_has("essid=\"site-A\"\n"),
+           "#161 arm: a failed second apply keeps the chain");
+    ASSERT(restore_() == 1 && conf_has("ssid=\"site-A\"\n") && !exists(g_marker),
+           "#161 restore: first original back after an uncommitted apply and a failed retry");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(1, 1, "site-B") == 0 && (put(g_conf, CONF_B), arm_to(2, 2, "site-C") == 0), "#161 uncommitted-chain2 setup");
+    put(g_conf, "network={\n    ssid=\"site-C\"\n}\n");
+    ASSERT(commit() == 0 && restore_() == 1 && conf_has("ssid=\"site-A\"\n"),
+           "#161 restore: first original back after an uncommitted apply and a successful retry");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(1, 1, "site-B") == 0 && (put(g_conf, CONF_B), arm_to(2, 2, "site-B") == 0), "#161 uncommitted-chain3 setup (same SSID retried)");
+    ASSERT(commit() == 0 && restore_() == 1 && conf_has("ssid=\"site-A\"\n"),
+           "#161 restore: first original back when the same SSID is retried after an uncommitted apply");
+
+    /* settle never commits a token the helper did not write (another writer during the apply window). */
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(3, 7, "site-B") == 0, "#161 settle-foreign setup: arm");
+    put(g_conf, CONF_FOREIGN);                      /* wifi.sh wrote site-C while the helper was blocked */
+    ASSERT(settle() == 2 && !exists(g_marker), "#161 settle: foreign token after a failed apply -> not committed, uncommitted marker removed");
+    ASSERT(restore_() == 0 && strcmp(slurp(g_conf), CONF_FOREIGN) == 0, "#161 settle: nothing left to revert the foreign write");
+    fresh(CONF_ORIG);
+    ASSERT(arm_to(3, 7, "site-B") == 0 && (put(g_conf, CONF_B), commit() == 0), "#161 settle-foreign2 setup: committed chain");
+    ASSERT(arm_to(4, 8, "site-C") == 0, "#161 settle-foreign2 setup: repeat arm");
+    put(g_conf, "network={\n    ssid=\"site-D\"\n}\n");       /* another writer, not the requested site-C */
+    ASSERT(settle() == 2 && marker_has("applied=\"site-B\"\n") && !marker_has("target="),
+           "#161 settle: foreign token with a committed chain -> chain kept without the target, nothing committed");
+    ASSERT(restore_() == 2 && conf_has("ssid=\"site-D\"\n") && !exists(g_marker),
+           "#161 restore: the foreign write survives the boot, marker dropped");
     fresh(CONF_ORIG);
     ASSERT(arm(2, 6) == 0, "#161 powercut3 setup: arm");
     put(g_conf, CONF_B);
     ASSERT(commit() == 0, "#161 powercut3 setup: commit");   /* cut after commit */
-    ASSERT(restore_() == 1 && strstr(slurp(g_conf), "ssid=\"site-A\"") && !exists(g_marker),
+    ASSERT(restore_() == 1 && conf_has("ssid=\"site-A\"") && !exists(g_marker),
            "#161 powercut: edit committed -> original ESSID back");
 
     /* hex-form token is carried verbatim. */
@@ -198,7 +285,7 @@ int main(void)
     ASSERT(arm(1, 1) == 0, "#161 hex setup: arm");
     put(g_conf, "network={\n    ssid=\"x\"\n}\n");
     ASSERT(commit() == 0, "#161 hex setup: commit");
-    ASSERT(restore_() == 1 && strstr(slurp(g_conf), "ssid=616263\n"),
+    ASSERT(restore_() == 1 && conf_has("ssid=616263\n"),
            "#161 restore: hex ssid token restored verbatim");
 
     /* unusable marker: both files left alone, by restore and by disarm. */
@@ -214,7 +301,7 @@ int main(void)
     put(g_conf, CONF_B);
     ASSERT(commit() == 0, "#161 multi setup: commit");
     put(g_conf, "network={\n    ssid=\"site-B\"\n}\nnetwork={\n    ssid=\"extra\"\n}\n");
-    ASSERT(restore_() < 0 && exists(g_marker) && strstr(slurp(g_conf), "ssid=\"extra\""),
+    ASSERT(restore_() < 0 && exists(g_marker) && conf_has("ssid=\"extra\""),
            "#161 restore: multi-network conf -> error, marker and conf untouched");
 
     printf(failures ? "test_essid_marker: %d FAILED\n" : "test_essid_marker: all passed\n", failures);
