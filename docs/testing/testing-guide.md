@@ -713,7 +713,7 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   미커밋 표식 삭제·커밋 체인은 target 제거(`settle`). SIGKILL 뒤 자식 rename(2) 한 번의 창은 잔여. 부팅 시 `opcd -R`이 conf가 커밋값이거나 `target=`으로 디코드될 때만
   원래 값으로 되돌리고(#161; 커밋 전 전원 차단도 복원), 그 밖의 값이면(다른 작성자) 표식만 지우고 conf는 손대지
   않는다(rc=2 로그). 주소는 `ip addr replace` 뒤 global scope 존재를 확인한 다음에만 다른 주소를 지우고(같은 IP 재선택 시 EEXIST 없이
-  GW·NTP 적용, host-scope /32 미러와 같은 IP면 실패), /32 슬롯의 게이트웨이는
+  GW·NTP 적용, host-scope /32 미러와 주소·프리픽스가 같은 /32 슬롯이면 실패), /32 슬롯의 게이트웨이는
   `onlink`. drop-in은 `NTP=`(빈 값)로 /etc 목록을 먼저 비운 뒤 서버를 넣는다. 호스트 검증: `test_essid_marker`(표식
   arm/commit/settle/disarm/restore·외부 변경·전원 차단·hex 토큰 모사)와 `test_platform_nxp_radio`(실제
   `platform_nxp.c`, execv 가로채기로 호출 순서·인자·실패/설치 후 실패 시 표식 상태·onlink 확인). **실기에서만 확인

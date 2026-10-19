@@ -150,16 +150,17 @@ typo from Reset Req; 60 matches every other simple Ack"). 검증 기준 = **60**
 | KeepAlive | `0x0080` | 88 | Timestamp(문자열) | period 마다(>0) | ✅ 동작 |
 
 ### 3-1. InitComplete 부팅 시퀀스
-Status 전이: `0x01(ready) → 0x02(radio_up) → 0x03(login)` (`OPC_INIT_STATE_*`).
+Status 전이(#165): enable 시 `0x01(ready)` → WLAN#1이 접속 중이면 바로 `0x02(radio_up)`, 아니면 첫 접속 때 `0x02` → 로그인 상태면 `0x03(login)` (`OPC_INIT_STATE_*`). 접속 여부는 처리된 nl80211 이벤트의 latch로 판정하되, 그 latch는 마지막 WLAN#1 이벤트 뒤 5 s(`OPCD_ASSOC_LATCH_TTL_S`)까지만 유효하다. 이벤트를 아직 못 본 기동 직후와 latch가 만료된 뒤(이벤트 없이 5 s 이상 지난 정상 상태)에는 link.json 판독이 `0x02`를 결정하므로, 마지막 이벤트에서 한참 지난 enable에서 RadioUp이 link.json을 따르는 것은 결함이 아니다.
 ```bash
 # 터미널 A — --to 에는 반드시 VHL 호스트 IP(127.0.0.1 아님)
 ./build/native/vhlctl/vhlctl --hex listen --bind 0.0.0.0:9999
 # 터미널 B
 $VHL login --password $PW
 $VHL set-indication --bits 0x01 --period 0 --to $VHLIP:9999   # InitComplete만
-ssh root@192.168.0.100 'systemctl restart opcd'              # 부팅 시퀀스 관측
+# 시퀀스는 위 set-indication(enable) 시점에 나온다. 재시작으로 다시 보려면 재시작 뒤
+# 재로그인·set-indication을 다시 해야 한다(통지 설정은 재시작 시 사라짐, testing-guide 참조).
 ```
-합격: 수신기에 `req_id=0x0001` Status 단조 전이.
+합격: 수신기에 `req_id=0x0001` Status가 `0x01 → (0x02) → 0x03` 순으로 단조 전이(미접속이면 `0x02`는 첫 접속 때 따로 온다).
 
 ### 3-2. KeepAlive 주기 + 세션 종료 후 지속(#160) + period=0
 ```bash

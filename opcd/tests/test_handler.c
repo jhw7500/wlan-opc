@@ -751,7 +751,11 @@ int main(void)
         ASSERT(next_ind(cli, &v) == OPC_IND_WLAN_STATUS_CHANGE, "#165: reconnect reported as status change only");
         ASSERT(next_ind(cli, &v) == 0, "#165: RadioUp(2) is sent once per config");
 
-        /* re-sending the config restarts from Ready(1); RadioUp again on association */
+        /* re-sending the config restarts from Ready(1); RadioUp again on association.
+         * Association is decided from processed events (latch), not the polled
+         * readback: make the device really unassociated first. */
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_DISCONNECTED, 0x0224);
+        while (next_ind(cli, &v) != 0) {}   /* drain that status change */
         r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
         ASSERT(r == OPC_RESULT_OK, "#165: config re-sent");
         ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY,
@@ -1538,6 +1542,108 @@ int main(void)
                "D4: unterminated new password → 0x0014");
         ASSERT(do_login(&st, CIP, OPC_PASSWORD_DEFAULT) == OPC_RESULT_OK,
                "D4: stored password unchanged after NUL violations");
+    }
+
+    /* ---- #165 follow-up (PR #169 advisory / Codex): RadioUp at enable comes
+     * from the latched association of processed events, not from the polled
+     * link readback that lags nl80211 by about a second ---- */
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cli_port);
+        ASSERT(srv >= 0 && cli >= 0, "#165 latch: loopback sockets");
+        uint32_t v;
+        const uint8_t bits = OPC_IND_BIT_INIT_COMPLETE | OPC_IND_BIT_WLAN_STATUS_CHANGE;
+
+        /* CONNECT consumed while indications were off; readback still says down */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        ASSERT(next_ind(cli, &v) == 0, "#165 latch: a CONNECT with indications off sends nothing");
+        stub_set_link(0, false, 0, 0);                 /* link.json lags */
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK, "#165 latch: enable after a consumed CONNECT");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY,
+               "#165 latch: Ready(1) first");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165 latch: RadioUp(2) from the consumed CONNECT although link.json still says down");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_LOGGED_IN,
+               "#165 latch: LoggedIn(3) after RadioUp");
+        ASSERT(next_ind(cli, &v) == 0, "#165 latch: nothing more");
+
+        /* DISCONNECT consumed; readback still says associated */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_DISCONNECTED, 0x0224);
+        stub_set_link(0, true, 5180, 36);              /* stale: still "associated" */
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK, "#165 latch: enable after a consumed DISCONNECT");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY,
+               "#165 latch: Ready(1) first (disconnected)");
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_LOGGED_IN &&
+               !st.radio_up_reported,
+               "#165 latch: no false RadioUp(2) from a stale associated readback after a consumed DISCONNECT");
+        ASSERT(next_ind(cli, &v) == 0, "#165 latch: nothing more (disconnected)");
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        ASSERT(next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165 latch: the real association then sends RadioUp(2)");
+        while (next_ind(cli, &v) != 0) {}
+
+        /* no event seen yet (daemon just started): the readback decides */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_set_link(0, true, 5180, 36);
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165 latch: before any event the link readback still decides RadioUp");
+        while (next_ind(cli, &v) != 0) {}
+
+        /* a latch older than OPCD_ASSOC_LATCH_TTL_S yields to the readback,
+         * which has caught up by then: a lost nl80211 event must not keep a
+         * stale latch authoritative until the next one (F2 tribunal A-R1-002) */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);   /* latch: up ... */
+        st.wlan0_assoc_at -= OPCD_ASSOC_LATCH_TTL_S + 1;                      /* ... but expired */
+        stub_set_link(0, false, 0, 0);                                        /* readback: down */
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_LOGGED_IN &&
+               !st.radio_up_reported,
+               "#165 latch: an expired 'up' latch yields to a 'down' readback -> no RadioUp");
+        ASSERT(next_ind(cli, &v) == 0, "#165 latch: nothing more (expired up)");
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_DISCONNECTED, 0x0224); /* latch: down ... */
+        st.wlan0_assoc_at -= OPCD_ASSOC_LATCH_TTL_S + 1;                      /* ... but expired */
+        stub_set_link(0, true, 5180, 36);                                     /* readback: up */
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165 latch: an expired 'down' latch yields to an 'up' readback -> RadioUp");
+        while (next_ind(cli, &v) != 0) {}
+        /* a fresh event re-arms the latch over the readback */
+        stub_set_link(0, false, 0, 0);
+        (void)opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0224);
+        while (next_ind(cli, &v) != 0) {}
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port, bits, 0);
+        ASSERT(r == OPC_RESULT_OK &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_READY &&
+               next_ind(cli, &v) == OPC_IND_INIT_COMPLETE && v == OPC_INIT_STATE_RADIO_UP,
+               "#165 latch: a fresh CONNECT after the expiry decides again over a 'down' readback");
+        while (next_ind(cli, &v) != 0) {}
+        stub_set_link(0, false, 0, 0);
+        close(srv);
+        close(cli);
     }
 
     /* ---- PERF-001: async NVRAM persist → deferred Set* ack ---- */
@@ -2730,6 +2836,125 @@ int main(void)
         }
 
         st.store_async = NULL;
+        /* ---- #163 follow-up (PR #170 advisory): a slot clear whose NVRAM write
+         * is still in flight is already in pending_ip_list; a Logout racing the
+         * unacknowledged clear must not apply the reserved slot ---- */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd      = srv;
+            st.store_async = sa;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            stub_apply_ip_reset();
+            uint8_t zf[OPC_FRAME_MAX], zr[OPC_FRAME_MAX], zrx[OPC_FRAME_MAX];
+            ssize_t zfn, zrlen; int zdrc; ssize_t zrn;
+            opc_set_ip_config_list_req_t zq;
+            memset(&zq, 0, sizeof zq);                       /* slot 2 = 192.168.1.102/24 */
+            zq.entry_count              = 1;
+            zq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+            zq.entries[0].list_number   = 2;
+            zq.entries[0].ip_address    = 0xC0A80166;
+            zq.entries[0].subnet_mask   = 0xFFFFFF00u;
+            zfn   = opc_set_ip_config_list_req_pack(zf, sizeof zf, 90, &zq);
+            zrlen = -1;
+            zdrc  = opcd_dispatch(&st, zf, (size_t)zfn, LOOP, cli_port, zr, sizeof zr, &zrlen);
+            ASSERT(zdrc == 0 && zrlen == 0, "#163 async: slot 2 set, ack deferred");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "#163 async: slot 2 write completed");
+            opcd_store_async_on_ready(&st);
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "#163 async: slot 2 ack arrived");
+            zrn = recv(cli, zrx, sizeof zrx, 0);
+            ASSERT(zrn > 0 && st.ip_list.present[1], "#163 async: slot 2 committed");
+            ASSERT(do_change_ip(&st, LOOP, 2) == OPC_RESULT_OK, "#163 async: ChangeIp(2) reserved");
+
+            memset(&zq, 0, sizeof zq);                       /* IP 0.0.0.0 = clear slot 2 */
+            zq.entry_count              = 1;
+            zq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+            zq.entries[0].list_number   = 2;
+            zfn   = opc_set_ip_config_list_req_pack(zf, sizeof zf, 91, &zq);
+            zrlen = -1;
+            zdrc  = opcd_dispatch(&st, zf, (size_t)zfn, LOOP, cli_port, zr, sizeof zr, &zrlen);
+            ASSERT(zdrc == 0 && zrlen == 0, "#163 async: slot clear accepted, ack deferred (write in flight)");
+            ASSERT(st.ip_list.present[1] && !st.pending_ip_list.present[1],
+                   "#163 async: committed list still has slot 2, the pending list does not");
+            ASSERT(do_logout(&st, LOOP) == OPC_RESULT_OK, "#163 async: Logout while the clear is in flight");
+            opcd_apply_pending_ip_change(&st);
+            ASSERT(stub_apply_ip_calls() == 0 && !st.ip_change_commit_armed &&
+                   st.ip_change_pending && st.ip_change_logout_deferred,
+                   "#163 async: Logout defers the decision while the clear is in flight -> nothing armed or applied");
+            ASSERT(do_login(&st, LOOP, OPC_PASSWORD_DEFAULT) == OPC_RESULT_OK &&
+                   st.ip_change_pending && st.ip_change_logout_deferred && st.ip_change_list_no == 2,
+                   "#163 async: the Logout-committed change survives a fresh Login in the deferred window");
+            ASSERT(do_change_ip(&st, LOOP, 2) == OPC_RESULT_NG &&
+                   g_last_chgip_err == OPC_ERR_IP_CHANGE_CONFLICT,
+                   "#163 async: a new session cannot re-stage ChangeIp while the deferred decision is open");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "#163 async: clear write completed");
+            opcd_store_async_on_ready(&st);
+            opcd_apply_pending_ip_change(&st);
+            ASSERT(stub_apply_ip_calls() == 0 && !st.ip_change_commit_armed &&
+                   !st.ip_change_pending && st.ip_change_list_no == 0 && !st.ip_change_logout_deferred,
+                   "#163 async: the committed clear cancels the reserved change (on_ready skip, slot cleared) -> IP change not applied");
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "#163 async: deferred clear ack arrived");
+            zrn = recv(cli, zrx, sizeof zrx, 0);
+            ASSERT(zrn > 0 && !st.ip_list.present[1], "#163 async: slot 2 cleared in the committed list after completion");
+
+            /* the clear's write FAILS: the committed list keeps slot 2, so the
+             * deferred decision arms the reserved change from the committed
+             * entry — the VHL's NG/NVRAM ack and what the device does agree
+             * (F2 tribunal A-R1-001) */
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd      = srv;
+            st.store_async = sa;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            stub_apply_ip_reset();
+            memset(&zq, 0, sizeof zq);                       /* slot 2 = 192.168.1.102/24 */
+            zq.entry_count              = 1;
+            zq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+            zq.entries[0].list_number   = 2;
+            zq.entries[0].ip_address    = 0xC0A80166;
+            zq.entries[0].subnet_mask   = 0xFFFFFF00u;
+            zfn   = opc_set_ip_config_list_req_pack(zf, sizeof zf, 92, &zq);
+            zrlen = -1;
+            zdrc  = opcd_dispatch(&st, zf, (size_t)zfn, LOOP, cli_port, zr, sizeof zr, &zrlen);
+            ASSERT(zdrc == 0 && zrlen == 0, "#163 async/fail: slot 2 set, ack deferred");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "#163 async/fail: slot 2 write completed");
+            opcd_store_async_on_ready(&st);
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "#163 async/fail: slot 2 ack arrived");
+            zrn = recv(cli, zrx, sizeof zrx, 0);
+            ASSERT(zrn > 0 && st.ip_list.present[1], "#163 async/fail: slot 2 committed");
+            ASSERT(do_change_ip(&st, LOOP, 2) == OPC_RESULT_OK, "#163 async/fail: ChangeIp(2) reserved");
+            char zbad[160];
+            snprintf(zbad, sizeof zbad, "no_such_dir_%d/iplist", (int)getpid());
+            st.paths.ip_list = zbad;                         /* the clear's NVRAM write will fail */
+            memset(&zq, 0, sizeof zq);                       /* IP 0.0.0.0 = clear slot 2 */
+            zq.entry_count              = 1;
+            zq.entries[0].boundary_flag = OPC_LIST_BOUNDARY_START_END;
+            zq.entries[0].list_number   = 2;
+            zfn   = opc_set_ip_config_list_req_pack(zf, sizeof zf, 93, &zq);
+            zrlen = -1;
+            zdrc  = opcd_dispatch(&st, zf, (size_t)zfn, LOOP, cli_port, zr, sizeof zr, &zrlen);
+            ASSERT(zdrc == 0 && zrlen == 0, "#163 async/fail: slot clear accepted, ack deferred");
+            ASSERT(do_logout(&st, LOOP) == OPC_RESULT_OK, "#163 async/fail: Logout while the clear is in flight");
+            opcd_apply_pending_ip_change(&st);
+            ASSERT(stub_apply_ip_calls() == 0 && st.ip_change_logout_deferred, "#163 async/fail: decision deferred");
+            ASSERT(do_login(&st, LOOP, OPC_PASSWORD_DEFAULT) == OPC_RESULT_OK &&
+                   st.ip_change_pending && st.ip_change_logout_deferred && st.ip_change_list_no == 2,
+                   "#163 async/fail: a fresh Login in the deferred window keeps the Logout-committed change");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0, "#163 async/fail: clear write completed (failed)");
+            opcd_store_async_on_ready(&st);
+            ASSERT(st.ip_list.present[1] && st.ip_change_commit_armed && !st.ip_change_logout_deferred &&
+                   st.ip_change_armed_entry.ip_address == 0xC0A80166,
+                   "#163 async/fail: the failed clear keeps slot 2 committed -> reserved change armed from the committed entry");
+            opcd_apply_pending_ip_change(&st);
+            ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_ip() == 0xC0A80166,
+                   "#163 async/fail: the reserved change is applied with the committed entry");
+            ASSERT(wait_fd_readable(cli, 5000) == 0, "#163 async/fail: deferred clear ack arrived");
+            zrn = recv(cli, zrx, sizeof zrx, 0);
+            opc_set_ip_config_list_ack_t zack;
+            ASSERT(zrn > 0 && opc_set_ip_config_list_ack_unpack(zrx, (size_t)zrn, &zack) == 0 &&
+                   zack.result == OPC_RESULT_NG && zack.error_cause == OPC_ERR_NVRAM,
+                   "#163 async/fail: the clear's deferred ack is NG/NVRAM");
+            st.paths.ip_list = g_iplist_path;
+        }
+
         opc_store_async_destroy(sa);
         close(srv);
         close(cli);

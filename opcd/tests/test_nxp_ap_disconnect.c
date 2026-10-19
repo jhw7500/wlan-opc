@@ -256,6 +256,33 @@ static void stage_manual(int idx, opcd_nl_kind_t kind, uint32_t freq, uint16_t c
     nl_stage_evt(tab, &count, &evt, idx);
 }
 
+/* Codex review of PR #169: a daemon started while WLAN#1 is already associated
+ * sees no CONNECT replay, so nxp_init seeds the disconnect CH from the live
+ * interface. Runs last: it rewrites the process-wide cache. */
+static int fake_iface_freq(int ifindex, uint32_t *freq_mhz, uint16_t *channel)
+{
+    if (ifindex != 7) return -1;
+    *freq_mhz = 5180;
+    *channel  = 36;
+    return 0;
+}
+
+static void test_ch_cache_seed_at_init(void)
+{
+    nl_note_ch(0, 0);                       /* forget history -> 0xFFFF */
+    expect_disc_ch(0, 0xFFFF, "#166 seed: history forgotten -> 0xFFFF");
+    g_iface_freq_query = fake_iface_freq;
+    nl_seed_ch_cache_idx(0, 0);             /* interface absent: nothing seeded */
+    expect_disc_ch(0, 0xFFFF, "#166 seed: missing interface leaves the cache unset");
+    nl_seed_ch_cache_idx(0, 9);             /* kernel query fails: nothing seeded */
+    expect_disc_ch(0, 0xFFFF, "#166 seed: failed kernel query leaves the cache unset");
+    nl_seed_ch_cache_idx(0, 7);             /* associated on 5180 MHz / ch 36 */
+    expect_disc_ch(0, 0x0224, "#166 seed: live interface state seeds the disconnect CH at init");
+    nl_seed_ch_cache_idx(1, 7);
+    expect_disc_ch(1, 0x0224, "#166 seed: each interface is seeded on its own");
+    g_iface_freq_query = nxp_get_iface_freq;
+}
+
 static void test_disconnect_channel(void)
 {
     /* no association history since start -> 0xFFFF on both interfaces */
@@ -295,6 +322,7 @@ int main(void)
     test_hint_lifetime_and_interface();
     test_untrusted_frames();
     test_roaming_without_link_readback();
+    test_ch_cache_seed_at_init();
     if (failures) {
         fprintf(stderr, "%d AP disconnect checks failed\n", failures);
         return 1;

@@ -12,6 +12,11 @@
 #include "ip_iface.h"
 #include "topology.h"
 
+/* SetIndicationConfig trusts the association latch (wlan0_assoc) only this
+ * long after the event that set it; older, the polled link readback — which
+ * has caught up by then — decides RadioUp(2). */
+#define OPCD_ASSOC_LATCH_TTL_S 5
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -173,6 +178,11 @@ typedef struct opcd_state {
      * keeps its current IP; a fresh Login clears any inherited staging. */
     bool     ip_change_pending;
     bool     ip_change_commit_armed;
+    /* A Logout found an IP-list NVRAM write in flight and left the reserved
+     * slot's decision to opcd_store_async_on_ready, which re-checks and arms
+     * against the committed list once the write's outcome is known (#163
+     * follow-up). ChangeIp refuses to re-stage while this is set. */
+    bool     ip_change_logout_deferred;
     uint16_t ip_change_list_no;
     uint16_t ip_change_armed_no;          /* slot # snapshotted at arm (audit log) */
     opc_ipcfg_entry_t ip_change_armed_entry;
@@ -190,6 +200,18 @@ typedef struct opcd_state {
      * has been reported for the current indication config (#165). Cleared on
      * every SetIndicationConfig; set when RadioUp goes out. */
     bool     radio_up_reported;
+    /* WLAN#1 association as last seen by a processed platform event
+     * (opcd_ind_wlan_status), kept even while indications are disabled.
+     * SetIndicationConfig decides RadioUp(2) from this latch while it is
+     * fresh (set by an event within the last OPCD_ASSOC_LATCH_TTL_S seconds);
+     * before the first event (daemon just started) and once the latch has
+     * aged past that it falls back to the polled link readback, which lags
+     * nl80211 by about a second but then corrects itself — a lost nl80211
+     * event must not keep a stale latch authoritative until the next one
+     * (#165 follow-up, PR #169 advisory; F2 tribunal A-R1-002). */
+    bool     wlan0_assoc_known;
+    bool     wlan0_assoc;
+    time_t   wlan0_assoc_at;            /* opcd_mono_now_s() of the latching event */
     uint16_t indication_seq;
     int32_t  indication_tick_counter;   /* seconds since last KeepAlive */
     /* §4.3.9 period coalescing (#105): within one reporting period only the

@@ -14,9 +14,10 @@
  * best route for `dst_host` is the longest-prefix match, ties broken by the
  * lowest metric; routes that are not UP are ignored. Returns 0 and writes the
  * matched route's netmask (host order) to *mask_host when that best route has
- * no gateway (Gateway 0 and no RTF_GATEWAY, not RTF_REJECT); -ENETUNREACH when
- * no route covers `dst_host` or the best one goes through a gateway (or is a
- * reject route). Standalone like ip_iface/topology so it is host-unit-testable
+ * no gateway (Gateway 0 and no RTF_GATEWAY, not RTF_REJECT, and an output
+ * interface — a throw/unreachable/blackhole route prints Iface "*");
+ * -ENETUNREACH when no route covers `dst_host` or the best one goes through a
+ * gateway, is a reject route or has no output interface. Standalone like ip_iface/topology so it is host-unit-testable
  * without linking opcd.c's main(). */
 int opcd_route_direct_lookup(const char *text, uint32_t dst_host,
                              uint32_t *mask_host);

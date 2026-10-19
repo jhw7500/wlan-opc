@@ -12,6 +12,9 @@ extern "C" {
  * indication_info_bits or the call is suppressed. */
 int opcd_ind_init_complete (opcd_state_t *st, uint32_t status);
 int opcd_ind_wlan_status   (opcd_state_t *st, uint16_t status, uint16_t ch);
+/* CLOCK_MONOTONIC seconds, the clock the association latch is stamped with
+ * (opcd_ind_wlan_status) and aged against (SetIndicationConfig). */
+time_t opcd_mono_now_s(void);
 /* InitComplete RadioUp(2), at most once per indication config (#165). Called
  * when the link is found associated at enable time and by opcd_ind_wlan_status
  * on the first CONNECTED after enable; later reconnects are WlanStatusChange

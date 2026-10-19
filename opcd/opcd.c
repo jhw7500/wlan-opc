@@ -807,6 +807,19 @@ int main(int argc, char **argv)
      * any required radio recovery before teardown. */
     opc_store_async_finish(st.store_async);
     opcd_store_async_on_ready(&st);
+    /* A Logout whose ChangeIp decision was deferred to an in-flight IP-list
+     * write (handler.c) may have just been armed by that final reconcile. The
+     * loop that applies armed commits has already exited, so the commit is
+     * dropped here — explicitly, so the lost Logout-acknowledged change is
+     * visible in the journal. The VHL finds the device on its old address
+     * after the restart and can re-issue ChangeIp. */
+    if (st.ip_change_commit_armed) {
+        LOG("exit with an armed IP change (slot %u) — not applied at shutdown",
+            st.ip_change_armed_no);
+        OLOG_WARN("stop: IP change dropped at shutdown (slot=%u armed by the final NVRAM reconcile)",
+                  st.ip_change_armed_no);
+        st.ip_change_commit_armed = false;
+    }
     opc_store_async_destroy(st.store_async);
     st.store_async = NULL;
 
