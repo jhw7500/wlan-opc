@@ -191,7 +191,8 @@ vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND
 | `login --password ''` / 틀린 비번 | `NG 0x0010` (P0) |
 | `login --password MyPassword` | `OK` |
 | `set-indication --to 0.0.0.0 / 224.x / 255.255.255.255` | `NG 0x0010` (P1) |
-| `set-indication --to <유니캐스트>` | `OK` |
+| `set-indication --to <장치가 게이트웨이 없이 닿는 유니캐스트>` (연결 서브넷·host route·loopback) | `OK` |
+| `set-indication --to <다른 세그먼트 / 서브넷 브로드캐스트 / 경로 없음>` | `NG 0x0012` (#159) |
 | indication ON 중 `device-info` | `NG 0x0010` |
 | `logout` 후 재로그인 → `device-info` | `NG 0x0010` (#160: 통지 설정은 세션 종료 뒤에도 유지) |
 | 같은 세션(idle 만료 전)에서 `set-indication --bits 0x00 --period 0 --to A.B.C.D:PORT` 후 `device-info` | `OK` (통지 해제 후 조회) |

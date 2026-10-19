@@ -181,6 +181,15 @@ typedef struct opcd_platform_ops {
      * source was readable, -errno when not (all outputs zeroed). */
     int  (*get_dev_ipv4)(int iface, uint32_t *ip_host,
                          uint32_t *netmask_host, uint32_t *gateway_host);
+    /* #159: is `dst_host` reachable WITHOUT a gateway? Longest-prefix match
+     * over the device's main routing table (connected subnets and host routes
+     * — peer_route's wired peers are host routes on eth0). Returns 0 and the
+     * matched route's netmask in *netmask_host (host order; 0xFFFFFFFF for a
+     * host route) when that best route has no gateway; -ENETUNREACH when no
+     * route covers `dst_host` or the best one goes through a gateway; any other
+     * -errno when the table could not be read (callers treat every non-zero
+     * as "cannot be sent directly"). */
+    int  (*lookup_direct_route)(uint32_t dst_host, uint32_t *netmask_host);
     int  (*get_wlan_mac)(int idx /*0=mlan0,1=mlan1*/, uint8_t mac[6]);
     /* SSID string for the indexed WLAN interface. NUL-terminated, silently
      * truncated to cap. Empty string when not associated. */

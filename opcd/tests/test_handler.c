@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -20,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../handler.h"
@@ -49,6 +51,10 @@ extern uint32_t     stub_peer_route_refresh_last_mask(void);
 extern void         stub_peer_route_refresh_reset(void);
 extern void         stub_set_dev_ipv4(int iface, uint32_t ip, uint32_t mask, uint32_t gw);
 extern void         stub_reset_dev_ipv4(void);
+/* #159 route table injection (default = permissive, see platform_stub.c) */
+extern void         stub_route_clear(void);
+extern void         stub_route_reset(void);
+extern void         stub_route_add(uint32_t dest, uint32_t mask, uint32_t gw);
 extern const char  *stub_apply_ip_last_essid(void);
 extern void     stub_apply_radio_set_fail(int fail);
 extern void     stub_apply_radio_set_fail_once(int fail);
@@ -442,6 +448,82 @@ static int do_get_devinfo_ip(opcd_state_t *st, uint32_t cip,
     if (mask) *mask = ack.subnet_mask;
     if (gw)   *gw   = ack.default_gateway;
     return 0;
+}
+
+/* ---- bundle C helpers (#163 / #167 / #159) ---- */
+
+static time_t t_mono(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
+}
+
+/* #167: park the idle deadline 100 s out (login_idle_s is 3600 in tests), so a
+ * refresh is visible as a jump to ~now+3600 and no refresh leaves it at ~+100. */
+static time_t idle_arm(opcd_state_t *st)
+{
+    st->idle_deadline = t_mono() + 100;
+    return st->idle_deadline;
+}
+static bool idle_refreshed(const opcd_state_t *st)
+{
+    return st->idle_deadline >= t_mono() + 3000;
+}
+
+/* Dispatch a GetBasicInfo request; 0 when the dispatcher answered. */
+static int do_get_basic_info(opcd_state_t *st, uint32_t cip)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t fn = opc_get_basic_info_req_pack(frame, sizeof frame, 9);
+    if (fn <= 0) return -1;
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    return opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen);
+}
+
+/* Dispatch a SetIndicationConfig frame whose body is too short to unpack
+ * (header ok, 64 <= flen): the handler answers NG 0x0003. Returns the ack's
+ * error cause, or 0xFFFF when no ack came back. */
+static uint16_t do_short_set_indication(opcd_state_t *st, uint32_t cip)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    const uint8_t body[4] = {0};
+    ssize_t fn = opc_frame_build(frame, sizeof frame, OPC_CMD_REQUEST,
+                                 OPC_REQ_SET_INDICATION_CONFIG, 3, 60, body, sizeof body);
+    if (fn <= 0) return 0xFFFF;
+    uint8_t resp[OPC_FRAME_MAX];
+    ssize_t rlen = 0;
+    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
+        return 0xFFFF;
+    opc_set_indication_config_ack_t ack;
+    if (opc_set_indication_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFF;
+    return ack.error_cause;
+}
+
+/* Redirect stderr into `path` for the duration of one call (the handler's
+ * diagnostic lines are the observable "log" in a host test). */
+static int cap_begin(const char *path)
+{
+    fflush(stderr);
+    int saved = dup(2);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) { dup2(fd, 2); close(fd); }
+    return saved;
+}
+static void cap_end(int saved)
+{
+    fflush(stderr);
+    dup2(saved, 2);
+    close(saved);
+}
+static bool file_has(const char *path, const char *needle)
+{
+    char buf[4096];
+    ssize_t n = opc_store_read_all(path, buf, sizeof buf - 1);
+    if (n < 0) return false;
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
 }
 
 int main(void)
@@ -1272,8 +1354,8 @@ int main(void)
 
         ent.ip_address      = 0;                      /* 0.0.0.0 — unset device IP */
         r = do_set_ip_entry(&st, CIP, &ent);
-        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_IPCFG_IP,
-               "D1: 0.0.0.0 device IP → 0x0011 (Rev1.01 Q9: the device IP has no unset value)");
+        ASSERT(r == OPC_RESULT_OK,
+               "D1: 0.0.0.0 device IP → OK, clears the slot (#163; was 0x0011 under Rev1.01 Q9)");
 
         ent.ip_address      = 0xC0A80165u;            /* /32 P2P: off-block GW ok */
         ent.subnet_mask     = 0xFFFFFFFFu;
@@ -3451,6 +3533,211 @@ int main(void)
         ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_iface() == 0 &&
                stub_peer_route_refresh_calls() == 0,
                "eth0_ip: apply targets eth0 and does not touch peer_route artifacts");
+    }
+
+
+    /* ---- #163: SetIpConfigList IP 0.0.0.0 clears the slot ---- */
+    {
+        opc_ipcfg_entry_t z;
+        memset(&z, 0, sizeof z);                       /* ip 0.0.0.0 */
+        z.boundary_flag = OPC_LIST_BOUNDARY_START_END;
+        z.list_number   = 2;
+        z.subnet_mask   = 0x00000001u;                 /* invalid mask, ignored */
+        z.default_gateway = 0x7F000001u;               /* loopback GW, ignored */
+        z.ntp_server    = 0xFFFFFFFFu;                 /* invalid NTP, ignored */
+        memset(z.essid, '!', sizeof z.essid);          /* unterminated + bad charset */
+
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START_END, 0xC0A80165);
+        (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START_END, 0xC0A80166);
+        ASSERT(st.ip_list.present[0] && st.ip_list.present[1], "#163: slots 1,2 written");
+        r = do_set_ip_entry(&st, CIP, &z);
+        ASSERT(r == OPC_RESULT_OK, "#163: IP 0.0.0.0 entry accepted (clears the slot)");
+        ASSERT(!st.ip_list.present[1] && st.ip_list.slots[1].ip_address == 0,
+               "#163: cleared slot is empty in memory");
+        ASSERT(st.ip_list.present[0] && st.ip_list.slots[0].ip_address == 0xC0A80165,
+               "#163: other slots untouched by the clear");
+        {
+            opcd_ip_list_t disk_list;
+            memset(&disk_list, 0xAA, sizeof disk_list);
+            ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) ==
+                       (ssize_t)sizeof disk_list &&
+                   !disk_list.present[1] && disk_list.present[0],
+                   "#163: the cleared slot is what is persisted");
+        }
+        r = do_change_ip(&st, CIP, 2);
+        ASSERT(r == OPC_RESULT_NG && g_last_chgip_err == OPC_ERR_SLOT_EMPTY,
+               "#163: ChangeIp to a cleared slot -> 0x0011");
+
+        z.list_number = 0;
+        r = do_set_ip_entry(&st, CIP, &z);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_SLOT_RANGE,
+               "#163: zero-IP entry still gets the slot-range check (0)");
+        z.list_number = OPC_IPCFG_LIST_MAX_SLOTS + 1;
+        r = do_set_ip_entry(&st, CIP, &z);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_SLOT_RANGE,
+               "#163: zero-IP entry still gets the slot-range check (21)");
+        z.list_number = 2;
+        z.boundary_flag = OPC_LIST_BOUNDARY_END;
+        r = do_set_ip_entry(&st, CIP, &z);
+        ASSERT(r == OPC_RESULT_NG && g_last_iplist_err == OPC_ERR_LIST_SEQUENCE,
+               "#163: zero-IP END without START still -> 0x0018");
+
+        /* multi-frame cycle: START clears slot 1, END writes slot 3 -> both commit */
+        z.list_number = 1;
+        z.boundary_flag = OPC_LIST_BOUNDARY_START;
+        ASSERT(do_set_ip_entry(&st, CIP, &z) == OPC_RESULT_OK,
+               "#163: zero-IP START opens a cycle");
+        ASSERT(st.ip_list.present[0], "#163: staged clear not visible before END");
+        (void)do_set_ip_list(&st, CIP, 3, OPC_LIST_BOUNDARY_END, 0xC0A80167);
+        ASSERT(!st.ip_list.present[0] && st.ip_list.present[2] &&
+               st.ip_list.slots[2].ip_address == 0xC0A80167,
+               "#163: END commits the staged clear together with slot 3");
+
+        /* ChangeIp reserved, slot cleared before Logout -> not applied, logged */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_apply_ip_reset();
+        (void)do_set_ip_list(&st, CIP, 2, OPC_LIST_BOUNDARY_START_END, 0xC0A80166);
+        ASSERT(do_change_ip(&st, CIP, 2) == OPC_RESULT_OK, "#163: ChangeIp(2) reserved");
+        z.list_number = 2;
+        z.boundary_flag = OPC_LIST_BOUNDARY_START_END;
+        ASSERT(do_set_ip_entry(&st, CIP, &z) == OPC_RESULT_OK,
+               "#163: reserved slot cleared before Logout");
+        {
+            const char *lp = "test_handler_log163.tmp";
+            int sv = cap_begin(lp);
+            ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#163: logout ok");
+            opcd_apply_pending_ip_change(&st);
+            cap_end(sv);
+            ASSERT(stub_apply_ip_calls() == 0,
+                   "#163: cleared reserved slot -> no IP change after Logout");
+            ASSERT(file_has(lp, "cleared before Logout"),
+                   "#163: skipped apply is logged");
+            unlink(lp);
+        }
+        ASSERT(!st.ip_change_commit_armed && !st.ip_change_pending,
+               "#163: skipped commit leaves no armed/pending state");
+    }
+
+    /* ---- #167: the idle timer follows every command from the session IP ---- */
+    {
+        time_t armed;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+
+        armed = idle_arm(&st);
+        ASSERT(do_get_basic_info(&st, CIP) == 0 && idle_refreshed(&st),
+               "#167: GetBasicInfo from the session IP refreshes the timer");
+        armed = idle_arm(&st);
+        ASSERT(do_get_basic_info(&st, CIP + 1) == 0 && st.idle_deadline == armed,
+               "#167: GetBasicInfo from another IP leaves the timer alone");
+        ASSERT(st.logged_in && st.holder_ip == CIP,
+               "#167: GetBasicInfo from another IP leaves the session alone");
+
+        /* NG results from the session IP refresh too */
+        idle_arm(&st);
+        r = do_set_indication(&st, CIP, 0xC0A80063, 6000, 0x40, 5);
+        ASSERT(r == OPC_RESULT_NG && idle_refreshed(&st),
+               "#167: NG SetIndicationConfig (reserved bit) refreshes");
+        idle_arm(&st);
+        r = do_change_ip(&st, CIP, 5);
+        ASSERT(r == OPC_RESULT_NG && idle_refreshed(&st),
+               "#167: NG ChangeIpAddress (empty slot) refreshes");
+        idle_arm(&st);
+        r = do_set_password(&st, CIP, "wrong-old-pw", "NewPw1");
+        ASSERT(r == OPC_RESULT_NG && idle_refreshed(&st),
+               "#167: NG SetPassword (mismatch) refreshes");
+        idle_arm(&st);
+        r = do_set_radio(&st, CIP, 9999, 1);
+        ASSERT(r == OPC_RESULT_NG && idle_refreshed(&st),
+               "#167: NG SetRadioConfig (bad band) refreshes");
+        idle_arm(&st);
+        r = do_set_ip_list(&st, CIP, 0, OPC_LIST_BOUNDARY_START_END, 0xC0A80165);
+        ASSERT(r == OPC_RESULT_NG && idle_refreshed(&st),
+               "#167: NG SetIpConfigList (slot range) refreshes");
+        (void)do_set_indication(&st, CIP, 0xC0A80063, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(st.indication_enabled, "#167: indication on for the GetDeviceInfo NG case");
+        idle_arm(&st);
+        {
+            opc_get_device_info_ack_t dia;
+            ASSERT(do_get_devinfo_ack(&st, CIP, &dia) == 0 &&
+                   dia.result == OPC_RESULT_NG && idle_refreshed(&st),
+                   "#167: NG GetDeviceInfo (indication on) refreshes");
+        }
+
+        /* a command from another IP, even though it is NG, does not */
+        armed = idle_arm(&st);
+        r = do_set_indication(&st, CIP + 1, 0xC0A80063, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_NG && st.idle_deadline == armed,
+               "#167: NG command from another IP does not refresh");
+
+        /* malformed frames do not */
+        armed = idle_arm(&st);
+        ASSERT(do_short_set_indication(&st, CIP) == OPC_ERR_PACKET_SIZE &&
+               st.idle_deadline == armed,
+               "#167: 0x0003 length error does not refresh (handler-level)");
+        {
+            uint8_t fr[OPC_FIXED_HEADER_SIZE + 1] = {0};
+            opcd_reject_bad_length(&st, fr, sizeof fr, CIP, 5000);
+            ASSERT(st.idle_deadline == armed,
+                   "#167: 0x0003 length error does not refresh (frame-level)");
+        }
+    }
+
+    /* ---- #159: SetIndicationConfig recipient must be gateway-less reachable ---- */
+    {
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_route_clear();
+        stub_route_add(0xC0A80100u, 0xFFFFFF00u, 0);            /* eth0 192.168.1.0/24 */
+        stub_route_add(0xC0000200u, 0xFFFFFF00u, 0);            /* mlan0 192.0.2.0/24 */
+        stub_route_add(0x0A090909u, 0xFFFFFFFFu, 0);            /* host route 10.9.9.9 */
+        stub_route_add(0xAC100000u, 0xFFFF0000u, 0xC0000201u);  /* 172.16/16 via GW */
+        stub_route_add(0x00000000u, 0x00000000u, 0xC0000201u);  /* default via GW */
+
+        r = do_set_indication(&st, CIP, 0xC0A80132, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_OK && st.indication_enabled, "#159: eth0-side host accepted");
+        r = do_set_indication(&st, CIP, 0xC0000232, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_OK, "#159: mlan0-side host accepted");
+        r = do_set_indication(&st, CIP, 0x0A090909, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_OK, "#159: host-route peer accepted");
+        r = do_set_indication(&st, CIP, 0x7F000001, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_OK, "#159: loopback stays accepted (kernel local table)");
+
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        r = do_set_indication(&st, CIP, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP &&
+               !st.indication_enabled,
+               "#159: other segment (default route only) -> 0x0012, state unchanged");
+        r = do_set_indication(&st, CIP, 0xAC100505, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
+               "#159: route via a gateway -> 0x0012");
+        r = do_set_indication(&st, CIP, 0xC0A801FF, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
+               "#159: eth0 subnet broadcast -> 0x0012");
+        r = do_set_indication(&st, CIP, 0xC00002FF, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
+               "#159: mlan0 subnet broadcast -> 0x0012");
+        r = do_set_indication(&st, CIP, 0x0A0A0A0A, 6000, 0, 0);
+        ASSERT(r == OPC_RESULT_OK && !st.indication_enabled,
+               "#159: Info=0 (disable) is not subject to the segment check");
+
+        /* peer_route: eth0 holds only /32 host routes, mlan0 the subnet */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.conf.management_topology = OPC_TOPOLOGY_PEER_ROUTE;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_route_clear();
+        stub_route_add(0xC0000232u, 0xFFFFFFFFu, 0);            /* wired peer 192.0.2.50 */
+        r = do_set_indication(&st, CIP, 0xC0000232, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_OK, "#159: peer_route wired peer (host route) accepted");
+        r = do_set_indication(&st, CIP, 0xC0000233, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+        ASSERT(r == OPC_RESULT_NG && g_last_ind_err == OPC_ERR_IND_RECIPIENT_IP,
+               "#159: no route found -> 0x0012");
+
+        stub_route_reset();
     }
 
     unlink(g_pw_path);
