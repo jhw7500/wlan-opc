@@ -53,7 +53,7 @@ int     opc_ind_wlan_status_change_unpack(const uint8_t *frame, size_t frame_len
  * 0x0004 — Roaming (Length=68, body 12 B)
  *
  * Body layout (body offset):
- *    0   SNR(1) + RSSI(1) + reserve(2)
+ *    0   SNR(2) + RSSI(2)      ── int16 big-endian; -128 = no value
  *    4   Connect AP MAC (6)
  *   10   CH Number (2)        ── spec table mis-aligned (see T14)
  * ======================================================================== */

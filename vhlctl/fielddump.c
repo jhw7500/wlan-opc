@@ -54,6 +54,9 @@ static void build_decoded(char *dec, size_t cap, const uint8_t *p, const fd_fiel
         snprintf(dec, cap, "0x%04x (%u)", v, v);
         break;
     }
+    case FD_I16BE:
+        snprintf(dec, cap, "%d", (int)(int16_t)opc_be16_read(p));
+        break;
     case FD_U32BE:
         snprintf(dec, cap, "0x%08x", opc_be32_read(p));
         break;
@@ -186,9 +189,8 @@ static const fd_field_t DEVINFO[] = {
 static const fd_field_t IND_INIT[]      = {{"status", 4, FD_U32BE}};
 static const fd_field_t IND_WLANSTAT[]  = {{"wlan_status", 2, FD_U16BE},
                                            {"indication_ch", 2, FD_U16BE}};
-static const fd_field_t IND_ROAMING[]   = {{"current_snr", 1, FD_I8},
-                                           {"current_rssi", 1, FD_I8},
-                                           {"(reserve)", 2, FD_HEX},
+static const fd_field_t IND_ROAMING[]   = {{"current_snr", 2, FD_I16BE},
+                                           {"current_rssi", 2, FD_I16BE},
                                            {"connect_ap_mac", 6, FD_MAC},
                                            {"ch_number", 2, FD_U16BE}};
 static const fd_field_t IND_APDISC[]    = {{"message_id", 2, FD_U16BE},

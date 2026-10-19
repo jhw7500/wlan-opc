@@ -1542,6 +1542,7 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
             st->indication_info_bits       = req.info_bits;
             st->indication_period_s        = req.period_seconds;
             st->indication_tick_counter    = 0;
+            st->radio_up_reported          = false;   /* new config: restart at Ready (#165) */
             opcd_ind_coalesce_reset(st);   /* a config change drops stale staged
                                             * state changes so they cannot leak
                                             * into the new recipient/period (#105) */
@@ -1549,7 +1550,12 @@ static int handle_set_indication_config(opcd_state_t *st, const uint8_t *frame, 
             if (st->indication_enabled) {
                 /* Spec: on enable, emit InitComplete state sequence. */
                 opcd_ind_init_complete(st, OPC_INIT_STATE_READY);
-                opcd_ind_init_complete(st, OPC_INIT_STATE_RADIO_UP);
+                /* RadioUp(2) = associated (spec 4.4.1, #165): only if the AP
+                 * link is up now (WLAN#1); otherwise it follows the first
+                 * association (opcd_ind_wlan_status). */
+                opcd_platform_link_t lk = {0};
+                if (opcd_platform()->get_link(0, &lk) == 0 && lk.associated)
+                    opcd_ind_radio_up(st);
                 if (st->logged_in) opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_IN);
             }
         }

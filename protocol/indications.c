@@ -85,9 +85,9 @@ ssize_t opc_ind_roaming_pack(uint8_t *frame, size_t cap, uint16_t seq_no,
     if (!in) return -1;
     uint8_t body[OPC_IND_ROAMING_BODY_LEN];
     memset(body, 0, sizeof body);
-    body[0] = (uint8_t)in->current_snr;
-    body[1] = (uint8_t)in->current_rssi;
-    /* body[2..3] reserve */
+    /* SNR/RSSI: 2 B big-endian, sign-extended int16 */
+    opc_be16_write(&body[0], (uint16_t)(int16_t)in->current_snr);
+    opc_be16_write(&body[2], (uint16_t)(int16_t)in->current_rssi);
     memcpy(&body[4], in->connect_ap_mac, 6);
     /* body[10..11] CH Number */
     opc_be16_write(&body[10], in->ch_number);
@@ -103,8 +103,8 @@ int opc_ind_roaming_unpack(const uint8_t *frame, size_t frame_len,
     size_t body_len;
     if (indication_parse(frame, frame_len, OPC_IND_ROAMING, &body, &body_len) != 0) return -1;
     if (body_len < OPC_IND_ROAMING_BODY_LEN) return -1;
-    out->current_snr  = (int8_t)body[0];
-    out->current_rssi = (int8_t)body[1];
+    out->current_snr  = (int8_t)opc_be16_read(&body[0]);
+    out->current_rssi = (int8_t)opc_be16_read(&body[2]);
     memcpy(out->connect_ap_mac, &body[4], 6);
     out->ch_number    = opc_be16_read(&body[10]);
     return 0;

@@ -186,6 +186,10 @@ typedef struct opcd_state {
     uint16_t indication_recipient_port;
     uint8_t  indication_info_bits;
     uint8_t  indication_period_s;
+    /* InitComplete RadioUp(2) ("wireless association complete", spec 4.4.1)
+     * has been reported for the current indication config (#165). Cleared on
+     * every SetIndicationConfig; set when RadioUp goes out. */
+    bool     radio_up_reported;
     uint16_t indication_seq;
     int32_t  indication_tick_counter;   /* seconds since last KeepAlive */
     /* §4.3.9 period coalescing (#105): within one reporting period only the

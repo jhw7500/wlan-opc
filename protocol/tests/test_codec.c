@@ -719,6 +719,80 @@ static int test_ind_roaming(void)
     return 0;
 }
 
+/* Roaming SNR/RSSI are 2 B big-endian sign-extended int16 on the wire
+ * (frame 64..67); -128 (FF 80) is the "no value" marker. The raw bytes are
+ * asserted directly so a round trip through a wrong width cannot hide it. */
+static int test_ind_roaming_wire_pack(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_roaming_t in = { .current_snr = -60, .current_rssi = -50 };
+    ssize_t n = opc_ind_roaming_pack(frame, sizeof frame, 3, &in);
+    ASSERT(n == OPC_HEADER_SIZE + OPC_IND_ROAMING_BODY_LEN, "frame size");
+    ASSERT(frame[64] == 0xFF && frame[65] == 0xC4, "snr -60 -> FF C4 @64");
+    ASSERT(frame[66] == 0xFF && frame[67] == 0xCE, "rssi -50 -> FF CE @66");
+
+    in.current_snr = 28;
+    in.current_rssi = 127;
+    n = opc_ind_roaming_pack(frame, sizeof frame, 3, &in);
+    ASSERT(n > 0, "pack positive");
+    ASSERT(frame[64] == 0x00 && frame[65] == 0x1C, "snr 28 -> 00 1C @64");
+    ASSERT(frame[66] == 0x00 && frame[67] == 0x7F, "rssi 127 -> 00 7F @66");
+
+    in.current_snr = OPC_WLAN_SIGNAL_INVALID;
+    in.current_rssi = OPC_WLAN_SIGNAL_INVALID;
+    n = opc_ind_roaming_pack(frame, sizeof frame, 3, &in);
+    ASSERT(n > 0, "pack no value");
+    ASSERT(frame[64] == 0xFF && frame[65] == 0x80, "snr no value -> FF 80 @64");
+    ASSERT(frame[66] == 0xFF && frame[67] == 0x80, "rssi no value -> FF 80 @66");
+    return 0;
+}
+
+static int test_ind_roaming_wire_unpack(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_roaming_t in = { 0 };
+    ssize_t n = opc_ind_roaming_pack(frame, sizeof frame, 3, &in);
+    ASSERT(n > 0, "pack");
+    opc_ind_roaming_t out;
+
+    /* Raw bytes written over the frame so the expectation is independent of
+     * opc_ind_roaming_pack. */
+    frame[64] = 0xFF; frame[65] = 0x80; frame[66] = 0xFF; frame[67] = 0x80;
+    ASSERT(opc_ind_roaming_unpack(frame, (size_t)n, &out) == 0, "unpack no value");
+    ASSERT(out.current_snr  == -128, "FF 80 -> snr -128");
+    ASSERT(out.current_rssi == -128, "FF 80 -> rssi -128");
+
+    frame[64] = 0xFF; frame[65] = 0xC4; frame[66] = 0xFF; frame[67] = 0xCE;
+    ASSERT(opc_ind_roaming_unpack(frame, (size_t)n, &out) == 0, "unpack negative");
+    ASSERT(out.current_snr  == -60, "FF C4 -> snr -60");
+    ASSERT(out.current_rssi == -50, "FF CE -> rssi -50");
+
+    frame[64] = 0x00; frame[65] = 0x1C; frame[66] = 0x00; frame[67] = 0x7F;
+    ASSERT(opc_ind_roaming_unpack(frame, (size_t)n, &out) == 0, "unpack positive");
+    ASSERT(out.current_snr  == 28,  "00 1C -> snr 28");
+    ASSERT(out.current_rssi == 127, "00 7F -> rssi 127");
+    return 0;
+}
+
+/* Preservation guard: widening SNR/RSSI must not move the fields after them
+ * (body length 12, Connect AP MAC @68, CH Number @74). */
+static int test_ind_roaming_wire_tail(void)
+{
+    uint8_t frame[OPC_FRAME_MAX];
+    opc_ind_roaming_t in = {
+        .current_snr  = -60,
+        .current_rssi = -50,
+        .ch_number    = 0x0224,
+    };
+    fill_mac(in.connect_ap_mac, 0xA0);
+    ssize_t n = opc_ind_roaming_pack(frame, sizeof frame, 3, &in);
+    ASSERT(n == OPC_HEADER_SIZE + OPC_IND_ROAMING_BODY_LEN, "frame size");
+    ASSERT(opc_be16_read(&frame[6]) == OPC_IND_ROAMING_LENGTH, "length field");
+    ASSERT(macs_equal(&frame[68], in.connect_ap_mac), "ap mac @68");
+    ASSERT(frame[74] == 0x02 && frame[75] == 0x24, "ch @74");
+    return 0;
+}
+
 /* ---- 0x0008 ApDisconnect ---- */
 
 static int test_ind_ap_disconnect(void)
@@ -857,6 +931,9 @@ int main(void)
         { "ind_init_complete",      test_ind_init_complete },
         { "ind_wlan_status_change", test_ind_wlan_status_change },
         { "ind_roaming",            test_ind_roaming },
+        { "ind_roaming_wire_pack",  test_ind_roaming_wire_pack },
+        { "ind_roaming_wire_unpack", test_ind_roaming_wire_unpack },
+        { "ind_roaming_wire_tail",  test_ind_roaming_wire_tail },
         { "ind_ap_disconnect",      test_ind_ap_disconnect },
         { "ind_fault_detect",       test_ind_fault_detect },
         { "ind_reset_notice",       test_ind_reset_notice },

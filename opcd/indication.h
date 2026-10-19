@@ -12,6 +12,11 @@ extern "C" {
  * indication_info_bits or the call is suppressed. */
 int opcd_ind_init_complete (opcd_state_t *st, uint32_t status);
 int opcd_ind_wlan_status   (opcd_state_t *st, uint16_t status, uint16_t ch);
+/* InitComplete RadioUp(2), at most once per indication config (#165). Called
+ * when the link is found associated at enable time and by opcd_ind_wlan_status
+ * on the first CONNECTED after enable; later reconnects are WlanStatusChange
+ * only. No-op while indication is disabled. */
+void opcd_ind_radio_up     (opcd_state_t *st);
 int opcd_ind_roaming       (opcd_state_t *st, int8_t snr, int8_t rssi,
                             const uint8_t ap_mac[6], uint16_t ch);
 int opcd_ind_ap_disconnect (opcd_state_t *st, uint16_t msg_id, uint16_t reason,
