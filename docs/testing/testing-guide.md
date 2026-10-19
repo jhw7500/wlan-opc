@@ -194,7 +194,7 @@ vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND
 | `set-indication --to <유니캐스트>` | `OK` |
 | indication ON 중 `device-info` | `NG 0x0010` |
 | `logout` 후 재로그인 → `device-info` | `NG 0x0010` (#160: 통지 설정은 세션 종료 뒤에도 유지) |
-| `set-indication --bits 0x00 --period 0 --to A.B.C.D:PORT` 후 `device-info` | `OK` (통지 해제 후 조회) |
+| 같은 세션(idle 만료 전)에서 `set-indication --bits 0x00 --period 0 --to A.B.C.D:PORT` 후 `device-info` | `OK` (통지 해제 후 조회) |
 
 ### SetRadioConfig의 NXP mode/BW 적용 범위
 

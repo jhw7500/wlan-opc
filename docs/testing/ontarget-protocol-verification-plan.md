@@ -161,14 +161,15 @@ ssh root@192.168.0.100 'systemctl restart opcd'              # 부팅 시퀀스 
 ```
 합격: 수신기에 `req_id=0x0001` Status 단조 전이.
 
-### 3-2. KeepAlive 주기 + teardown
+### 3-2. KeepAlive 주기 + 세션 종료 후 지속(#160) + period=0
 ```bash
 $VHL set-indication --bits 0x80 --period 5 --to $VHLIP:9999   # 5s 주기
 # … 수신기에서 sequence n→n+1 약 5s 간격 …
+$VHL logout                                                  # → #160: 세션이 끝나도 KeepAlive 지속(~5s 간격 sequence 증가)
+$VHL login --password $PW                                    # 재로그인(통지 설정은 그대로 유지됨)
 $VHL set-indication --bits 0x80 --period 0 --to $VHLIP:9999   # period=0 → 통지 안 함
-$VHL logout                                                  # → KeepAlive 지속(#160: 통지 설정 유지)
 ```
-합격: period=5 → ~5s 간격 sequence 증가, **period=0 → 수신 0건**, logout → KeepAlive 지속(#160).
+합격: period=5 → ~5s 간격 sequence 증가, logout 뒤에도 같은 간격으로 sequence 증가(#160), **period=0 → 수신 0건**.
 
 ### 3-3. 이벤트성 트리거 (wpa_cli)
 ```bash

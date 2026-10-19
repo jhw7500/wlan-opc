@@ -910,6 +910,36 @@ int main(void)
     ASSERT(st.indication_enabled, "change-ip fail: indication kept (IP unchanged)");
     stub_apply_ip_set_fail(0);
 
+    /* 14-2. #160: a SUCCESSFUL IP-change apply is now the only release of the
+     *       indication config on the Logout → ChangeIp path (Logout itself keeps
+     *       it), so pin it: after the apply the stream is off and the next
+     *       period tick sends nothing to the old recipient. */
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cli_port);
+        ASSERT(srv >= 0 && cli >= 0, "change-ip ok: loopback sockets");
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_indication(&st, CIP, 0x7F000001, cli_port, OPC_IND_BIT_KEEP_ALIVE, 1);
+        stub_apply_ip_reset();
+        stub_apply_ip_set_fail(0);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK, "change-ip ok: staged");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "change-ip ok: logout arms the change");
+        ASSERT(st.indication_enabled, "change-ip ok: #160 indication still on between Logout and apply");
+        opcd_apply_pending_ip_change(&st);   /* main loop applies after the Logout ack */
+        ASSERT(stub_apply_ip_calls() == 1, "change-ip ok: platform apply called");
+        ASSERT(!st.indication_enabled, "change-ip ok: successful IP change disables indication");
+        opcd_ind_tick(&st);                   /* period 1 → would be a KeepAlive if still on */
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "change-ip ok: no KeepAlive to the old recipient after the IP change");
+        close(srv);
+        close(cli);
+    }
+
     /* 14b. SetIPConfigList merges into the committed list (spec §3.3.6 "갱신"):
      *      a later START..END cycle naming only slot 2 must not erase slot 1. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
