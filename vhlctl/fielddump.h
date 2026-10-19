@@ -29,6 +29,7 @@ typedef enum {
     FD_U8,       /* unsigned 8-bit       -> %u (+0x)             */
     FD_I8,       /* signed 8-bit         -> %d  (SNR/RSSI)       */
     FD_U16BE,    /* big-endian u16       -> 0x%04x (%u)          */
+    FD_I16BE,    /* big-endian s16       -> %d  (SNR/RSSI)       */
     FD_U32BE,    /* big-endian u32       -> 0x%08x               */
     FD_MAC,      /* 6 bytes              -> xx:xx:xx:xx:xx:xx    */
     FD_STR,      /* NUL-terminated ascii -> 'text'               */

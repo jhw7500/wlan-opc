@@ -163,6 +163,41 @@ static void test_hint_lifetime_and_interface(void)
     expect_wire(tab, count, 0, 12, zero_mac, "local disconnect clears stale AP hint");
 }
 
+/* nl80211 ROAM carries no SNR/RSSI, so the stager seeds them from link.json.
+ * When that readback is unavailable they must surface as the -128 "no value"
+ * marker (FF 80 on the wire), not 0. The host has no link.json (asserted as
+ * the premise), so the failed-readback branch is the one reached here. */
+static void test_roaming_without_link_readback(void)
+{
+    int before = failures;
+    ASSERT(access(MLAN0_LINK_JSON, F_OK) != 0, "host has no mlan0 link.json (premise)");
+    opcd_platform_evt_t tab[NL_COALESCE_MAX] = {0};
+    size_t count = 0;
+    test_stage(tab, &count, 0, 47, NULL, 0, new_ap, false);
+    const opcd_platform_evt_t *evt = NULL;
+    for (size_t i = 0; i < count; i++)
+        if (tab[i].kind == OPCD_PEVT_ROAMING && tab[i].u.roaming.idx == 0) evt = &tab[i];
+    ASSERT(evt != NULL, "ROAM event emitted");
+    if (evt) {
+        ASSERT(evt->u.roaming.snr == -128 && evt->u.roaming.rssi == -128,
+               "ROAM without link readback: snr/rssi are -128");
+        opc_ind_roaming_t ind = {
+            .current_snr = evt->u.roaming.snr,
+            .current_rssi = evt->u.roaming.rssi,
+            .ch_number = evt->u.roaming.channel,
+        };
+        memcpy(ind.connect_ap_mac, evt->u.roaming.mac, 6);
+        uint8_t wire[76];
+        ASSERT(opc_ind_roaming_pack(wire, sizeof wire, 216, &ind) == 76,
+               "roaming wire length");
+        ASSERT(wire[64] == 0xFF && wire[65] == 0x80 &&
+               wire[66] == 0xFF && wire[67] == 0x80,
+               "ROAM without link readback: FF 80 FF 80 on wire");
+        ASSERT(memcmp(wire + 68, new_ap, 6) == 0, "roaming AP MAC reaches wire");
+    }
+    if (failures == before) puts("ROAM without link readback -> FF 80 FF 80 passed");
+}
+
 static void test_untrusted_frames(void)
 {
     /* A short frame, wrong subtype, STA-origin, zero AP, and multicast AP
@@ -192,6 +227,7 @@ int main(void)
     test_disassoc_and_explicit_mac();
     test_hint_lifetime_and_interface();
     test_untrusted_frames();
+    test_roaming_without_link_readback();
     if (failures) {
         fprintf(stderr, "%d AP disconnect checks failed\n", failures);
         return 1;

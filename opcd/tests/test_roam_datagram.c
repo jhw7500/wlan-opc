@@ -91,8 +91,23 @@ int main(void)
           "to_evt: rssi/snr clamped to int8 range");
     CHECK(roam_datagram_to_evt(
           "{\"ap_mac\":\"04:ba:d6:ec:0b:08\",\"channel\":40,\"freq\":5200}", &evt) == 0 &&
+          evt.u.roaming.rssi == -128 && evt.u.roaming.snr == -128,
+          "to_evt: missing rssi/snr -> -128 (no value)");
+    CHECK(roam_datagram_to_evt(
+          "{\"ap_mac\":\"04:ba:d6:ec:0b:08\",\"channel\":40,\"freq\":5200,"
+          "\"rssi\":-47}", &evt) == 0 &&
+          evt.u.roaming.rssi == -47 && evt.u.roaming.snr == -128,
+          "to_evt: missing snr only -> snr -128, rssi kept");
+    CHECK(roam_datagram_to_evt(
+          "{\"ap_mac\":\"04:ba:d6:ec:0b:08\",\"channel\":40,\"freq\":5200,"
+          "\"snr\":40}", &evt) == 0 &&
+          evt.u.roaming.rssi == -128 && evt.u.roaming.snr == 40,
+          "to_evt: missing rssi only -> rssi -128, snr kept");
+    CHECK(roam_datagram_to_evt(
+          "{\"ap_mac\":\"04:ba:d6:ec:0b:08\",\"channel\":40,\"freq\":5200,"
+          "\"rssi\":0,\"snr\":0}", &evt) == 0 &&
           evt.u.roaming.rssi == 0 && evt.u.roaming.snr == 0,
-          "to_evt: missing rssi/snr -> 0 best-effort");
+          "to_evt: explicit rssi/snr 0 kept (a real value, not no value)");
 
     if (fails == 0) { printf("all roam_datagram tests passed\n"); return 0; }
     printf("%d roam_datagram test(s) FAILED\n", fails);

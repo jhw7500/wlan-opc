@@ -1517,7 +1517,8 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
     case OPCD_NL_ROAM: {
         nl_clear_ap_disc_hint(idx);
         /* nl80211 ROAM carries no SNR/RSSI — seed from the cached link
-         * readback (link.json). On failure the fields stay 0 (best-effort). */
+         * readback (link.json). A metric the readback could not provide
+         * carries the -128 no-value marker (0 would look like a measurement). */
         opcd_platform_link_t link;
         memset(&link, 0, sizeof link);
         (void)nxp_get_link(idx, &link);
@@ -1525,8 +1526,8 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         memset(&pe, 0, sizeof pe);
         pe.kind              = OPCD_PEVT_ROAMING;
         pe.u.roaming.idx     = (uint8_t)idx;
-        pe.u.roaming.snr     = link.snr;
-        pe.u.roaming.rssi    = link.rssi;
+        pe.u.roaming.snr     = link.snr_valid  ? link.snr  : OPC_WLAN_SIGNAL_INVALID;
+        pe.u.roaming.rssi    = link.rssi_valid ? link.rssi : OPC_WLAN_SIGNAL_INVALID;
         /* ROAM reliably carries WIPHY_FREQ, so the channel needs no link
          * fallback (unlike CONNECT/ASSOCIATED) — encode it directly. */
         pe.u.roaming.channel = opc_chan_field(nev->freq_mhz, nev->channel);
