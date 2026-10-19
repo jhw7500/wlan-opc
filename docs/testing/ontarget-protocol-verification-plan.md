@@ -71,7 +71,7 @@ opcd 런타임 파라미터(검증 환경 통제용): `-p <port>`(기본 50607) 
 | **L0** 소켓 도달 | UDP 50607 OTA 왕복 | `$VHL basic-info` + `$VHL --dump basic-info` + tcpdump 병행 | timeout 없이 Vendor/Status 디코드 | `L0.pcap`, `--dump` 콘솔 |
 | **L1** 프레임/헤더 | 64B헤더(8+Reserve56) · **Length=프레임−8** · payload@64 · BE · 빈요구=8B만(Len0) | `$VHL --hex basic-info` / `--hex device-info` | 아래 Length 실측표 일치 | `--hex` 필드덤프 |
 | **L2** 명령 Req/Ack | 10명령 정상 왕복 + Result/Length 적합 | §2 매트릭스 "정상기대" 순차 | Ack `req_id` 일치, Result=OK(0x0000), Length 명세값 | `L2_<cmd>.txt` |
-| **L3** Indication | InitComplete·KeepAlive·이벤트 통지 도달 | §3 `listen` + `set-indication` 2터미널 | period 간격, seq 단조, logout시 teardown | `listen` 로그 + `udp 9999` pcap |
+| **L3** Indication | InitComplete·KeepAlive·이벤트 통지 도달 | §3 `listen` + `set-indication` 2터미널 | period 간격, seq 단조, logout 후 KeepAlive 지속(#160) | `listen` 로그 + `udp 9999` pcap |
 | **L4** 네거티브/견고성/보안 | 거부 매트릭스·세션배타·idle·프레임공격 | §4 | ErrorCause hex 일치 + opcd 미crash(C4 재확인) | `L4.txt` + `journalctl -u opcd` |
 | **L5** 소크/안정성 | 장시간/연속 부하 세션·메모리 안정 | §1 L5 절차(임시 opcd `-i`) | idle 초과시 NG 0x0001, KeepAlive seq 무손실, RSS 안정 | `opcd_idle.log` |
 | **L6** 와이어 독립 교차검증 | vhlctl 불신, 원시바이트 ↔ 스펙 literal | §5 | 바이트 동치 + 스펙 literal 일치 | `.pcap` + 대조표 |
@@ -166,9 +166,9 @@ ssh root@192.168.0.100 'systemctl restart opcd'              # 부팅 시퀀스 
 $VHL set-indication --bits 0x80 --period 5 --to $VHLIP:9999   # 5s 주기
 # … 수신기에서 sequence n→n+1 약 5s 간격 …
 $VHL set-indication --bits 0x80 --period 0 --to $VHLIP:9999   # period=0 → 통지 안 함
-$VHL logout                                                  # → KeepAlive 즉시 중단(teardown)
+$VHL logout                                                  # → KeepAlive 지속(#160: 통지 설정 유지)
 ```
-합격: period=5 → ~5s 간격 sequence 증가, **period=0 → 수신 0건**, logout → 즉시 중단.
+합격: period=5 → ~5s 간격 sequence 증가, **period=0 → 수신 0건**, logout → KeepAlive 지속(#160).
 
 ### 3-3. 이벤트성 트리거 (wpa_cli)
 ```bash

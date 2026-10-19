@@ -19,7 +19,7 @@ OPC 제어 프로토콜은 **사양상 암호화·메시지 인증이 없는 평
 |----|------|-----------|------|
 | SEC-001 | 로그인 세션을 UDP 소스 IP만으로 식별(`holder_ip == client_ip`). 소스 IP 스푸핑으로 기존 세션 탈취 가능. 요청별 시퀀스/논스 검증 없음(`sequence_number`는 에코만). | 신뢰망 전제. (세션 토큰/시퀀스 윈도우는 사양 확장 필요 — 미적용) | 문서화 |
 | 비밀번호 | 컴파일 기본값 `"MyPassword"`가 공개 저장소에 노출 — **장치의 실제 노출은 이 기본 자격증명**. 별개로, 빈 비밀번호를 만들 수 있는 코드 경로(`set-password`로 빈 비번 설정)가 잠재 버그였음. | **빈 비밀번호 인증 거부**(login·set-password 양쪽)로 코드 경로 차단. **기본 비밀번호는 운영 최초에 반드시 변경**(이게 실제 위험). | 부분 완화 |
-| SEC-002 | `SetIndicationConfig`의 indication 수신 IP/포트를 검증 없이 수용 → 인증 후 데몬을 주기 UDP 리플렉터로 악용 가능. | **비유니캐스트 수신자 거부**(`0.0.0.0`·`224.0.0.0/4`·`255.255.255.255` → NG `0x0012`, D10 정정으로 사양값 "IP 주소 이상" 채택)로 group/broadcast 증폭 차단. **indication을 로그인 세션 수명에 종속**(logout·idle-logout·IP 변경 시 자동 중단)시켜 리플렉터 창을 세션 내로 한정. 신뢰망 전제는 유지. | 부분 완화 |
+| SEC-002 | `SetIndicationConfig`의 indication 수신 IP/포트를 검증 없이 수용 → 인증 후 데몬을 주기 UDP 리플렉터로 악용 가능. | **비유니캐스트 수신자 거부**(`0.0.0.0`·`224.0.0.0/4`·`255.255.255.255` → NG `0x0012`, D10 정정으로 사양값 "IP 주소 이상" 채택)로 group/broadcast 증폭 차단. indication 설정은 사양 §4.3.9대로 **리셋·전원 ON·IP 변경 시에만 파기**(Logout·idle-logout은 유지, #160)하므로 리플렉터 창은 세션이 아니라 통지 설정 수명(Info=0 또는 위 파기 조건까지)으로 한정된다. 신뢰망 전제는 유지. | 부분 완화 |
 | SEC-004 | `GetBasicInformation`이 인증 없이, malformed 요청에도 응답 → device 식별 + login-state oracle. | **사양 귀결로 종결(2026-06-12)** — 보강 3종 전부 사양과 충돌: ① §3.3.3 "발행 조건 없음·**반드시 응답한다**"(A9 발주처 답변으로 best-effort 응답 종결)라 파싱 실패 시 무응답 불가, ② Device Status 값 자체가 `0x00000002`="Login 중 상태"로 **사양이 login-state 노출을 정의**, ③ rate-limit도 응답 의무와 충돌(신뢰망 전제 유지, SEC-001과 동일 근거). 함께 묶였던 ARCH-005(read-path 권위 불일치)는 `effective_station_type()` 공유 accessor로 해소. | 문서화(사양 귀결) |
 | ARCH-001 | ErrorCause `0x0010`이 와이어상 4가지 의미(indication-violation / password-mismatch / slot-range / station-type)로 중복. | **사양 고정 값** — 변경 불가. `protocol/ids.h`에 의미별 명명상수로 정리하고 다의성을 명시. 수신측은 **명령 컨텍스트로 해석**. | 문서화 |
 
@@ -31,7 +31,7 @@ OPC 제어 프로토콜은 **사양상 암호화·메시지 인증이 없는 평
   거부하고 임의 유니캐스트 수신자를 받는다(`opcd/handler.c::valid_unicast_ipv4`,
   주석 "Arbitrary unicast is allowed per spec"). loopback(`127.0.0.1`)도 OK로
   문서화되어 있다(`docs/testing/testing-guide.md`). 신뢰망 전제 하에서 비유니캐스트 거부 +
-  세션-수명 종속으로 리플렉터 표면은 충분히 좁다.
+  설정 수명 한정(리셋·전원 ON·IP 변경·Info=0으로만 해제, #160)으로 리플렉터 표면은 충분히 좁다.
 - **`period_seconds` 하한 캡은 적용하지 않는다.** 사양 SetIndicationConfig는
   Indication Period를 **0~255초로 명시**(0=사상 변화 즉시 통지, 1~255=주기 통지)하므로,
   하한 캡(예: 최소 5초)은 **사양 위반**이다. 코드 리뷰 권고였으나 채택하지 않는다.
