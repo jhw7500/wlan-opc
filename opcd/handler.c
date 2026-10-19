@@ -77,18 +77,21 @@ static int mgmt_ip_iface_idx(const opcd_state_t *st)
 
 /* Single owner of session teardown — used by explicit logout, dispatch idle
  * check, and the main-loop timer idle check (previously three divergent
- * copies). Emits the final LOGGED_OUT transition while indication is still
- * enabled so the notification goes out, then clears the session and stops
- * indications: the periodic indication stream (a potential UDP reflector,
- * SEC-002) must not outlive the authenticated session. */
+ * copies). Emits the LOGGED_OUT transition, then ends the session. The
+ * indication config (recipient / Info / Period) and any staged coalesced
+ * state deliberately survive: spec §4.3.9 discards the notification setting
+ * only on reset, power-on and IP-address change, never on Logout (#160).
+ * The recipient is unchanged, so dropping staged changes would lose state
+ * transitions and resetting the FaultDetect latch would re-report an
+ * already-reported congestion. The SEC-002 reflector window is therefore
+ * bounded by the config lifetime (reset / IP change / Info=0), not by the
+ * session — see docs/SECURITY.md. */
 void opcd_session_logout(opcd_state_t *st)
 {
     opcd_ind_init_complete(st, OPC_INIT_STATE_LOGGED_OUT);
     st->session_generation++;
     st->logged_in          = false;
     st->boot_status        = OPC_DEVICE_READY;
-    st->indication_enabled = false;
-    opcd_ind_coalesce_reset(st);   /* drop staged coalesced state changes (#105) */
     /* An open SetIpConfigList cycle dies with its session — otherwise the
      * next login could flush (or trip A17 on) a previous session's stale
      * staging buffer. */

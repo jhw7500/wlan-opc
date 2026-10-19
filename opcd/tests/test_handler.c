@@ -543,9 +543,11 @@ int main(void)
                "E1: ESSID invalid char → 0x0015");
     }
 
-    /* ---- P1: SEC-002 indication session-lifetime + recipient validation ---- */
+    /* ---- #160: indication config outlives the login session (spec §4.3.9
+     *      discards it only on reset / power-on / IP change) + SEC-002
+     *      recipient validation ---- */
 
-    /* 6. logout stops indication (reflector window bounded to the session). */
+    /* 6. logout keeps the indication config (#160). */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     r = do_set_indication(&st, CIP, 0xC0A80063 /*192.168.0.99*/, 6000,
@@ -553,15 +555,59 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK && st.indication_enabled,
            "set-indication unicast: enabled");
     ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "logout ok");
-    ASSERT(!st.indication_enabled, "logout stops indication");
+    ASSERT(st.indication_enabled, "#160: logout keeps indication enabled");
+    ASSERT(st.indication_recipient_ip == 0xC0A80063 && st.indication_recipient_port == 6000 &&
+           st.indication_info_bits == OPC_IND_BIT_KEEP_ALIVE && st.indication_period_s == 5,
+           "#160: logout keeps recipient/info/period");
+    ASSERT(!st.logged_in, "#160: logout still ends the session");
 
-    /* 7. dispatch idle auto-logout also stops indication. */
+    /* 7. dispatch idle auto-logout keeps the indication config too (#160). */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     (void)do_set_indication(&st, CIP, 0xC0A80063, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
     st.idle_deadline = 1;   /* force the deadline into the past */
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT); /* dispatch idle check fires first */
-    ASSERT(!st.indication_enabled, "idle-logout stops indication");
+    ASSERT(st.indication_enabled, "#160: idle-logout keeps indication enabled");
+
+    /* 7b. End-to-end over loopback: after Logout the stream keeps flowing —
+     *     InitComplete(LoggedOut) is still sent, and the next period end still
+     *     emits KeepAlive to the same recipient (#160). */
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cli_port);
+        ASSERT(srv >= 0 && cli >= 0, "#160 e2e: loopback sockets");
+        uint8_t rx[OPC_FRAME_MAX];
+        ssize_t rn;
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        r = do_set_indication(&st, CIP, 0x7F000001, cli_port,
+                              OPC_IND_BIT_INIT_COMPLETE | OPC_IND_BIT_KEEP_ALIVE, 1);
+        ASSERT(r == OPC_RESULT_OK, "#160 e2e: enabled (period 1)");
+        /* enable emits InitComplete Ready / RadioUp / LoggedIn — drain them */
+        int drained = 0;
+        while (drained < 3 && wait_fd_readable(cli, 500) == 0) {
+            rn = recv(cli, rx, sizeof rx, 0);
+            if (rn > 0) drained++;
+        }
+        ASSERT(drained == 3, "#160 e2e: enable emitted 3 InitComplete frames");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "#160 e2e: logout ok");
+        opc_ind_init_complete_t ic;
+        ASSERT(wait_fd_readable(cli, 500) == 0 &&
+               (rn = recv(cli, rx, sizeof rx, 0)) > 0 &&
+               opc_ind_init_complete_unpack(rx, (size_t)rn, &ic) == 0 &&
+               ic.status == OPC_INIT_STATE_LOGGED_OUT,
+               "#160 e2e: logout still emits InitComplete(LoggedOut)");
+        opcd_ind_tick(&st);                     /* period 1 → period end */
+        opc_ind_keep_alive_t ka;
+        ASSERT(wait_fd_readable(cli, 500) == 0 &&
+               (rn = recv(cli, rx, sizeof rx, 0)) > 0 &&
+               opc_ind_keep_alive_unpack(rx, (size_t)rn, &ka) == 0,
+               "#160 e2e: KeepAlive still emitted after logout");
+        close(srv);
+        close(cli);
+    }
 
     /* 8-10. set-indication rejects non-unicast recipients. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
@@ -857,13 +903,42 @@ int main(void)
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
     (void)do_change_ip(&st, CIP, 1);
     st.ip_change_armed_entry  = st.ip_list.slots[0];  /* snapshot, as a real arm would */
-    st.ip_change_commit_armed = true;    /* arm the commit gate directly: a real
-                                          * Logout would pre-clear indication, so
+    st.ip_change_commit_armed = true;    /* arm the commit gate directly to
                                           * exercise the apply unit in isolation (#43) */
     opcd_apply_pending_ip_change(&st);   /* platform apply fails */
     ASSERT(stub_apply_ip_calls() == 1, "change-ip fail: platform apply attempted");
     ASSERT(st.indication_enabled, "change-ip fail: indication kept (IP unchanged)");
     stub_apply_ip_set_fail(0);
+
+    /* 14-2. #160: a SUCCESSFUL IP-change apply is now the only release of the
+     *       indication config on the Logout → ChangeIp path (Logout itself keeps
+     *       it), so pin it: after the apply the stream is off and the next
+     *       period tick sends nothing to the old recipient. */
+    {
+        uint16_t cli_port = 0;
+        int srv = bind_loopback_udp(NULL);
+        int cli = bind_loopback_udp(&cli_port);
+        ASSERT(srv >= 0 && cli >= 0, "change-ip ok: loopback sockets");
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.udp_fd = srv;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        (void)do_set_indication(&st, CIP, 0x7F000001, cli_port, OPC_IND_BIT_KEEP_ALIVE, 1);
+        stub_apply_ip_reset();
+        stub_apply_ip_set_fail(0);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165);
+        (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
+        ASSERT(do_change_ip(&st, CIP, 1) == OPC_RESULT_OK, "change-ip ok: staged");
+        ASSERT(do_logout(&st, CIP) == OPC_RESULT_OK, "change-ip ok: logout arms the change");
+        ASSERT(st.indication_enabled, "change-ip ok: #160 indication still on between Logout and apply");
+        opcd_apply_pending_ip_change(&st);   /* main loop applies after the Logout ack */
+        ASSERT(stub_apply_ip_calls() == 1, "change-ip ok: platform apply called");
+        ASSERT(!st.indication_enabled, "change-ip ok: successful IP change disables indication");
+        opcd_ind_tick(&st);                   /* period 1 → would be a KeepAlive if still on */
+        ASSERT(wait_fd_readable(cli, 300) != 0,
+               "change-ip ok: no KeepAlive to the old recipient after the IP change");
+        close(srv);
+        close(cli);
+    }
 
     /* 14b. SetIPConfigList merges into the committed list (spec §3.3.6 "갱신"):
      *      a later START..END cycle naming only slot 2 must not erase slot 1. */
@@ -2454,21 +2529,28 @@ int main(void)
             ASSERT(wait_fd_readable(cli, 200) != 0, "clamp: exactly one flush for the huge elapsed");
         }
 
-        /* 23h. opcd_session_logout also drops staged state — the second
-         *      coalesce_reset call site (#105 OpenCode PR #116). White-box: a
-         *      staged change must be gone after logout (can't flush post-logout
-         *      since indication is disabled, so assert the slot directly). */
+        /* 23h. #160: opcd_session_logout no longer drops staged state — the
+         *      recipient is unchanged, so a change staged before Logout is still
+         *      flushed at the period end (coalesce_reset stays only in
+         *      SetIndicationConfig). */
         {
             init_state(&st, OPC_PASSWORD_DEFAULT);
             st.udp_fd = srv;
             (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
             r = do_set_indication(&st, LOOP, 0x7F000001, cli_port, OPC_IND_BIT_WLAN_STATUS_CHANGE, 5);
-            ASSERT(r == OPC_RESULT_OK, "logout-reset: enabled (period 5)");
+            ASSERT(r == OPC_RESULT_OK, "logout-keep: enabled (period 5)");
             opcd_ind_wlan_status(&st, OPC_WLAN_STATUS_CONNECTED, 0x0230);   /* staged */
-            ASSERT(st.indication_coalesce[0].wlan_pending, "logout-reset: change staged before logout");
+            ASSERT(st.indication_coalesce[0].wlan_pending, "logout-keep: change staged before logout");
             opcd_session_logout(&st);
-            ASSERT(!st.indication_coalesce[0].wlan_pending,
-                   "logout-reset: logout dropped the staged change");
+            ASSERT(st.indication_coalesce[0].wlan_pending,
+                   "logout-keep: #160 logout keeps the staged change");
+            opcd_ind_tick_elapsed(&st, 5);                                /* period end */
+            ASSERT(wait_fd_readable(cli, 1000) == 0, "logout-keep: staged change flushed after logout");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_ind_wlan_status_change_t wkeep;
+            ASSERT(rn > 0 && opc_ind_wlan_status_change_unpack(rx_buf, (size_t)rn, &wkeep) == 0 &&
+                   wkeep.wlan_status == OPC_WLAN_STATUS_CONNECTED && wkeep.indication_ch == 0x0230,
+                   "logout-keep: flushed frame carries the pre-logout state");
         }
 
         st.store_async = NULL;
