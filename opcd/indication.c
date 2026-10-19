@@ -97,8 +97,16 @@ static int emit_ap_disconnect(opcd_state_t *st, uint16_t msg_id, uint16_t reason
  * opcd_ind_tick; with period 0 it is notified on arrival, as the spec requires
  * (p.37, unchanged since Rev1.00). Only idx 0 is staged under the mlan0-only
  * policy (opcd.c drops idx != 0). */
+void opcd_ind_radio_up(opcd_state_t *st)
+{
+    if (!st->indication_enabled || st->radio_up_reported) return;
+    st->radio_up_reported = true;
+    (void)opcd_ind_init_complete(st, OPC_INIT_STATE_RADIO_UP);
+}
+
 int opcd_ind_wlan_status(opcd_state_t *st, uint16_t status, uint16_t ch)
 {
+    if (status == OPC_WLAN_STATUS_CONNECTED) opcd_ind_radio_up(st);
     if (!(st->indication_info_bits & OPC_IND_BIT_WLAN_STATUS_CHANGE)) return 0;
     if (st->indication_period_s > 0) {
         struct opcd_ind_coalesce *c = &st->indication_coalesce[0];
@@ -138,7 +146,7 @@ void opcd_ind_coalesce_reset(opcd_state_t *st)
 {
     for (size_t i = 0; i < sizeof st->indication_coalesce / sizeof st->indication_coalesce[0]; i++)
         st->indication_coalesce[i] = (struct opcd_ind_coalesce){0};
-    /* A new recipient/config (or a new session) has no knowledge of an
+    /* A new recipient/config has no knowledge of an
      * ONGOING congestion — forget the entry latch so the next probe sample
      * reports it as a fresh entry (#121). */
     opcd_fault_probe_reset_latch(&st->fault_probe);

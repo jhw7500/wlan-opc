@@ -109,7 +109,7 @@ ID/Length 는 `protocol/ids.h`·`protocol/commands.h`·스펙 §3.3 검증값. E
 | 명령 | CmdID | vhlctl | Login | Req Len | Ack Len | 정상기대 | 대표 네거티브 → ErrorCause | 근거 |
 |---|---|---|---|---|---|---|---|---|
 | Login | `0xF001` | `login --password PW` | — | 184 | 60 | Result=OK, status→0x02 | 빈/오타 비번→**0x0010** ; 2중(타 IP)→**0x0002** ; 기동중→0x0001 | §3.3.1 |
-| Logout | `0xF002` | `logout` | — | 0 | 60 | OK, teardown | 미로그인→0x0001 ; 타 IP→0x0002 | §3.3.2 |
+| Logout | `0xF002` | `logout` | — | 0 | 60 | OK, 세션 종료(통지 설정은 유지 #160) | 미로그인→0x0001 ; 타 IP→0x0002 | §3.3.2 |
 | GetBasicInfo | `0x0001` | `basic-info` | 불요 | 0 | 72 | Vendor=0x00902cfb, Station=SINGLE(0x0001) | (발행조건 없음, 항상 응답) | §3.3.3 |
 | GetDeviceInfo | `0x0002` | `device-info` | 요 | 0 | 408 | 전 필드 디코드 | 미로그인→**0x0001** ; indication ON 중→**0x0010** | §3.3.4 |
 | SetPassword | `0x1001` | `set-password --old --new` | 요 | 312 | 60 | OK + restart 후 잔존 | 구비번 오타→0x0010 ; 신비번 문자/NUL→0x0013/0x0014 ; NVRAM→0x0004 | §3.3.5 |
@@ -168,8 +168,11 @@ $VHL set-indication --bits 0x80 --period 5 --to $VHLIP:9999   # 5s 주기
 $VHL logout                                                  # → #160: 세션이 끝나도 KeepAlive 지속(~5s 간격 sequence 증가)
 $VHL login --password $PW                                    # 재로그인(통지 설정은 그대로 유지됨)
 $VHL set-indication --bits 0x80 --period 0 --to $VHLIP:9999   # period=0 → 통지 안 함
+$VHL set-indication --bits 0x00 --period 0 --to $VHLIP:9999   # Info=0 → 통지 해제
+$VHL device-info                                             # 통지 해제 뒤 조회 가능 확인
+$VHL logout
 ```
-합격: period=5 → ~5s 간격 sequence 증가, logout 뒤에도 같은 간격으로 sequence 증가(#160), **period=0 → 수신 0건**.
+합격: period=5 → ~5s 간격 sequence 증가, logout 뒤에도 같은 간격으로 sequence 증가(#160), **period=0 → 수신 0건**, Info=0 뒤 device-info OK.
 
 ### 3-3. 이벤트성 트리거 (wpa_cli)
 ```bash
@@ -304,13 +307,14 @@ echo "== RESULT: $pass PASS / $fail FAIL =="
 | `set-radio` | **wpa_supplicant conf의 freq 실제 수정** | 영구(reboot 잔존) | OK 경로는 링크 끊김 가능 → **NG 경로 우선**(apply 전 거부, 링크 무영향) |
 | `change-ip` | nxp 백엔드가 **eth0 관리 IP 를 `ip addr` 로 실변경** | 휘발(reboot→`22-eth0.network` 복원; mlan /32 보존) | **OK(armed)는 logout 시 ssh 경로 IP 변경→끊김** → 콘솔 필요. 원격은 **conflict(0x0012) 거부 경로만** |
 | `reset` | opcd 재시작(`RestartSec=2`) | — | systemd 자동 복구. 사전 enabled 확인 |
+| `set-indication` | 통지 수신처·Info·Period 설정, 켜진 동안 device-info 거부(0x0010) | 휘발; Logout·idle 만료에도 유지; 리셋/재기동·ChangeIp 적용·Info=0으로만 해제 | 정리는 `--bits 0x00` 뒤 `logout` 또는 opcd 재기동 |
 
 **황금 규칙**
 1. 실타깃 배포 전 바이너리 백업(`opcd.bak.<date>`, `vhlctl.bak.<date>`) + sha 검증.
 2. config 쓰기 검증은 **NG/conflict 경로 우선**, OK+persist 는 별도 통제 세션(콘솔 가능 시).
 3. `change-ip` OK · `set-radio` OK 는 ssh 경로/무선 링크를 끊을 수 있으므로 **시리얼 콘솔 확보 후**에만.
 4. idle 테스트는 **임시 opcd**(별도 포트 55556, `-i N`)로 격리 후 `pkill`.
-5. 세션 종료 시 반드시 `logout`, 백업/임시파일 정리, 최종 `systemctl is-active opcd` = active.
+5. 세션 종료 시 반드시 `logout`(통지를 켰으면 `set-indication --bits 0x00`으로 끄고 `logout`), 백업/임시파일 정리, 최종 `systemctl is-active opcd` = active.
 
 ---
 
@@ -321,7 +325,7 @@ L0/L1 와이어(64B 헤더 / Length=프레임−8 / offset 64, `--dump`·`--hex`
 login/logout · device-info(408) · **P0** 빈/오타 비번 0x0010 + 비번파일 sha 불변 ·
 **세션 배타** 2nd-host 0x0002 · indication 중 device-info 0x0010 ·
 **P1** 비유니캐스트 거부 0x0012(#34 정정) · **idle 자동로그아웃** 0x0001 ·
-KeepAlive 주기+teardown · ResetNotice 0x0020 · reset+systemd 재기동 ·
+KeepAlive 주기(teardown은 #160으로 폐기; Logout 뒤 지속은 실타깃 미검증 → 남은 갭) · ResetNotice 0x0020 · reset+systemd 재기동 ·
 set-ip-list START/END+conflict 0x0012 · netmask·6G freq 거부 · set-radio mode/bw/freq NG ·
 WlanStatusChange(#46) · **Roaming(0x0004) notify 경로**(#64/#83 — roam_notify 수동 트리거
 wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
@@ -333,6 +337,7 @@ wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
 | **P1** | `change-ip` 실 IP 적용 + power-cycle 복원 | OK 시 ssh 끊김 | **시리얼 콘솔**에서 logout 후 `ip addr` 확인, 재부팅 후 복원 |
 | **P1** | `set-radio` OK+persist & mode/bw/ch **실드라이버 반영** | wpa freq 실수정 | 콘솔에서 OK 후 reboot 잔존 + `iw dev mlan0 link` 대조 |
 | **P2** | ApDisconnect MAC(#47) | AP-주도 deauth 환경 필요 | AP 에서 강제 deauth 유발(테스트 AP) |
+| **P2** | #160 Logout 뒤 통지 지속(KeepAlive·InitComplete(LoggedOut)) | 실타깃 미검증(호스트 단위시험만) | §3-2 절차로 logout 뒤 sequence 증가 확인 후 `--bits 0x00`으로 해제 |
 | **P2** | NVRAM 2분 응답 예산 | 장시간 | set-password/set-ip-list/set-radio 응답시간 120s 이내 계측 |
 | **P3** | Roaming 자연발화 — 3훅 외 로밍 경로(bgscan 등) 미커버 가능성 | notify 는 wifi_roam·passive_roam 훅에서만 발행(#83) | 임계하회 자율 로밍 유발 후 0x0004 수신 확인(차기) |
 | **P3** | FaultDetect 실폭주 | CPU/Mem/Net 폭주 유발 | stress-ng 등으로 Congestion 유발 |

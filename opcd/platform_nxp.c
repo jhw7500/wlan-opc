@@ -1427,6 +1427,20 @@ static uint16_t g_ap_disc_msgid[NXP_WLAN_COUNT_MAX] = {
 };
 static uint8_t g_ap_disc_mac[NXP_WLAN_COUNT_MAX][6];
 
+/* Last association CH (band<<8 | channel) per interface (#166): the disconnect
+ * WlanStatusChange carries the CH that was in effect (spec 4.4.2). Updated on
+ * association, channel change and roaming; OPC_WLAN_CH_UNSET (0xFFFF, spec
+ * 4.2.2) while no channel is known, e.g. before the first association. */
+static uint16_t g_last_ch[NXP_WLAN_COUNT_MAX] = {
+    OPC_WLAN_CH_UNSET, OPC_WLAN_CH_UNSET,
+};
+
+static void nl_note_ch(int idx, uint16_t ch_field)
+{
+    if (idx < 0 || idx >= NXP_WLAN_COUNT_MAX) return;
+    g_last_ch[idx] = ch_field ? ch_field : OPC_WLAN_CH_UNSET;
+}
+
 static void nl_clear_ap_disc_hint(int idx)
 {
     if (idx < 0 || idx >= NXP_WLAN_COUNT_MAX) return;
@@ -1471,6 +1485,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.u.wlan_status.channel = opc_assoc_chan_field(
             nev->freq_mhz, nev->channel,
             kfreq != 0, kfreq, kch);
+        nl_note_ch(idx, pe.u.wlan_status.channel);
         nl_coalesce_put(tab, count, &pe);
         break;
     }
@@ -1511,7 +1526,8 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
          * later drop (e.g. a deauth/disassoc frame with no following DISCONNECT). */
         nl_clear_ap_disc_hint(idx);
 
-        /* Then the link returns to UP (associated→up), channel cleared.
+        /* Then the link returns to UP (associated→up), carrying the CH that was
+         * in effect (#166; 0xFFFF if never known).
          * OPCD_WLAN_STATUS_UP = "link up, awaiting association" (platform.h:83),
          * the correct post-disconnect state; the consumer maps it to wire
          * DISCONNECTED. */
@@ -1519,7 +1535,9 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.kind                  = OPCD_PEVT_WLAN_STATUS;
         pe.u.wlan_status.idx     = (uint8_t)idx;
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_UP;
-        pe.u.wlan_status.channel = 0;
+        pe.u.wlan_status.channel =
+            (idx >= 0 && idx < NXP_WLAN_COUNT_MAX) ? g_last_ch[idx]
+                                                   : OPC_WLAN_CH_UNSET;
         nl_coalesce_put(tab, count, &pe);
         break;
 
@@ -1537,7 +1555,8 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
     case OPCD_NL_ROAM: {
         nl_clear_ap_disc_hint(idx);
         /* nl80211 ROAM carries no SNR/RSSI — seed from the cached link
-         * readback (link.json). On failure the fields stay 0 (best-effort). */
+         * readback (link.json). A metric the readback could not provide
+         * carries the -128 no-value marker (0 would look like a measurement). */
         opcd_platform_link_t link;
         memset(&link, 0, sizeof link);
         (void)nxp_get_link(idx, &link);
@@ -1545,11 +1564,12 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         memset(&pe, 0, sizeof pe);
         pe.kind              = OPCD_PEVT_ROAMING;
         pe.u.roaming.idx     = (uint8_t)idx;
-        pe.u.roaming.snr     = link.snr;
-        pe.u.roaming.rssi    = link.rssi;
+        pe.u.roaming.snr     = link.snr_valid  ? link.snr  : OPC_WLAN_SIGNAL_INVALID;
+        pe.u.roaming.rssi    = link.rssi_valid ? link.rssi : OPC_WLAN_SIGNAL_INVALID;
         /* ROAM reliably carries WIPHY_FREQ, so the channel needs no link
          * fallback (unlike CONNECT/ASSOCIATED) — encode it directly. */
         pe.u.roaming.channel = opc_chan_field(nev->freq_mhz, nev->channel);
+        nl_note_ch(idx, pe.u.roaming.channel);
         memcpy(pe.u.roaming.mac, nev->mac, 6);
         nl_coalesce_put(tab, count, &pe);
         break;
@@ -1561,6 +1581,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.u.wlan_status.idx     = (uint8_t)idx;
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_CHANNEL_CHANGE;
         pe.u.wlan_status.channel = opc_chan_field(nev->freq_mhz, nev->channel);
+        nl_note_ch(idx, pe.u.wlan_status.channel);
         nl_coalesce_put(tab, count, &pe);
         break;
 

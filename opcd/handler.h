@@ -36,10 +36,12 @@ void opcd_apply_pending_ip_change(opcd_state_t *st);
  * the failure ack is never delayed by a second (possibly timing-out) apply. */
 void opcd_radio_revert_drain(opcd_state_t *st);
 
-/* Single owner of session teardown: emits the final LOGGED_OUT indication,
- * clears the login session, and stops the indication stream. Called from the
- * explicit Logout handler, the dispatch idle check, and the main-loop timer
- * idle check so all three paths share one set of side effects. */
+/* Single owner of session teardown: emits the final LOGGED_OUT indication and
+ * clears the login session. The indication config, the staged coalesced state
+ * and the FaultDetect notify latch survive session end (#160, spec 4.3.9) —
+ * only a reset, an applied IP-address change or Info=0 end the stream. Called
+ * from the explicit Logout handler, the dispatch idle check, and the main-loop
+ * timer idle check so all three paths share one set of side effects. */
 void opcd_session_logout(opcd_state_t *st);
 
 /* D12/D13 lenient receive-length policy (2026-06-16): given a datagram with

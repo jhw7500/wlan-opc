@@ -76,6 +76,15 @@ static void test_render_kinds(void)
     fd_render(out, sizeof out, neg, sizeof neg, 0, &fi8);
     ASSERT(strstr(out, "-71") != NULL, "render i8 negative");
 
+    uint8_t neg16[2] = {0xff, 0x80}; /* -128 */
+    fd_field_t fi16 = {"current_snr", 2, FD_I16BE};
+    fd_render(out, sizeof out, neg16, sizeof neg16, 0, &fi16);
+    ASSERT(strstr(out, "-128") != NULL, "render i16 negative");
+
+    uint8_t pos16[2] = {0x00, 0x7f}; /* 127 */
+    fd_render(out, sizeof out, pos16, sizeof pos16, 0, &fi16);
+    ASSERT(strstr(out, "= 127") != NULL, "render i16 positive");
+
     uint8_t str[8] = {'j','h','w','_','w','l','a','n'};
     fd_field_t fstr = {"essid", 8, FD_STR};
     fd_render(out, sizeof out, str, sizeof str, 0, &fstr);
@@ -230,6 +239,51 @@ static void test_dump_indication_roaming(void)
     free(buf);
 }
 
+/* Roaming SNR/RSSI are 2 B sign-extended int16 (frame 64..67). The raw bytes
+ * are written over a packed frame so the expectation does not depend on
+ * opc_ind_roaming_pack; a 1 B table misreads them. */
+static char *dump_roaming_signal(const uint8_t sig[4])
+{
+    opc_ind_roaming_t in;
+    memset(&in, 0, sizeof in);
+    uint8_t frame[OPC_FRAME_MAX];
+    ssize_t n = opc_ind_roaming_pack(frame, sizeof frame, 5, &in);
+    if (n <= 0) return NULL;
+    memcpy(frame + OPC_HEADER_SIZE, sig, 4);
+
+    char *buf = NULL; size_t sz = 0;
+    FILE *fp = open_memstream(&buf, &sz);
+    fd_dump_indication(fp, OPC_IND_ROAMING, frame, (size_t)n);
+    fclose(fp);
+    return buf;
+}
+
+static void test_dump_indication_roaming_signal(void)
+{
+    static const uint8_t neg[4]  = {0xFF, 0xC4, 0xFF, 0xCE};   /* -60, -50 */
+    static const uint8_t none[4] = {0xFF, 0x80, 0xFF, 0x80};   /* no value */
+
+    char *buf = dump_roaming_signal(neg);
+    ASSERT(buf != NULL, "dump roaming signal: frame built");
+    if (buf) {
+        ASSERT(line_has(buf, "current_snr",  "ff c4"), "dump roaming signal: snr 2B bytes");
+        ASSERT(line_has(buf, "current_snr",  "-60"),   "dump roaming signal: snr line = -60");
+        ASSERT(line_has(buf, "current_rssi", "ff ce"), "dump roaming signal: rssi 2B bytes");
+        ASSERT(line_has(buf, "current_rssi", "-50"),   "dump roaming signal: rssi line = -50");
+        free(buf);
+    }
+
+    buf = dump_roaming_signal(none);
+    ASSERT(buf != NULL, "dump roaming no value: frame built");
+    if (buf) {
+        ASSERT(line_has(buf, "current_snr",  "ff 80"), "dump roaming no value: snr 2B bytes");
+        ASSERT(line_has(buf, "current_snr",  "-128"),  "dump roaming no value: snr line = -128");
+        ASSERT(line_has(buf, "current_rssi", "ff 80"), "dump roaming no value: rssi 2B bytes");
+        ASSERT(line_has(buf, "current_rssi", "-128"),  "dump roaming no value: rssi line = -128");
+        free(buf);
+    }
+}
+
 /* Remaining 5 indication tables — happy-path offset check per type so drift in
  * any of them fails make check (not just keepalive/roaming). */
 static void test_dump_indication_rest(void)
@@ -368,6 +422,7 @@ int main(void)
     test_dump_basic_info();
     test_dump_indication_keepalive();
     test_dump_indication_roaming();
+    test_dump_indication_roaming_signal();
     test_dump_indication_rest();
 
     if (failures == 0) { printf("all fielddump tests passed\n"); return 0; }

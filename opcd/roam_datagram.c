@@ -49,9 +49,10 @@ int roam_datagram_to_evt(const char *json, opcd_platform_evt_t *evt)
         else return -1;
     }
 
-    long rssi = 0, snr = 0, channel = 0, freq = 0;
-    (void)opc_json_integer(json, "rssi", &rssi);      /* optional → 0 (best-effort) */
-    (void)opc_json_integer(json, "snr", &snr);        /* optional → 0 (best-effort) */
+    long rssi = OPC_WLAN_SIGNAL_INVALID, snr = OPC_WLAN_SIGNAL_INVALID;
+    long channel = 0, freq = 0;
+    (void)opc_json_integer(json, "rssi", &rssi);      /* optional → -128 (no value) */
+    (void)opc_json_integer(json, "snr", &snr);        /* optional → -128 (no value) */
     /* channel/freq are mandatory: a Roaming(0x04) carrying channel 0 is
      * meaningless, so drop rather than emit opc_chan_field(0, 0). */
     if (opc_json_integer(json, "channel", &channel) != 0 || channel < 1 || channel > 255)

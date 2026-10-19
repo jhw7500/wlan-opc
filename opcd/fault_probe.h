@@ -31,7 +31,7 @@ extern "C" {
  *     nothing emitted.
  *
  *     WIRE CONSEQUENCE of the band: a re-announced congestion (after
- *     SetIndicationConfig / logout / a failed Period-0 send) reports the
+ *     SetIndicationConfig / a failed Period-0 send) reports the
  *     utilisation measured at that moment, which for a resource resting
  *     inside the band is BELOW threshold_pct — as low as clear_pct. So a
  *     FaultDetect current_val of 75 with an 80% entry threshold is correct,
