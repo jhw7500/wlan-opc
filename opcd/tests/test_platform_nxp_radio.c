@@ -92,6 +92,11 @@ int __wrap_execv(const char *path, char *const argv[])
         _exit(42);
     if (argv[0] != NULL && strcmp(argv[0], "wlan_reboot_policy.sh") == 0) {   /* #164 outcomes of the real script */
         if (getenv("OPCD_NXP_FAIL_RESET") != NULL)       _exit(2);      /* non-zero exit: systemd-run/executor failure (policy gates are bypassed by --force) */
+        if (getenv("OPCD_NXP_RESET_STOPPED") != NULL) {                 /* #179 on the board: the shutdown stops D-Bus, the client exits 1, */
+            kill(getppid(), SIGTERM);                                   /* and opcd.service's stop job TERMs opcd (the caller) right after */
+            _exit(1);
+        }
+        if (getenv("OPCD_NXP_RESET_EXIT1") != NULL)      _exit(1);      /* #179: exit 1 with no stop signal following it */
         if (getenv("OPCD_NXP_RESET_NOEXEC") != NULL)     _exit(127);    /* execv failure / command not found (bash 127) */
         if (getenv("OPCD_NXP_RESET_SIGNALED") != NULL)   raise(SIGTERM); /* the reboot's stop job killed the systemd-run client */
         if (getenv("OPCD_NXP_RESET_KILLED") != NULL)     kill(getpid(), SIGKILL); /* died by another signal: no hand-off evidence */
@@ -275,6 +280,48 @@ int main(int argc, char **argv)
         for (const char *p = log; (p = strstr(p, "path=")) != NULL; p++) execs++;
         ASSERT(execs == 1 && strstr(log, "path=/sbin/") == NULL && strstr(log, "systemctl") == NULL,
                "#164 prepare_reset: no direct reboot fallback after the script refuses");
+
+        /* #179: on the board the client exited 1 when the shutdown the
+         * executor had started stopped D-Bus, and opcd.service's stop job
+         * TERMed opcd right after (sys.log "policy script exited 1 — no reboot
+         * started" while the board rebooted). opcd keeps TERM blocked for its
+         * signalfd; this test blocks it the same way around the call. */
+        sigset_t term_only, saved_mask;
+        sigemptyset(&term_only);
+        sigaddset(&term_only, SIGTERM);
+        sigprocmask(SIG_BLOCK, &term_only, &saved_mask);
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_RESET_STOPPED", "1", 1);
+        ERR_CAPTURE_BEGIN(errlog);
+        int drc = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        unsetenv("OPCD_NXP_RESET_STOPPED");
+        sigset_t pending;
+        sigpending(&pending);
+        int term_left = sigismember(&pending, SIGTERM);
+        if (term_left) {                       /* a regression left it pending: drain it so */
+            struct timespec zero = { 0, 0 };   /* the ASSERT below reports, not the TERM   */
+            (void)sigtimedwait(&term_only, NULL, &zero);
+        }
+        sigprocmask(SIG_SETMASK, &saved_mask, NULL);
+        ASSERT(drc == 0 && ERR_HAS("exited 1") && ERR_HAS("stop signal") && ERR_HAS("reboot under way") &&
+               !ERR_HAS("no reboot started"),
+               "#179 prepare_reset: client exit 1 followed by opcd's stop TERM -> 0, logged as reboot under way (not 'no reboot started')");
+        ASSERT(term_left == 0, "#179 prepare_reset: the stop TERM was consumed by the classification wait");
+        execs = 0;
+        ASSERT(read_log(log, sizeof log) == 0, "#179 prepare_reset: exec log readable");
+        for (const char *p = log; (p = strstr(p, "path=")) != NULL; p++) execs++;
+        ASSERT(execs == 1 && strstr(log, "path=/sbin/") == NULL && strstr(log, "systemctl") == NULL,
+               "#179 prepare_reset: the classification spawned nothing — only the policy script ran");
+
+        unlink(g_exec_log);
+        setenv("OPCD_NXP_RESET_EXIT1", "1", 1);
+        ERR_CAPTURE_BEGIN(errlog);
+        int nsrc = ops->prepare_reset();
+        ERR_CAPTURE_END();
+        unsetenv("OPCD_NXP_RESET_EXIT1");
+        ASSERT(nsrc == 1 && ERR_HAS("exited 1") && ERR_HAS("no reboot started") && !ERR_HAS("stop signal"),
+               "#179 prepare_reset: client exit 1 with no stop TERM within the wait -> 1, still no reboot started");
 
         unlink(g_exec_log);
         setenv("OPCD_NXP_RESET_NOEXEC", "1", 1);

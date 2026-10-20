@@ -268,15 +268,18 @@ typedef struct opcd_platform_ops {
      * package's wlan_reboot_policy.sh with --source opc_reset --force, bounded
      * to 20 s; the script hands the reboot to a transient systemd unit that
      * outlives the call). Return 0 when a reboot is under way — handed off
-     * (the client was stopped by the shutdown it started, or the bound
-     * expired after the hand-off) or held by another request (which may
+     * (the client was stopped by the shutdown it started, the bound
+     * expired after the hand-off, or the client exited non-zero and opcd's
+     * own stop signal followed within a short wait — #179) or held by another
+     * request (which may
      * itself still refuse — not confirmable); OPC_RESET_UNCONFIRMED when the
      * client died by a signal other than the stop job's SIGTERM — whether a
      * reboot started cannot be told (the client may have died before the
      * transient unit existed, or after a hand-off that still reboots the
      * board); any other non-zero value when no reboot was started by this
      * request: the script could not be run, or systemd-run or its executor
-     * failed (with --force the policy gates do not apply). The three classes
+     * failed with no stop signal following (with --force the policy gates do
+     * not apply). The three classes
      * cannot collide: OPC_RESET_UNCONFIRMED is a value the runner never
      * produces itself (fork/setpgid/waitpid report EAGAIN/ENOMEM/EPERM/
      * EINVAL/ECHILD and the script's exit statuses are positive). main still
