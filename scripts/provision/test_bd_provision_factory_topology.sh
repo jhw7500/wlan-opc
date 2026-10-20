@@ -729,6 +729,17 @@ test_rollback_after_ssid_apply_leaves_marker_absent() {
     pass "rollback restores the wpa conf but leaves the ChangeIp ESSID marker absent"
 }
 
+test_help_lists_every_documented_option() {
+    # 헤더 주석에 문서화된 옵션(`#   --name`)은 --help 출력에 빠짐없이 나와야 한다 (고정 줄 범위 회귀 방지).
+    local documented shown
+    documented="$(awk 'NR == 1 { next } /^#   --/ { n++ } !/^#/ { exit } END { print n + 0 }' "$SCRIPT")"
+    shown="$("$SCRIPT" --help | grep -c '^  --')"
+    [ "$documented" -ge 4 ] || fail "header documents fewer options than expected (documented=$documented)"
+    assert_eq "$documented" "$shown" "--help does not list every documented option"
+    "$SCRIPT" --help | grep -q '^  --backup FILE' || fail "--help omits the --backup option"
+    pass "--help lists every documented option ($shown)"
+}
+
 [ -f "$HELPER" ] || fail "topology helper not ready: $HELPER"
 TEST_TMP="$(mktemp -d)"
 trap 'rm -rf "$TEST_TMP"' EXIT
@@ -743,6 +754,7 @@ test_verify_is_read_only_and_rejects_invalid_selector
 test_rollback_restores_absent_and_present_selector_states
 test_ssid_apply_clears_changeip_marker
 test_rollback_after_ssid_apply_leaves_marker_absent
+test_help_lists_every_documented_option
 test_legacy_tar_does_not_modify_selector
 test_mid_apply_failure_rolls_back_files_and_selector
 test_visible_selector_failure_rolls_back_whole_apply

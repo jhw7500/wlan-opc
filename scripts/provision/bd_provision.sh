@@ -825,6 +825,7 @@ case "$CMD" in
     apply)    do_apply ;;
     verify)   do_verify ;;
     rollback) do_rollback ;;
-    ""|-h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # 헤더 주석 전체(첫 비주석 줄 전까지)를 출력한다 — 고정 줄 범위는 헤더가 자라면 옵션 설명을 잘라냈다(PR #177 리뷰).
+    ""|-h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     *) die "알 수 없는 서브커맨드: $CMD (plan|apply|verify|rollback)" ;;
 esac
