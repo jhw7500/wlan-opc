@@ -726,8 +726,11 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   분류돼 opcd는 exit 0으로 끝난다. exit 0은 dedupe 락 충돌뿐이다(다른 요청이 락을 쥐고 있음 — 그 요청이 자기 게이트에서 거부할
   수도 있어 "미확인"으로 적는다). exit≠0이면 재부팅 없이 opcd만 재시작된다(systemd RestartSec 2s, 감사 로그 "reset hook started
   no reboot"): `--force` 아래서는 정책 게이트(10-14)가 적용되지 않으므로 exit≠0은 systemd-run이 실행기를 못 띄웠거나 실행기가 중단된
-  경우이고, 126/127은 실행 불가(스크립트의 소진 코드 127은 상한 안에 도달할 수 없다)다. fork/setpgid 실패(-errno)와 SIGTERM이 아닌
-  시그널 종료도 재부팅 없이 끝나며, exit 0 뒤 락을 쥔 다른 요청이 거부하는 경우는 opcd에서 알 수 없다. 상한 뒤에
+  경우이고, 126/127은 실행 불가(스크립트의 소진 코드 127은 상한 안에 도달할 수 없다)다. fork/setpgid 실패(-errno)도 재부팅 없이
+  끝난다. SIGTERM이 아닌 시그널 종료는 재부팅 여부를 알 수 없는 "미확인"이다 — 클라이언트가 transient unit 생성 전에 죽었을 수도,
+  hand-off 뒤에 죽어 재부팅이 이어질 수도 있다 — 그래서 별도 반환값(`OPC_RESET_UNCONFIRMED`)과 감사 로그 "reset hook could not
+  confirm a reboot"로 구분하고, opcd는 같은 재시작 폴백으로 끝난다(보드가 살아 있으면 재기동). exit 0 뒤 락을 쥔 다른 요청이
+  거부하는 경우는 opcd에서 알 수 없다. 상한 뒤에
   재부팅 경로가 모두 소진되는 경우는 opcd에서 구분할 수 없다(그때는 보드가 그대로 살아 있고 opcd는 이미 재시작됨). `--force`는
   MFG/uptime/cooldown/loop 게이트를 건너뛰지만 dedupe 락은 건너뛰지 않는다. 실기 확인 항목: Ack 뒤 ResetNotice 수신 순서,
   재부팅 발생, 정상 리셋의 경로, 스크립트 부재 시 재시작 폴백. **근거는 판정 가능한 출처로**: 순서는 `--hex listen` 리스너가 Ack를

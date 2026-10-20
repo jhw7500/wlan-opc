@@ -1420,9 +1420,12 @@ static int nxp_prepare_reset(void)
     /* #164: Reset = reboot the board through the package's reboot policy
      * script. --force bypasses the MFG/uptime/cooldown/loop gates (an operator
      * asked for it) but not the dedupe lock. The script hands the work to a
-     * transient unit and waits for it; the result is classified below. When
-     * no reboot was started, main exits for systemd to restart opcd — there
-     * is no reboot by other means. */
+     * transient unit and waits for it; the result is classified below into
+     * "under way" (0), "cannot be told" (OPC_RESET_UNCONFIRMED) and "no
+     * reboot started" (other non-zero). In the last two cases main exits for
+     * systemd to restart opcd — there is no reboot by other means, and when
+     * it cannot be told the board either reboots or comes back with opcd
+     * restarted. */
     const char *argv[] = { "wlan_reboot_policy.sh", "--source", "opc_reset",
                            "--reason", "opc_reset_command", "--force", NULL };
     int wstatus = -1;
@@ -1443,10 +1446,13 @@ static int nxp_prepare_reset(void)
      * expires first (-ETIMEDOUT) while the sequence continues in the
      * transient unit. So 0 here means "a reboot is under way or held by
      * another request" (client killed by SIGTERM, timeout after the hand-off,
-     * dedupe collision) and non-zero means "no reboot started by this request"
-     * (exit N, or the script could not be run). A sequence that exhausts
-     * only after the bound cannot be told from one that rebooted; by then
-     * systemd has restarted opcd and the board is simply still up. */
+     * dedupe collision); OPC_RESET_UNCONFIRMED means "cannot be told" (the
+     * client died by a signal other than SIGTERM — before the transient
+     * unit existed, or after a hand-off that still reboots the board); and
+     * any other non-zero means "no reboot started by this request" (exit N,
+     * or the script could not be run). A sequence that exhausts only after
+     * the bound cannot be told from one that rebooted; by then systemd has
+     * restarted opcd and the board is simply still up. */
     if (rc == 0) {
         /* The lock is taken before the gates a non-forced caller (e.g. the
          * wifi_init emergency path) can still fail at, so the holder may yet
@@ -1468,9 +1474,11 @@ static int nxp_prepare_reset(void)
         }
         /* Any other signal (SIGSEGV, SIGKILL/OOM, an operator's kill) says
          * nothing about a hand-off — the client may have died before the
-         * transient unit existed (Codex on PR #174). */
-        fprintf(stderr, "opcd: opc_reset: policy client killed by signal %d — not the stop job's SIGTERM, no reboot confirmed\n", sig);
-        return -EPROTO;
+         * transient unit existed (Codex on PR #174) or after one that still
+         * reboots the board (Codex on PR #175). Neither "under way" nor "no
+         * reboot started": report it as not confirmed. */
+        fprintf(stderr, "opcd: opc_reset: policy client killed by signal %d — not the stop job's SIGTERM, reboot not confirmed (a hand-off may still reboot the board)\n", sig);
+        return OPC_RESET_UNCONFIRMED;
     }
     if (rc == -EPROTO && wstatus != -1 && WIFEXITED(wstatus)) {
         int code = WEXITSTATUS(wstatus);

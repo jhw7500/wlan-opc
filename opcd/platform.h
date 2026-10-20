@@ -1,11 +1,18 @@
 #ifndef WLAN_OPC_OPCD_PLATFORM_H
 #define WLAN_OPC_OPCD_PLATFORM_H
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "../protocol/commands.h"
+
+/* prepare_reset(): the reboot policy client died by a signal other than the
+ * stop job's SIGTERM, so whether a reboot is under way cannot be told from
+ * here (PR #175 A-R1-001, Codex P2). Distinct from 0 ("under way or held")
+ * and from the "no reboot started" codes (see the prepare_reset contract). */
+#define OPC_RESET_UNCONFIRMED (-EOWNERDEAD)
 
 #ifdef __cplusplus
 extern "C" {
@@ -263,12 +270,18 @@ typedef struct opcd_platform_ops {
      * outlives the call). Return 0 when a reboot is under way — handed off
      * (the client was stopped by the shutdown it started, or the bound
      * expired after the hand-off) or held by another request (which may
-     * itself still refuse — not confirmable); non-zero when no reboot was
-     * started by this request: the script could not be run, systemd-run or
-     * its executor failed (with --force the policy gates do not apply), or
-     * the client died by a signal other than the stop job's SIGTERM. main
-     * still returns 0 in every case and systemd Restart=always brings opcd
-     * back when the board stays up. May be a no-op (stub). */
+     * itself still refuse — not confirmable); OPC_RESET_UNCONFIRMED when the
+     * client died by a signal other than the stop job's SIGTERM — whether a
+     * reboot started cannot be told (the client may have died before the
+     * transient unit existed, or after a hand-off that still reboots the
+     * board); any other non-zero value when no reboot was started by this
+     * request: the script could not be run, or systemd-run or its executor
+     * failed (with --force the policy gates do not apply). The three classes
+     * cannot collide: OPC_RESET_UNCONFIRMED is a value the runner never
+     * produces itself (fork/setpgid/waitpid report EAGAIN/ENOMEM/EPERM/
+     * EINVAL/ECHILD and the script's exit statuses are positive). main still
+     * returns 0 in every case and systemd Restart=always brings opcd back
+     * when the board stays up. May be a no-op (stub). */
     int  (*prepare_reset)(void);
 
     /* Event multiplexing. event_fd() returns -1 if no async events are

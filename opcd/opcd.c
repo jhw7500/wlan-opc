@@ -833,12 +833,17 @@ int main(int argc, char **argv)
         /* #164: the ack and the ResetNotice are already on the wire and the
          * NVRAM queue is reconciled. The platform hook starts the board reboot
          * (nxp: wlan_reboot_policy.sh --force, bounded) and returns 0 when a
-         * reboot is under way, non-zero when none was started (platform.h).
-         * Either way we exit 0: when no reboot was started, systemd's
+         * reboot is under way, OPC_RESET_UNCONFIRMED when that cannot be told
+         * (the policy client died by a signal other than the stop job's
+         * SIGTERM), any other non-zero when none was started (platform.h).
+         * In every case we exit 0: when the board stays up, systemd's
          * Restart=always at least brings opcd back. */
         LOG("reset requested — running the platform reset hook, then exiting");
         int prc = plat->prepare_reset();   /* platform.h: all vtable members non-NULL */
-        if (prc != 0) {
+        if (prc == OPC_RESET_UNCONFIRMED) {
+            LOG("reset: the platform hook could not confirm a reboot (rc=%d) — exiting; systemd restarts opcd if the board stays up", prc);
+            OLOG_WARN("stop: reset hook could not confirm a reboot (policy client died by a signal other than the stop job's SIGTERM; a hand-off may still reboot the board) — exiting, systemd restarts opcd if the board stays up");
+        } else if (prc != 0) {
             LOG("reset: the platform hook started no reboot (rc=%d) — exiting for systemd restart", prc);
             OLOG_ERR("stop: reset hook started no reboot (rc=%d) — exiting, systemd restarts opcd", prc);
         } else {
