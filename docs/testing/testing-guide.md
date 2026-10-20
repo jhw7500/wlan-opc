@@ -737,7 +737,7 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   MFG/uptime/cooldown/loop 게이트를 건너뛰지만 dedupe 락은 건너뛰지 않는다. 실기 확인 항목: Ack 뒤 ResetNotice 수신 순서,
   재부팅 발생, 정상 리셋의 경로, 스크립트 부재 시 재시작 폴백. **근거는 판정 가능한 출처로**: 순서는 `--hex listen` 리스너가 Ack를
   받지 않으므로(별도 소켓) `/var/log/cantops/logger.log`에서 `TX Reset ack seq=` 줄이 `IND ResetNotice(0x0020)` 줄보다 앞인지로,
-  통지 1회·cause 0x01은 리스너 캡처로, 정상 리셋 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal"로 본다
+  통지 1회·cause 0x01은 리스너 캡처로, 정상 리셋 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal" 또는 "then opcd received its stop signal"(#179)로 본다
   (reboot 뒤에 찍히므로 정책 스크립트의 journald 스냅샷에는 없고 영속 journal이 필요; 아니면 시리얼 콘솔). 감사 로그의 "reboot under
   way or held by another request"는 rc 0의 모든 경우에 같아 경로를 구분하지 못한다. **`test-all.sh` §8은 보드를 재부팅시키고
   boot_id 변경·opcd·basic-info 재도달을 기다린 뒤 이 두 근거를 확인한다**(SETUP은 이전 실행의 `etc.testbak`이 남아 있으면 중단, TEARDOWN 복원 실패는 FAIL).

@@ -335,7 +335,7 @@ wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
 
 | 우선 | 갭 | 차단 요인 | 검증 방법 |
 |---|---|---|---|
-| **P1** | **#164 Reset 재부팅 경로**: Ack → ResetNotice 1회(cause 0x01) 순서, boot_id 변경(실재부팅), 정상 리셋이 시그널 경로였는지, 스크립트 부재·실행기 실패 시 재부팅 없이 opcd 재시작 폴백 | 보드 재부팅(ssh 단절, 휘발 상태 초기화); 시그널 경로 근거는 영속 journal 필요 | `test-all.sh` §8(boot_id 대기 + 아래 근거) 또는 수동: boot_id 기록 → `vhlctl reset` → **순서는 `logger.log`의 `TX Reset ack seq=` 줄 < `IND ResetNotice(0x0020)` 줄**(리스너는 Ack를 못 본다) · 1회/cause는 `--hex listen` 캡처 · 시그널 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal"(없으면 시리얼 콘솔; 감사 로그 "reboot under way"는 rc 0 전부 동일해 구분 불가) · boot_id 변경; 폴백은 스크립트를 잠시 옮겨 두고 재시도 |
+| **P1** | **#164 Reset 재부팅 경로**: Ack → ResetNotice 1회(cause 0x01) 순서, boot_id 변경(실재부팅), 정상 리셋이 재부팅 진행 중으로 분류됐는지, 스크립트 부재·실행기 실패 시 재부팅 없이 opcd 재시작 폴백 | 보드 재부팅(ssh 단절, 휘발 상태 초기화); 시그널 경로 근거는 영속 journal 필요 | `test-all.sh` §8(boot_id 대기 + 아래 근거) 또는 수동: boot_id 기록 → `vhlctl reset` → **순서는 `logger.log`의 `TX Reset ack seq=` 줄 < `IND ResetNotice(0x0020)` 줄**(리스너는 Ack를 못 본다) · 1회/cause는 `--hex listen` 캡처 · 정상 리셋 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal" 또는 "then opcd received its stop signal"(#179)(둘 다 없으면 시리얼 콘솔; 감사 로그 "reboot under way"는 rc 0 전부 동일해 구분 불가) · boot_id 변경; 폴백은 스크립트를 잠시 옮겨 두고 재시도 |
 | **P1** | `change-ip` 실 IP 적용 + power-cycle 복원 | OK 시 ssh 끊김 | **시리얼 콘솔**에서 logout 후 `ip addr` 확인, 재부팅 후 복원 |
 | **P1** | `set-radio` OK+persist & mode/bw/ch **실드라이버 반영** | wpa freq 실수정 | 콘솔에서 OK 후 reboot 잔존 + `iw dev mlan0 link` 대조 |
 | **P2** | ApDisconnect MAC(#47) | AP-주도 deauth 환경 필요 | AP 에서 강제 deauth 유발(테스트 AP) |
