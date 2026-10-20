@@ -724,7 +724,9 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   재부팅의 stop job이 opcd 쪽 클라이언트를 SIGTERM으로 끊거나(SIGTERM 종료만 그렇게 분류하고, 다른 시그널 종료는 hand-off의 증거가
   아니라 "미확인"→재시작 폴백) 20 s 상한이 먼저 지나며, 둘 다 "재부팅 진행 중"으로
   분류돼 opcd는 exit 0으로 끝난다. exit 0은 dedupe 락 충돌뿐이다(다른 요청이 락을 쥐고 있음 — 그 요청이 자기 게이트에서 거부할
-  수도 있어 "미확인"으로 적는다). exit≠0이면 재부팅 없이 opcd만 재시작된다(systemd RestartSec 2s, 감사 로그 "reset hook started
+  수도 있어 "미확인"으로 적는다). exit≠0 뒤 최대 5 s 안에 opcd 자신의 stop SIGTERM이 오면(opcd는 TERM을 막아 두므로
+  대기 중으로 남는다) "재부팅 진행 중"으로 분류한다(#179: 실기에서 셧다운이 D-Bus를 멈추자 클라이언트가 exit 1로 끝났고 약 10 ms 뒤
+  opcd.service의 stop job TERM이 왔다). 그 TERM이 오지 않은 exit≠0이면 재부팅 없이 opcd만 재시작된다(systemd RestartSec 2s, 감사 로그 "reset hook started
   no reboot"): `--force` 아래서는 정책 게이트(10-14)가 적용되지 않으므로 exit≠0은 systemd-run이 실행기를 못 띄웠거나 실행기가 중단된
   경우이고, 126/127은 실행 불가(스크립트의 소진 코드 127은 상한 안에 도달할 수 없다)다. fork/setpgid 실패(-errno)도 재부팅 없이
   끝난다. SIGTERM이 아닌 시그널 종료는 재부팅 여부를 알 수 없는 "미확인"이다 — 클라이언트가 transient unit 생성 전에 죽었을 수도,
@@ -735,7 +737,7 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   MFG/uptime/cooldown/loop 게이트를 건너뛰지만 dedupe 락은 건너뛰지 않는다. 실기 확인 항목: Ack 뒤 ResetNotice 수신 순서,
   재부팅 발생, 정상 리셋의 경로, 스크립트 부재 시 재시작 폴백. **근거는 판정 가능한 출처로**: 순서는 `--hex listen` 리스너가 Ack를
   받지 않으므로(별도 소켓) `/var/log/cantops/logger.log`에서 `TX Reset ack seq=` 줄이 `IND ResetNotice(0x0020)` 줄보다 앞인지로,
-  통지 1회·cause 0x01은 리스너 캡처로, 정상 리셋 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal"로 본다
+  통지 1회·cause 0x01은 리스너 캡처로, 정상 리셋 경로는 `journalctl -b -1 -u opcd`의 "policy client terminated by signal" 또는 "then opcd received its stop signal"(#179)로 본다
   (reboot 뒤에 찍히므로 정책 스크립트의 journald 스냅샷에는 없고 영속 journal이 필요; 아니면 시리얼 콘솔). 감사 로그의 "reboot under
   way or held by another request"는 rc 0의 모든 경우에 같아 경로를 구분하지 못한다. **`test-all.sh` §8은 보드를 재부팅시키고
   boot_id 변경·opcd·basic-info 재도달을 기다린 뒤 이 두 근거를 확인한다**(SETUP은 이전 실행의 `etc.testbak`이 남아 있으면 중단, TEARDOWN 복원 실패는 FAIL).

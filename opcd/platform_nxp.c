@@ -1415,6 +1415,44 @@ static int nxp_peer_route_refresh(uint32_t ip_host, uint32_t netmask_host)
     return ret;
 }
 
+/* #179: how long a non-zero policy-client exit waits for opcd's own stop
+ * signal. prepare_reset runs after the watchdog loop has exited; the 20 s
+ * script bound + this stays under opcd.service's WatchdogSec=30s. */
+#ifndef OPC_STOP_SIGNAL_WAIT_MS
+#define OPC_STOP_SIGNAL_WAIT_MS 5000
+#endif
+
+/* #179: wait up to timeout_ms for the SIGTERM of opcd.service's stop job.
+ * On the board the shutdown stopped D-Bus, the waiting systemd-run client
+ * exited 1 ("D-Bus connection terminated"), and the stop job's TERM reached
+ * opcd about 10 ms later. opcd keeps TERM blocked for its signalfd (opcd.c),
+ * so that TERM stays pending and is consumed here — nothing is spawned that
+ * the stop job could kill first (two child-probe variants lost that race on
+ * the board). Returns true only when TERM arrived. */
+static bool nxp_stop_signal_arrives(long timeout_ms)
+{
+    sigset_t term, old;
+    sigemptyset(&term);
+    sigaddset(&term, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &term, &old) != 0) return false;
+    struct timespec deadline, now;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec  += timeout_ms / 1000;
+    deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+    int sig = -1;
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long left_ns = (deadline.tv_sec - now.tv_sec) * 1000000000L + (deadline.tv_nsec - now.tv_nsec);
+        if (left_ns <= 0) break;
+        struct timespec left = { left_ns / 1000000000L, left_ns % 1000000000L };
+        sig = sigtimedwait(&term, NULL, &left);
+        if (sig >= 0 || errno != EINTR) break;
+    }
+    (void)sigprocmask(SIG_SETMASK, &old, NULL);
+    return sig == SIGTERM;
+}
+
 static int nxp_prepare_reset(void)
 {
     /* #164: Reset = reboot the board through the package's reboot policy
@@ -1449,8 +1487,10 @@ static int nxp_prepare_reset(void)
      * dedupe collision); OPC_RESET_UNCONFIRMED means "cannot be told" (the
      * client died by a signal other than SIGTERM — before the transient
      * unit existed, or after a hand-off that still reboots the board); and
-     * any other non-zero means "no reboot started by this request" (exit N,
-     * or the script could not be run). A sequence that exhausts only after
+     * any other non-zero means "no reboot started by this request" (exit N
+     * with no stop signal following it, or the script could not be run). A
+     * non-zero exit followed by opcd's own stop signal is "under way" (#179,
+     * see the WIFEXITED branch). A sequence that exhausts only after
      * the bound cannot be told from one that rebooted; by then systemd has
      * restarted opcd and the board is simply still up. */
     if (rc == 0) {
@@ -1488,12 +1528,20 @@ static int nxp_prepare_reset(void)
          * 127) cannot arrive inside the bound — do_reboot sleeps 20 s after
          * launching /sbin/reboot before returning it — so inside the bound
          * 126/127 mean "could not run", everything else "no reboot started"
-         * (systemd-run/executor failure — the policy gates are bypassed). */
-        if (code == 126 || code == 127)
+         * (systemd-run/executor failure — the policy gates are bypassed) —
+         * unless opcd's own stop signal follows: on the board the client
+         * exited 1 when the shutdown the executor had started stopped D-Bus
+         * (#179), and the shutdown then stops opcd.service. */
+        if (code == 126 || code == 127) {
             fprintf(stderr, "opcd: opc_reset: could not run %s (exit %d: execv failure or command not found) — no reboot started\n",
                     OPC_REBOOT_POLICY_SH, code);
-        else
+        } else if (nxp_stop_signal_arrives(OPC_STOP_SIGNAL_WAIT_MS)) {
+            fprintf(stderr, "opcd: opc_reset: policy client exited %d, then opcd received its stop signal (SIGTERM) within %d ms — the shutdown is under way, reboot under way\n",
+                    code, (int)OPC_STOP_SIGNAL_WAIT_MS);
+            return 0;
+        } else {
             fprintf(stderr, "opcd: opc_reset: policy script exited %d — no reboot started (with --force the policy gates do not apply; a non-zero status here means systemd-run could not start the executor, or the executor aborted)\n", code);
+        }
         return code != 0 ? code : -EPROTO;
     }
     fprintf(stderr, "opcd: opc_reset: could not run %s (rc=%d) — no reboot started\n",

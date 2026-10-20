@@ -89,6 +89,7 @@ $(TESTDIR)/platform_nxp_test.o: ../platform_nxp.c | $(TESTDIR)
 	$(CC) $(CFLAGS) -DOPC_WLAN_APPLY_SH='"/proc/self/exe"' \
 		-DOPC_REBOOT_POLICY_SH='"/proc/self/exe"' \
 		-DOPC_RESET_SCRIPT_TIMEOUT_MS=400 \
+		-DOPC_STOP_SIGNAL_WAIT_MS=300 \
 		-DOPC_PATH_WPA_CONF_MLAN0='"/tmp/opcd_nxp_ip_test/wpa_supplicant-mlan0.conf"' \
 		-DOPC_PATH_ESSID_MARKER='"/tmp/opcd_nxp_ip_test/changeip_essid.restore"' \
 		-DOPC_NTP_DROPIN='"/tmp/opcd_nxp_ip_test/timesyncd.conf.d/opc-ntp.conf"' \

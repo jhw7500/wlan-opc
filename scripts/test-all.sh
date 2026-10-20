@@ -186,11 +186,13 @@ if [ -n "$oa" ] && [ -n "$on" ] && [ "$oa" != none ] && [ "$on" != none ] && [ "
 else
   printf '  \033[31mFAIL\033[0m  Ack→ResetNotice 순서를 logger.log 에서 확인하지 못함 (%s)\n' "${ord:-ssh 실패}"; fail=$((fail+1)); FAILED="${FAILED}\n  - Ack→ResetNotice 순서(logger.log)"
 fi
-# 정상 리셋 경로 근거: "policy client terminated by signal" 은 reboot 가 시작된 뒤 opcd stderr(journal)에 찍히므로
-# 정책 스크립트의 journald 스냅샷(reboot 전)에는 없다. 영속 journal 이면 이전 부팅에서 읽고, 아니면 SKIP(시리얼 콘솔).
-sig=$(vhl_ssh "journalctl -b -1 -u opcd --no-pager 2>/dev/null | grep -c 'policy client terminated by signal'" 2>/dev/null | tail -1)
-if [ "${sig:-0}" -gt 0 ] 2>/dev/null; then printf '  PASS  정상 리셋 경로: 이전 부팅 journal 에 "policy client terminated by signal" (%s회)\n' "$sig"; pass=$((pass+1))
-else skipn "정상 리셋 경로(terminated by signal)" "이전 부팅 journal 없음(휘발 journald) — 시리얼 콘솔에서 확인"; fi
+# 정상 리셋 경로 근거: "policy client terminated by signal"(stop job 의 TERM 이 클라이언트에 먼저 닿음) 또는
+# "then opcd received its stop signal"(클라이언트가 먼저 exit≠0 으로 끝난 뒤 opcd 가 자기 stop TERM 을 받음, #179).
+# 둘 다 reboot 가 시작된 뒤 opcd stderr(journal)에 찍히므로 정책 스크립트의 journald 스냅샷(reboot 전)에는 없다.
+# 영속 journal 이면 이전 부팅에서 읽고, 둘 다 없으면 SKIP(시리얼 콘솔).
+sig=$(vhl_ssh "journalctl -b -1 -u opcd --no-pager 2>/dev/null | grep -cE 'policy client terminated by signal|then opcd received its stop signal'" 2>/dev/null | tail -1)
+if [ "${sig:-0}" -gt 0 ] 2>/dev/null; then printf '  PASS  정상 리셋 경로: 이전 부팅 journal 에 재부팅 진행 중 분류 문구 (%s회)\n' "$sig"; pass=$((pass+1))
+else skipn "정상 리셋 경로(재부팅 진행 중 분류)" "이전 부팅 opcd journal 에서 정상 리셋 문구를 찾지 못함 — 휘발 journald 면 시리얼 콘솔에서 확인"; fi
 
 # ============ 9. Roaming(0x04) — notify 경로 (링크 무영향) ============
 # 이 보드는 host-based 로밍(커널 CMD_ROAM 미발행) → 로밍 실행체가 opcd에 로컬 UDP
