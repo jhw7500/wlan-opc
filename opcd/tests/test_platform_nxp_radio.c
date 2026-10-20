@@ -257,8 +257,9 @@ int main(int argc, char **argv)
         int krc = ops->prepare_reset();
         ERR_CAPTURE_END();
         unsetenv("OPCD_NXP_RESET_KILLED");
-        ASSERT(krc != 0 && ERR_HAS("killed by signal 9") && ERR_HAS("no reboot confirmed") && !ERR_HAS("reboot under way"),
-               "#164 prepare_reset: client killed by SIGKILL (not the stop job) -> non-zero, logged as no reboot confirmed");
+        ASSERT(krc == OPC_RESET_UNCONFIRMED && ERR_HAS("killed by signal 9") && ERR_HAS("reboot not confirmed") &&
+               !ERR_HAS("reboot under way") && !ERR_HAS("no reboot started"),
+               "#164 prepare_reset: client killed by SIGKILL (not the stop job) -> OPC_RESET_UNCONFIRMED, logged as reboot not confirmed (neither under way nor no reboot started)");
 
         unlink(g_exec_log);
         setenv("OPCD_NXP_FAIL_RESET", "1", 1);

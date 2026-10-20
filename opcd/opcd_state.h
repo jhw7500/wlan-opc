@@ -177,8 +177,11 @@ typedef struct opcd_state {
      * rewrite what gets applied). Idle/abandon logout never arms, so the device
      * keeps its current IP; a fresh Login clears any inherited staging — except
      * a Logout-committed change still waiting for the IP-list write
-     * (ip_change_logout_deferred), which survives; the apply then ends any
-     * session established in that window. */
+     * (ip_change_logout_deferred), which survives; once that write completes
+     * with the slot still present the change is armed, and a successful
+     * apply ends any session established in that window (a slot cleared in
+     * the window cancels the change, and a failed apply leaves the session
+     * and the address untouched). */
     bool     ip_change_pending;
     bool     ip_change_commit_armed;
     /* A Logout found an IP-list NVRAM write in flight and left the reserved

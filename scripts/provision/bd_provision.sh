@@ -28,7 +28,10 @@
 #   --ip A.B.C.D/NN   mlan0 관리 IP(CIDR)                      [plan/apply/verify 필수]
 #   --gw A.B.C.D      mlan0 default gateway (미지정 시 기존 Gateway= 불변)
 #   --ntp A.B.C.D     NTP 서버 (미지정 시 timesyncd.conf 불변, set-ntp도 건드리지 않음)
-#   --ssid NAME       무선 SSID (hex로 기록; --psk 필수 동반)
+#   --ssid NAME       무선 SSID (hex로 기록; --psk 필수 동반). 운영자의 영구 SSID 지정이므로 apply 가 끝나면
+#                     OPC ChangeIp ESSID 복원 표식(/usr/local/opc/etc/changeip_essid.restore)을 지워 ChangeIp
+#                     체인을 끝낸다 — conf 가 이미 같은 SSID 라 변경이 없을 때도 지운다(#176). 표식은 백업 대상이
+#                     아니라 rollback 뒤에도 되살아나지 않는다(체인은 끝난 것으로 둔다). verify 는 표식 부재를 확인한다.
 #   --psk PASSPHRASE  WPA2-PSK 평문 8~63자 (따옴표 평문으로 기록)
 #   --profile a|b     b = Option B 3종 토글(peer_route=on, ip_discovery=on,
 #                     arp_ignore_always=off) 적용. a(기본) = 토글 불변·현재값 보고만.
@@ -50,6 +53,8 @@ ROOT="${PROVISION_ROOT:-}"
 NET_FILE="$ROOT/etc/systemd/network/20-mlan0.network"
 TS_FILE="$ROOT/etc/systemd/timesyncd.conf"
 WPA_FILE="$ROOT/etc/wpa_supplicant/wpa_supplicant-mlan0.conf"
+# opcd ChangeIp ESSID 복원 표식 (opcd/essid_marker.h OPC_PATH_ESSID_MARKER; wlan-package#362 3항, #176)
+ESSID_MARKER="$ROOT/usr/local/opc/etc/changeip_essid.restore"
 CONF_CANDIDATES=("$ROOT/opt/wlan/config/wifi_init_conf.json" "$ROOT/etc/wlan/wifi_init_conf.json")
 BACKUP_DIR_DEFAULT="$ROOT/var/backups/bd-provision"
 TOPOLOGY_FILE="$ROOT/usr/local/etc/wifi_factory_topology.json"
@@ -450,6 +455,17 @@ do_plan() {
     [ "$changed" -eq 1 ] && info "적용하려면: apply (동일 인자). 적용 후 재부팅 필요." || info "적용할 변경이 없음."
 }
 
+# --ssid 는 운영자의 영구 SSID 지정이다: opcd ChangeIp 가 남긴 ESSID 복원 표식을 지워 체인을 끝낸다
+# (wlan-package#362 3항, #176). conf 가 이미 같은 SSID 라서 파일 변경이 없을 때도 지운다 — 커밋 토큰과
+# 같은 값은 `opcd -R` 이 자기 변경과 구별하지 못해 다음 부팅에 원래 ESSID 로 되돌리기 때문이다. 표식은
+# 백업 대상이 아니므로 rollback 은 conf 만 되돌리고 표식은 되살리지 않는다(체인은 끝난 것으로 둔다).
+clear_essid_marker() {
+    [ -n "$SSID" ] || return 0
+    [ -e "$ESSID_MARKER" ] || return 0
+    rm -f "$ESSID_MARKER" || die "ChangeIp ESSID 복원 표식 삭제 실패: $ESSID_MARKER"
+    info "ChangeIp ESSID 복원 표식 삭제: $ESSID_MARKER (--ssid 는 영구 지정 — ChangeIp 체인 종료)"
+}
+
 do_apply() {
     validate_args; guard_target; require_conf_if_b; acquire_operation_lock; preflight_topology
     [ -z "$FACTORY_TOPOLOGY" ] || acquire_topology_lock
@@ -476,6 +492,7 @@ do_apply() {
     # 변경이 전혀 없으면 백업·반영·재부팅을 모두 생략 (rollback 이력 오염 방지)
     if [ "${#changed[@]}" -eq 0 ]; then
         info "적용할 파일 변경 없음 — 백업/반영/재부팅 생략"
+        clear_essid_marker
         if [ -n "$NTP" ] && [ -z "$ROOT" ]; then
             timedatectl set-ntp true && info "timedatectl set-ntp true 실행 (멱등)" \
                 || info "경고: set-ntp true 실패 — 수동 확인 필요"
@@ -597,6 +614,9 @@ do_apply() {
         fi
     fi
 
+    # 3b) 반영이 확정된 뒤에만 ChangeIp ESSID 복원 표식을 지운다 (복원 경로에서는 지우지 않는다)
+    clear_essid_marker
+
     # 4) NTP 재활성화 (postinst set-ntp false 래치 해제) — --ntp 지정 시에만, 1회 명령
     if [ -n "$NTP" ] && [ -z "$ROOT" ]; then
         timedatectl set-ntp true && info "timedatectl set-ntp true 실행" \
@@ -644,6 +664,9 @@ do_verify() {
         grep -q "ssid=$hex" "$WPA_FILE" \
             && chk PASS "wpa conf ssid(hex) 일치" \
             || chk FAIL "wpa conf ssid 불일치"
+        [ ! -e "$ESSID_MARKER" ] \
+            && chk PASS "ChangeIp ESSID 복원 표식 없음" \
+            || chk FAIL "ChangeIp ESSID 복원 표식 잔존: $ESSID_MARKER (다음 부팅에 opcd -R 이 SSID 를 되돌릴 수 있음)"
     fi
     if [ -n "$FACTORY_TOPOLOGY" ]; then
         if [ "$TOPOLOGY_CURRENT" = "$FACTORY_TOPOLOGY" ]; then
@@ -802,6 +825,7 @@ case "$CMD" in
     apply)    do_apply ;;
     verify)   do_verify ;;
     rollback) do_rollback ;;
-    ""|-h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # 헤더 주석 전체(첫 비주석 줄 전까지)를 출력한다 — 고정 줄 범위는 헤더가 자라면 옵션 설명을 잘라냈다(PR #177 리뷰).
+    ""|-h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
     *) die "알 수 없는 서브커맨드: $CMD (plan|apply|verify|rollback)" ;;
 esac

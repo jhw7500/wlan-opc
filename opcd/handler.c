@@ -1235,10 +1235,14 @@ static int handle_change_ip_address(opcd_state_t *st, const uint8_t *frame, size
              * new change so a returned OK is never silently dropped by that
              * apply's clear (#43, Codex review). Reachable in a same-drain race
              * and, for a deferred decision, anywhere in the IP-list write
-             * window — the commit is about to switch the device IP regardless,
-             * and the apply then ends the session that logged in meanwhile.
-             * This also keeps the armed window exclusive: no live pending
-             * state exists for the apply to discard. */
+             * window — when that write completes with the slot still present,
+             * on_ready arms the commit and the apply switches the device IP,
+             * ending the session that logged in meanwhile only if the apply
+             * succeeds; a slot cleared in the window cancels the change and a
+             * failed apply leaves both the address and that session as they
+             * are (opcd_apply_pending_ip_change). This also keeps the armed
+             * window exclusive: no live pending state exists for the apply to
+             * discard. */
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;
         } else if (st->ip_list_staging_active) {
             result = OPC_RESULT_NG; err = OPC_ERR_IP_CHANGE_CONFLICT;

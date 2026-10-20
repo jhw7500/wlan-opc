@@ -3001,6 +3001,33 @@ int main(void)
                    zack.result == OPC_RESULT_NG && zack.error_cause == OPC_ERR_NVRAM,
                    "#163 async/fail: the clear's deferred ack is NG/NVRAM");
             st.paths.ip_list = g_iplist_path;
+
+            /* the deferred-window apply itself FAILS: the address did not move,
+             * so the session that logged in during the window is kept and the
+             * armed commit is cleared, not retried (PR #175 A-R1-002 — the
+             * comments used to say the switch and the session end were
+             * unconditional) */
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.udp_fd      = srv;
+            st.store_async = sa;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            (void)do_set_indication(&st, LOOP, 0x0A0A0A0A, 6000, OPC_IND_BIT_KEEP_ALIVE, 5);
+            stub_apply_ip_reset();
+            stub_apply_ip_set_fail(1);
+            memset(&st.ip_change_armed_entry, 0, sizeof st.ip_change_armed_entry);
+            st.ip_change_armed_entry.ip_address  = 0xC0A80166;  /* as on_ready arms it from the committed entry */
+            st.ip_change_armed_entry.subnet_mask = 0xFFFFFF00u;
+            st.ip_change_armed_no     = 2;
+            st.ip_change_pending      = true;
+            st.ip_change_commit_armed = true;
+            opcd_apply_pending_ip_change(&st);
+            ASSERT(stub_apply_ip_calls() == 1 && stub_apply_ip_last_ip() == 0xC0A80166,
+                   "#163 async/apply-fail: the armed change was attempted once");
+            ASSERT(st.logged_in && st.indication_enabled,
+                   "#163 async/apply-fail: a failed apply leaves the session logged in during the deferred window and its indication (the address did not move)");
+            ASSERT(!st.ip_change_commit_armed && !st.ip_change_pending && st.ip_change_armed_no == 0,
+                   "#163 async/apply-fail: the failed commit is cleared, not retried");
+            stub_apply_ip_set_fail(0);
         }
 
         opc_store_async_destroy(sa);

@@ -666,6 +666,80 @@ test_external_selector_update_aborts_without_clobbering_it() {
     pass "generation mismatch rolls back owned files without clobbering external selector"
 }
 
+ssid_hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+
+test_ssid_apply_clears_changeip_marker() {
+    local root="$TEST_TMP/ssid-marker"
+    new_root "$root"
+    local marker="$root/usr/local/opc/etc/changeip_essid.restore"
+    local conf="$root/etc/wpa_supplicant/wpa_supplicant-mlan0.conf"
+    mkdir -p "$root/usr/local/opc/etc"
+    printf 'essid="old"\nslot=128\ntime=1\ntarget=6e6577\napplied="new"\n' > "$marker"
+
+    # --ssid 없는 apply 는 SSID 소유자가 아니므로 표식을 건드리지 않는다
+    run_provision "$root" apply --ip 192.168.0.101/24 >/dev/null
+    [ -e "$marker" ] || fail "apply without --ssid removed the ChangeIp ESSID marker"
+
+    # --ssid 가 conf 를 바꾸면 표식을 지운다
+    run_provision "$root" apply --ip 192.168.0.101/24 --ssid newssid --psk password1 > "$root/apply-ssid.log" 2>&1
+    grep -q "ssid=$(ssid_hex newssid)" "$conf" || fail "apply --ssid did not write the SSID"
+    [ ! -e "$marker" ] || fail "apply --ssid left the ChangeIp ESSID marker"
+    grep -q '복원 표식 삭제' "$root/apply-ssid.log" || fail "apply --ssid did not report the marker removal"
+
+    # 같은 SSID 재프로비저닝(파일 변경 없음)도 표식을 지운다 — #176 의 시나리오
+    printf 'essid="old"\n' > "$marker"
+    run_provision "$root" apply --ip 192.168.0.101/24 --ssid newssid --psk password1 > "$root/apply-noop.log" 2>&1
+    grep -q '변경 없음' "$root/apply-noop.log" || fail "same-SSID re-provision was not a no-op apply"
+    [ ! -e "$marker" ] || fail "same-SSID re-provision left the ChangeIp ESSID marker"
+
+    # --ssid 없는 no-op apply 는 표식을 남긴다
+    printf 'essid="old"\n' > "$marker"
+    run_provision "$root" apply --ip 192.168.0.101/24 > "$root/apply-noop-nossid.log" 2>&1
+    grep -q '변경 없음' "$root/apply-noop-nossid.log" || fail "no-op apply without --ssid was not a no-op"
+    [ -e "$marker" ] || fail "no-op apply without --ssid removed the ChangeIp ESSID marker"
+    rm -f "$marker"
+
+    # verify: --ssid 와 함께 표식이 없으면 PASS, 남아 있으면 FAIL
+    run_provision "$root" verify --ip 192.168.0.101/24 --ssid newssid > "$root/verify.log" 2>&1
+    grep -q '복원 표식 없음' "$root/verify.log" || fail "verify did not report the absent marker"
+    printf 'essid="old"\n' > "$marker"
+    if run_provision "$root" verify --ip 192.168.0.101/24 --ssid newssid > "$root/verify-fail.log" 2>&1; then
+        fail "verify passed with a leftover ChangeIp ESSID marker"
+    fi
+    grep -q '복원 표식 잔존' "$root/verify-fail.log" || fail "verify did not report the leftover marker"
+    [ -e "$marker" ] || fail "verify removed the marker (verify must be read-only)"
+    pass "--ssid apply and same-SSID re-provision clear the ChangeIp ESSID marker; verify checks it"
+}
+
+test_rollback_after_ssid_apply_leaves_marker_absent() {
+    local root="$TEST_TMP/ssid-rollback"
+    new_root "$root"
+    local marker="$root/usr/local/opc/etc/changeip_essid.restore"
+    local conf="$root/etc/wpa_supplicant/wpa_supplicant-mlan0.conf"
+    mkdir -p "$root/usr/local/opc/etc"
+    printf 'essid="old"\n' > "$marker"
+    cp "$conf" "$root/wpa.before"
+    run_provision "$root" apply --ip 192.168.0.101/24 --ssid newssid --psk password1 >/dev/null
+    [ ! -e "$marker" ] || fail "apply --ssid left the ChangeIp ESSID marker"
+    local backup
+    backup="$(find "$root/var/backups/bd-provision" -name 'bd-provision-*.tar' | head -1)"
+    run_provision "$root" rollback --backup "$backup" >/dev/null
+    assert_file_eq "$root/wpa.before" "$conf" "rollback did not restore the wpa conf"
+    [ ! -e "$marker" ] || fail "rollback resurrected the ChangeIp ESSID marker (it is not a backup target)"
+    pass "rollback restores the wpa conf but leaves the ChangeIp ESSID marker absent"
+}
+
+test_help_lists_every_documented_option() {
+    # 헤더 주석에 문서화된 옵션(`#   --name`)은 --help 출력에 빠짐없이 나와야 한다 (고정 줄 범위 회귀 방지).
+    local documented shown
+    documented="$(awk 'NR == 1 { next } /^#   --/ { n++ } !/^#/ { exit } END { print n + 0 }' "$SCRIPT")"
+    shown="$("$SCRIPT" --help | grep -c '^  --')"
+    [ "$documented" -ge 4 ] || fail "header documents fewer options than expected (documented=$documented)"
+    assert_eq "$documented" "$shown" "--help does not list every documented option"
+    "$SCRIPT" --help | grep -q '^  --backup FILE' || fail "--help omits the --backup option"
+    pass "--help lists every documented option ($shown)"
+}
+
 [ -f "$HELPER" ] || fail "topology helper not ready: $HELPER"
 TEST_TMP="$(mktemp -d)"
 trap 'rm -rf "$TEST_TMP"' EXIT
@@ -678,6 +752,9 @@ test_unsafe_shared_selector_lock_fails_before_active_write
 test_profile_and_factory_topology_are_independent
 test_verify_is_read_only_and_rejects_invalid_selector
 test_rollback_restores_absent_and_present_selector_states
+test_ssid_apply_clears_changeip_marker
+test_rollback_after_ssid_apply_leaves_marker_absent
+test_help_lists_every_documented_option
 test_legacy_tar_does_not_modify_selector
 test_mid_apply_failure_rolls_back_files_and_selector
 test_visible_selector_failure_rolls_back_whole_apply
