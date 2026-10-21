@@ -2552,9 +2552,10 @@ int main(void)
          *     in the #105 coalesce slot and flushed at the period end; a
          *     persisting congestion is NOT re-notified; a drop below threshold
          *     is a clear hook (no frame, inquiry Q6) and a later rise is a fresh
-         *     entry. Synthetic /proc/stat source; disk/net sources are left dead
-         *     so only the CPU resource can flag. Probe interval set to 1 s so
-         *     every tick samples. */
+         *     entry. Synthetic /proc/stat source; disk/net/memory sources are
+         *     left dead so only the CPU resource can flag (a live /proc/meminfo
+         *     would make the result depend on the build host). Probe interval
+         *     set to 1 s so every tick samples. */
         {
             char fpd[64], fpstat[128];
             snprintf(fpd, sizeof fpd, "test_handler_fp_%d", (int)getpid());
@@ -2572,6 +2573,8 @@ int main(void)
                      sizeof st.fault_probe.path_diskstats, "%s/none", fpd);
             snprintf(st.fault_probe.net_dir,
                      sizeof st.fault_probe.net_dir, "%s/none", fpd);
+            snprintf(st.fault_probe.path_meminfo,
+                     sizeof st.fault_probe.path_meminfo, "%s/none", fpd);
             opc_ind_fault_detect_t fdi;
 #define T6_CPU(busy, idle) do { \
                 ff = fopen(fpstat, "w"); ASSERT(ff != NULL, "T6: fixture write"); \
@@ -2712,6 +2715,39 @@ int main(void)
             opcd_ind_tick(&st);
             ASSERT(wait_fd_readable(cli, 1000) == 0, "T6: interval 3 — sampled and notified on tick 3");
             rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+
+            /* 23-f. #182: a Memory congestion is notified as FaultDetect
+             *       Congestion ID 0x0002 with the usage % as Current Val. The CPU
+             *       source is taken away so only memory can flag; period 0 is
+             *       still set from 23-d, so the entry goes out on the probe tick. */
+            {
+                char fpmem[96];                  /* fits path_meminfo whole */
+                snprintf(fpmem, sizeof fpmem, "%s/meminfo", fpd);
+                ff = fopen(fpmem, "w");
+                ASSERT(ff != NULL, "#182: meminfo fixture write");
+                if (ff) {
+                    fputs("MemTotal: 1000000 kB\nMemFree: 150000 kB\nBuffers: 0 kB\n"
+                          "Cached: 0 kB\nSlab: 0 kB\n", ff);                 /* 85% */
+                    fclose(ff);
+                }
+                snprintf(st.fault_probe.path_proc_stat,
+                         sizeof st.fault_probe.path_proc_stat, "%s/none", fpd);
+                snprintf(st.fault_probe.path_meminfo,
+                         sizeof st.fault_probe.path_meminfo, "%s", fpmem);
+                st.fault_probe.probe_interval_s = 1;
+                opcd_ind_tick(&st);
+                ASSERT(wait_fd_readable(cli, 1000) == 0,
+                       "#182: memory congestion entry notified (period 0)");
+                rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+                ASSERT(rn > 0 &&
+                       opc_ind_fault_detect_unpack(rx_buf, (size_t)rn, &fdi) == 0 &&
+                       fdi.congestion_id == OPC_CONGESTION_MEMORY && fdi.current_val == 85,
+                       "#182: frame is FaultDetect Memory (0x0002), Current Val 85");
+                opcd_ind_tick(&st);
+                ASSERT(wait_fd_readable(cli, 300) != 0,
+                       "#182: persisting memory congestion is NOT re-notified");
+                unlink(fpmem);
+            }
 #undef T6_CPU
             unlink(fpstat);
             rmdir(fpd);

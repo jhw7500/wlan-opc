@@ -39,9 +39,17 @@ extern "C" {
  *     that governs release. Before #141 the same situation emitted no frame
  *     at all (reviewer A).
  *   - CPU (0x0001):  /proc/stat busy ratio over the interval, current_val = %
- *   - Memory (0x0002): NOT emitted — the target runs swapless, so the spec's
- *     paging-based definition cannot occur; flash pressure is covered by
- *     Disk I/O (0x0003)
+ *   - Memory (0x0002): the target runs swapless, so the spec's paging-based
+ *     definition cannot occur; it is replaced by total memory usage (#182),
+ *     (MemTotal - MemFree - Buffers - Cached - Slab) / MemTotal from
+ *     /proc/meminfo, current_val = % (fraction truncated, which does not move
+ *     the >= threshold decision). That is the figure sysstat 12.7.4's `sar -r`
+ *     %memused printed on the target (board check 2026-10-21), i.e. the MEM
+ *     value the cpu.log logger records. Cached includes tmpfs (Shmem), so RAM
+ *     filled through tmpfs does not count as used — the price of matching
+ *     cpu.log. A level, not a counter: it is evaluated only after the probe's
+ *     first call like the counters, but needs no re-baseline after a read
+ *     failure (the next readable sample is measured)
  *   - Disk (0x0003): /proc/diskstats io_ticks utilisation, current_val = %
  *   - Network (0x0004): (rx+tx) rate vs link speed, threshold = 80% of the
  *     capacity, current_val = link utilisation % (DFK 2026-06-29: 사용률 0-100%;
@@ -95,10 +103,11 @@ typedef struct opcd_fault_probe {
      * and a utilisation sitting inside [clear_pct, threshold_pct) would then be
      * neither an entry nor a clear — losing the one notification the spec
      * allows, which is exactly what rearm exists to prevent (reviewer A, #141). */
-    bool     cpu_congested, disk_congested, net_congested;
-    bool     cpu_notified,  disk_notified,  net_notified;
+    bool     cpu_congested, mem_congested, disk_congested, net_congested;
+    bool     cpu_notified,  mem_notified,  disk_notified,  net_notified;
     /* source paths (overridable for tests) */
     char     path_proc_stat[96];
+    char     path_meminfo[96];
     char     path_diskstats[96];
     char     net_dir[96];           /* /sys/class/net/<if> */
     /* previous counters for delta computation. Each source carries its own
@@ -116,6 +125,7 @@ typedef struct opcd_fault_probe {
 
 typedef struct opcd_fault_report {
     bool     cpu_over;  uint16_t cpu_pct;
+    bool     mem_over;  uint16_t mem_pct;
     bool     disk_over; uint16_t disk_pct;
     bool     net_over;  uint16_t net_pct;
     /* Transitions since the previous sample (#121). Both are derived from the
@@ -127,8 +137,8 @@ typedef struct opcd_fault_report {
      * transition, which is right because there is no announced entry left to
      * withdraw (opcd_ind_fault_clear's only job). cleared stays a Q6 hook:
      * nothing is emitted. */
-    bool     cpu_entered,  disk_entered,  net_entered;
-    bool     cpu_cleared,  disk_cleared,  net_cleared;
+    bool     cpu_entered,  mem_entered,  disk_entered,  net_entered;
+    bool     cpu_cleared,  mem_cleared,  disk_cleared,  net_cleared;
 } opcd_fault_report_t;
 
 /* Defaults: 80% threshold, mmcblk0, eth0, real /proc and /sys paths. */
@@ -164,6 +174,7 @@ typedef enum {
     OPCD_FAULT_RES_CPU = 0,
     OPCD_FAULT_RES_DISK,
     OPCD_FAULT_RES_NET,
+    OPCD_FAULT_RES_MEM,             /* #182 — appended, existing values unchanged */
 } opcd_fault_res_t;
 
 void opcd_fault_probe_rearm(opcd_fault_probe_t *p, opcd_fault_res_t res);
@@ -175,15 +186,20 @@ int  opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out);
 
 /* Pure helpers, unit-tested directly. opcd_fault_evaluate expects
  * elapsed_ms >= 1 (the sampler enforces a 1 ms floor); 0 silently skips the
- * disk and network calculations. It reads the entry latches (*_congested) as
+ * disk and network calculations, and mem_total_kb 0 (meminfo unread) skips the
+ * memory one. It reads the entry latches (*_congested) as
  * well as the thresholds, so *_over is the HYSTERETIC state ("considered
- * congested"), not a bare sample-vs-entry-level comparison (#141). */
+ * congested"), not a bare sample-vs-entry-level comparison (#141).
+ * opcd_fault_parse_meminfo needs all of MemTotal/MemFree/Buffers/Cached/Slab
+ * (a missing field is unknown, not zero) and fails on MemTotal 0. */
 int  opcd_fault_parse_proc_stat(const char *text, uint64_t *busy, uint64_t *total);
 int  opcd_fault_parse_diskstats(const char *text, const char *dev, uint64_t *io_ms);
+int  opcd_fault_parse_meminfo(const char *text, uint64_t *used_kb, uint64_t *total_kb);
 void opcd_fault_evaluate(const opcd_fault_probe_t *p,
                          uint64_t d_busy, uint64_t d_total,
                          uint64_t d_disk_ms, uint64_t elapsed_ms,
                          uint64_t d_net_bytes, unsigned link_mbps,
+                         uint64_t mem_used_kb, uint64_t mem_total_kb,
                          opcd_fault_report_t *out);
 
 #ifdef __cplusplus

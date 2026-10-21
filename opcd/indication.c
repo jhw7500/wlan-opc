@@ -211,8 +211,8 @@ int opcd_ind_fault_detect(opcd_state_t *st, uint16_t cong_id, uint16_t val)
  * regardless of the Indication Period (period 0 included — the stream is
  * off but state changes are still notified on arrival). Only ENTRIES are
  * notified; a clear only drops the latch (inquiry Q6 decides whether the
- * clear itself is a notifiable state change). Memory (0x0002) is
- * deliberately not produced — swapless target, see fault_probe.h. */
+ * clear itself is a notifiable state change). Memory (0x0002) is total memory
+ * usage on this swapless target (#182, see fault_probe.h). */
 static void fault_probe_tick(opcd_state_t *st, uint32_t elapsed_s)
 {
     if (!(st->indication_info_bits & OPC_IND_BIT_FAULT_DETECT)) return;
@@ -224,6 +224,8 @@ static void fault_probe_tick(opcd_state_t *st, uint32_t elapsed_s)
      * Re-arm that resource instead — the next due sample reports it again. */
     if (rep.cpu_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_CPU, rep.cpu_pct) != 0)
         opcd_fault_probe_rearm(&st->fault_probe, OPCD_FAULT_RES_CPU);
+    if (rep.mem_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_MEMORY, rep.mem_pct) != 0)
+        opcd_fault_probe_rearm(&st->fault_probe, OPCD_FAULT_RES_MEM);
     if (rep.disk_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_DISK_IO, rep.disk_pct) != 0)
         opcd_fault_probe_rearm(&st->fault_probe, OPCD_FAULT_RES_DISK);
     if (rep.net_entered && opcd_ind_fault_detect(st, OPC_CONGESTION_NETWORK, rep.net_pct) != 0)
@@ -234,6 +236,7 @@ static void fault_probe_tick(opcd_state_t *st, uint32_t elapsed_s)
      * the clear, so the staged entry must be withdrawn rather than flushed with
      * a value that no longer holds. */
     if (rep.cpu_cleared)  opcd_ind_fault_clear(st, OPC_CONGESTION_CPU);
+    if (rep.mem_cleared)  opcd_ind_fault_clear(st, OPC_CONGESTION_MEMORY);
     if (rep.disk_cleared) opcd_ind_fault_clear(st, OPC_CONGESTION_DISK_IO);
     if (rep.net_cleared)  opcd_ind_fault_clear(st, OPC_CONGESTION_NETWORK);
 }

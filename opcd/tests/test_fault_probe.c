@@ -29,6 +29,26 @@ static void write_file(const char *path, const char *text)
     fclose(f);
 }
 
+/* Synthetic /proc/meminfo with `used_kb` in use under the sar -r formula
+ * (Buffers + Cached + Slab = 50000 kB are not counted as used). SwapCached
+ * follows Cached, as in the kernel's own order, so a substring key match
+ * ("Cached" inside "SwapCached") would overwrite the right value. */
+static void write_meminfo(const char *path, unsigned long long total_kb,
+                          unsigned long long used_kb)
+{
+    char text[256];
+    snprintf(text, sizeof text,
+             "MemTotal:       %llu kB\n"
+             "MemFree:        %llu kB\n"
+             "MemAvailable:   1 kB\n"
+             "Buffers:        10000 kB\n"
+             "Cached:         20000 kB\n"
+             "SwapCached:     7777 kB\n"
+             "Slab:           20000 kB\n",
+             total_kb, total_kb - used_kb - 50000u);
+    write_file(path, text);
+}
+
 int main(void)
 {
     /* 1. /proc/stat parser: busy excludes idle (field 4) and iowait (5). */
@@ -54,32 +74,32 @@ int main(void)
     opcd_fault_probe_t p;
     opcd_fault_probe_init(&p);
     opcd_fault_report_t r;
-    opcd_fault_evaluate(&p, 90, 100, 850, 1000, 0, 0, &r);
+    opcd_fault_evaluate(&p, 90, 100, 850, 1000, 0, 0, 0, 0, &r);
     ASSERT(r.cpu_over && r.cpu_pct == 90,    "evaluate: cpu 90% over at 80");
     ASSERT(r.disk_over && r.disk_pct == 85,  "evaluate: disk 85% over at 80");
     ASSERT(!r.net_over,                      "evaluate: zero traffic not over");
     opcd_fault_evaluate(&p, 79, 100, 0, 1000,
-                        11250000 /* bytes in 1 s = 90 Mbit/s */, 100, &r);
+                        11250000 /* bytes in 1 s = 90 Mbit/s */, 100, 0, 0, &r);
     ASSERT(!r.cpu_over && r.cpu_pct == 79,   "evaluate: cpu 79% under 80");
     /* Network current_val is utilisation % (DFK 2026-06-29, 사용률 0-100%), not raw
      * Mbps: 90 Mbit/s on a 100 Mbit/s link = 90% → over 80%. */
     ASSERT(r.net_over && r.net_pct == 90,    "evaluate: 90Mbps/100link = 90% over 80");
     opcd_fault_evaluate(&p, 0, 100, 0, 1000,
-                        9000000 /* 72 Mbit/s */, 100, &r);
+                        9000000 /* 72 Mbit/s */, 100, 0, 0, &r);
     ASSERT(!r.net_over && r.net_pct == 72,   "evaluate: 72Mbps/100link = 72% under 80");
     /* %, not Mbps: the same 90 Mbit/s on a 200 Mbit/s link = 45% → under 80. */
     opcd_fault_evaluate(&p, 0, 100, 0, 1000,
-                        11250000 /* 90 Mbit/s */, 200, &r);
+                        11250000 /* 90 Mbit/s */, 200, 0, 0, &r);
     ASSERT(!r.net_over && r.net_pct == 45,   "evaluate: 90Mbps/200link = 45% under 80");
     /* over-link traffic saturates at 100%, never wraps past it. */
     opcd_fault_evaluate(&p, 0, 100, 0, 1000,
-                        25000000 /* 200 Mbit/s */, 100, &r);
+                        25000000 /* 200 Mbit/s */, 100, 0, 0, &r);
     ASSERT(r.net_over && r.net_pct == 100,   "evaluate: 200Mbps/100link clamps to 100%");
     /* sub-Mbps precision on a slow link (Gemini review): 9.7 Mbit/s on a
      * 10 Mbit/s link = 97%, not 90% — a whole-Mbps floor before the % would
      * drop the 0.7 Mbit/s and read 9 Mbps → 90%. */
     opcd_fault_evaluate(&p, 0, 100, 0, 1000,
-                        1212500 /* 9.7 Mbit/s = 1212500 B/s */, 10, &r);
+                        1212500 /* 9.7 Mbit/s = 1212500 B/s */, 10, 0, 0, &r);
     ASSERT(r.net_over && r.net_pct == 97,    "evaluate: 9.7Mbps/10link = 97% (no Mbps floor)");
 
     /* 4. conf overrides (key=value; unknown keys and comments ignored). */
@@ -125,6 +145,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 &&
            !r.cpu_over && !r.disk_over && !r.net_over,
            "sample: priming call reports nothing");
@@ -145,6 +166,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s/none", d);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s/none", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0, "sample: prime with dead sources ok");
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 &&
@@ -160,6 +182,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", flate);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s/none", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0,
            "late-source: prime with absent cpu source");
     write_file(flate, "cpu  900000 0 0 100000 0 0 0 0\n");  /* huge since-boot busy */
@@ -185,6 +208,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.cpu_entered && !r.cpu_cleared,
            "latch: priming call enters nothing");
     write_file(fstat, "cpu  900 0 0 1100 0 0 0 0\n");          /* 90% */
@@ -242,6 +266,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
     write_file(fstat, "cpu  900 0 0 1100 0 0 0 0\n");           /* 90% */
     p.mono_ms -= 1000;
@@ -312,6 +337,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
 
     write_file(fstat, "cpu  1081 0 0 1019 0 0 0 0\n");           /* 81% */
@@ -356,6 +382,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
     write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
     (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
@@ -445,6 +472,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
     write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
     write_file(frx, "0\n"); write_file(ftx, "0\n");
@@ -464,6 +492,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     write_file(fstat, "cpu  1000 0 0 1000 0 0 0 0\n");
     write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
     (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
@@ -485,6 +514,7 @@ int main(void)
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s", fdisk);
     snprintf(p.net_dir,        sizeof p.net_dir,        "%s", d);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
     write_file(fspd, "100\n");                     /* link 100 Mbit/s is the
                                                     * authoritative source; it
                                                     * overrides net_capacity_mbps.
@@ -507,6 +537,107 @@ int main(void)
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.net_over && r.net_cleared,
            "hysteresis/net: falling below clear_pct IS the clear");
+
+    /* 11. #182 Memory (0x0002). The target is swapless, so the spec's
+     *     swap-paging definition is replaced by total memory usage, computed
+     *     like sysstat's sar -r %memused (the MEM figure in cpu.log):
+     *     used = MemTotal - MemFree - Buffers - Cached - Slab. */
+    {
+        uint64_t used = 0, mtot = 0;
+        /* Board sample of 2026-10-21 (sysstat 12.7.4): sar printed kbmemused
+         * 247924 for exactly these fields. SwapCached follows Cached as in the
+         * kernel's order, so a substring key match would overwrite Cached. */
+        const char *mi =
+            "MemTotal:        1961704 kB\n"
+            "MemFree:         1435244 kB\n"
+            "MemAvailable:    1556908 kB\n"
+            "Buffers:           39032 kB\n"
+            "Cached:           189180 kB\n"
+            "SwapCached:         4242 kB\n"
+            "Slab:              50324 kB\n"
+            "SReclaimable:      22700 kB\n";
+        ASSERT(opcd_fault_parse_meminfo(mi, &used, &mtot) == 0 &&
+               mtot == 1961704 && used == 247924,
+               "meminfo: used = total-free-buffers-cached-slab (sar kbmemused 247924)");
+        ASSERT(opcd_fault_parse_meminfo("MemTotal: 1000 kB\nMemFree: 100 kB\n"
+                                        "Buffers: 0 kB\nCached: 0 kB\n",
+                                        &used, &mtot) != 0,
+               "meminfo: a missing field (Slab) is unknown, not zero");
+        ASSERT(opcd_fault_parse_meminfo("MemTotal: 0 kB\nMemFree: 0 kB\nBuffers: 0 kB\n"
+                                        "Cached: 0 kB\nSlab: 0 kB\n",
+                                        &used, &mtot) != 0,
+               "meminfo: MemTotal 0 rejected");
+        ASSERT(opcd_fault_parse_meminfo("MemTotal: 1000 kB\nMemFree: 600 kB\n"
+                                        "Buffers: 200 kB\nCached: 200 kB\nSlab: 100 kB\n",
+                                        &used, &mtot) == 0 && mtot == 1000 && used == 0,
+               "meminfo: not-in-use sum above total clamps used to 0 (no wrap)");
+        /* The sum saturates at MemTotal before it can wrap: a plain uint64
+         * addition here would wrap to 1 kB not-in-use and report 999/1000. */
+        ASSERT(opcd_fault_parse_meminfo("MemTotal: 1000 kB\nMemFree: 18446744073709551615 kB\n"
+                                        "Buffers: 2 kB\nCached: 0 kB\nSlab: 0 kB\n",
+                                        &used, &mtot) == 0 && mtot == 1000 && used == 0,
+               "meminfo: an absurd field saturates instead of wrapping to ~100% used");
+    }
+    opcd_fault_probe_init(&p);
+    opcd_fault_evaluate(&p, 0, 0, 0, 1000, 0, 0, 850, 1000, &r);
+    ASSERT(r.mem_over && r.mem_pct == 85,   "evaluate: memory 85% over at 80");
+    opcd_fault_evaluate(&p, 0, 0, 0, 1000, 0, 0, 790, 1000, &r);
+    ASSERT(!r.mem_over && r.mem_pct == 79,  "evaluate: memory 79% under 80");
+    opcd_fault_evaluate(&p, 0, 0, 0, 1000, 0, 0, 850, 0, &r);
+    ASSERT(!r.mem_over && r.mem_pct == 0,   "evaluate: memory total 0 (unread) is not over");
+
+    /* 11b. Through the sampler. Memory is a level, not a counter, yet it shares
+     *      the first-sample rule (the priming call reports nothing) and the
+     *      entry latch, band, rearm, read-failure and reset_latch handling of
+     *      the other resources. The other sources are dead so only memory flags. */
+    {
+        char fmem[96];                       /* fits path_meminfo whole */
+        snprintf(fmem, sizeof fmem, "%s/meminfo", d);
+        opcd_fault_probe_init(&p);
+        ASSERT(strcmp(p.path_meminfo, "/proc/meminfo") == 0,
+               "memory: default source is /proc/meminfo");
+        snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s/none", d);
+        snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
+        snprintf(p.net_dir,        sizeof p.net_dir,        "%s/none", d);
+        snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s", fmem);
+        write_meminfo(fmem, 1000000, 850000);                        /* 85% */
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.mem_over && !r.mem_entered,
+               "memory: priming call reports nothing (shared first-sample rule)");
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.mem_over && r.mem_pct == 85 &&
+               r.mem_entered && !r.cpu_entered && !r.disk_entered && !r.net_entered,
+               "memory: 85% is an ENTRY (memory only)");
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.mem_over && !r.mem_entered,
+               "memory: persisting congestion is NOT entered again");
+        write_meminfo(fmem, 1000000, 750000);                        /* 75%, in band */
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.mem_over && r.mem_pct == 75 &&
+               !r.mem_cleared && !r.mem_entered,
+               "memory: a dip inside the band is NOT a clear");
+        opcd_fault_probe_rearm(&p, OPCD_FAULT_RES_MEM);
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.mem_over && r.mem_entered,
+               "memory: rearm re-enters a congestion resting inside the band");
+        unlink(fmem);
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.mem_over &&
+               !r.mem_entered && !r.mem_cleared,
+               "memory: unreadable source is neither entry nor clear");
+        write_meminfo(fmem, 1000000, 650000);                        /* 65% */
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.mem_over && r.mem_cleared,
+               "memory: falling below clear_pct IS the clear (latch held across the read failure)");
+        write_meminfo(fmem, 1000000, 900000);                        /* 90% */
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.mem_entered,
+               "memory: rising again after a clear is a fresh ENTRY");
+        opcd_fault_probe_reset_latch(&p);
+        p.mono_ms -= 1000;
+        ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.mem_over && r.mem_entered,
+               "memory: reset_latch makes an ongoing congestion a fresh ENTRY");
+        unlink(fmem);
+    }
 
     unlink(fstat); unlink(fdisk); unlink(frx); unlink(ftx); unlink(fspd);
     rmdir(sub); rmdir(d);
