@@ -16,7 +16,7 @@
 | SetRadioConfig | 0x0050 | Runtime apply failure after input validation |
 | ChangeIpAddress | 0x0050 | Subnet clash with the other management interface |
 
-- **장애 통지와 리셋**: CPU·Disk·Network 사용률 폭주의 FaultDetect(0x0010)만으로 자동 리셋하지 않는다. 커널·펌웨어·드라이버 등으로 실제 운용이 불가능해진 경우에는 기존 복구·재부팅 정책을 따르며 Reset Cause 기록 → ResetNotice(0x0020) 송신 시도 → 리셋 경로를 사용한다. AP 미접속이나 일시적인 사용률 상승 자체를 새 즉시 리셋 조건으로 추가하지 않는다.
+- **장애 통지와 리셋**: CPU·Memory·Disk·Network 사용률 폭주의 FaultDetect(0x0010)만으로 자동 리셋하지 않는다. 커널·펌웨어·드라이버 등으로 실제 운용이 불가능해진 경우에는 기존 복구·재부팅 정책을 따르며 Reset Cause 기록 → ResetNotice(0x0020) 송신 시도 → 리셋 경로를 사용한다. AP 미접속이나 일시적인 사용률 상승 자체를 새 즉시 리셋 조건으로 추가하지 않는다.
 - **통지의 실행 범위**: ResetNotice는 OPCd·커널·통신 경로가 동작하고 해당 통지가 설정된 경우에 송신을 시도한다. 커널 완전 정지·송신 경로 소실·HW watchdog/강제 리셋에서는 사전 통지나 상대 수신을 보장할 수 없으므로 복구를 우선한다.
 - **고장 부위별 경로 (사용자 후속 지침)**: 무선·펌웨어·드라이버 장애와 이더넷/커널 장애를 구분하여 검증한다. 무선이 고장 나도 수신기까지의 유선 경로와 OPCd가 살아 있으면 ResetNotice 송신을 시도할 수 있다. 현재 UDP는 wildcard bind와 일반 `sendto`를 사용하며 OS 라우팅을 따른다. 이더넷이 존재한다는 사실만으로 도달 가능하거나 자동으로 경로를 전환한다고 보지 않는다. OPCd 종료 시에는 `Restart=always`로 서비스가 재기동하며, 메인 루프의 1초 heartbeat와 30초 systemd watchdog으로 살아 있는 채 멈춘 OPCd도 서비스만 재시작한다. 저장 worker가 heartbeat를 대신 보내지 않으며 자동 보드 리셋 조건을 연결하지 않았다. 검증 시나리오는 `../testing/testing-guide.md`의 고장 부위별 항목을 참조한다.
 - **재부팅 fallback 보완**: 타겟의 독립 시험 서비스를 정지시키자 기존 reboot policy 자식이 함께 종료되어 다음 단계가 실행되지 않는 결함을 재현했다. 전체 정책을 `DefaultDependencies=no`인 별도 transient service에서 한 번만 실행하도록 변경했고, 호출 서비스 정지 후에도 강제 재부팅/sysrq 대체 표식이 순서대로 실행됨을 확인했다. 실제 강제 리셋이나 최종 shutdown의 전체 프로세스 종료·커널 완전 정지를 시험한 것은 아니다. ResetNotice보다 supplicant/무선 경로가 먼저 종료될 가능성도 별도 제약이다.
@@ -70,7 +70,7 @@
 | **T9** 자율리셋 producer | 배관(emitter `opcd_ind_reset_notice` / consumer / `OPCD_PEVT_RESET_NOTICE` enum)은 완비, **자율 트리거 코드·cause ID 부재**(user reset만 존재) | #35 — 트리거 조건(watchdog/fault)·자율 cause 값 미정 | `platform_nxp.c:1218`, `indication.c:81`, `opcd.c:112`, `ids.h:139` |
 | **A5** 무효문자 검증 | SetPassword/Login/ESSID 모두 NUL종단만 검사, **문자집합(무효문자) 검증 없음**(0x0015 UNUSED) | #35 — '무효문자' 정의가 사양에 부재 | `handler.c:591-632`(SetPassword), `:350-404`(Login) |
 | **wlan_id** Dual 구분 | indication에 wlan_id 필드 없어 **mlan1(idx≠0) 이벤트 드롭** → Dual WLAN#1/#2 구분 불가(잠정 mlan0) | #35 — dual 발행 정책 + 실 dual-radio HW | `opcd.c` on_platform_event |
-| Memory(0x0002) | swapless 타깃이라 사양 정의(페이징) 성립 불가 → **의도적 미발행**(Disk I/O로 일원화) | 확정(코드 변경 불요) | `fault_probe.c` |
+| Memory(0x0002) | ~~의도적 미발행(Disk I/O로 일원화)~~ → **전체 메모리 사용률로 판정해 발행**(#182). swapless 타깃이라 사양 정의(페이징)가 성립하지 않아 `(MemTotal−MemFree−Buffers−Cached−Slab)/MemTotal`(cpu.log MEM = `sar -r` %memused와 같은 식)로 대체, 진입 80 % / 해제 70 %. Cached에 tmpfs(Shmem)가 들어 있어 tmpfs로 찬 RAM은 사용량에서 빠진다(cpu.log 기준과 맞춘 대가) | 발주처 합의 대기(대체 기준·임계값) | `fault_probe.c`, `indication.c` |
 | capability 비트 | `device_info.json` 정적값(전부 1=추정) vs silicon 실광고 미검증 | #35 — 고객사 문의 | `inventory.c` |
 | 0x0018 / gateway | 0x0018(비정상 boundary NG) 벤더 확정 대기 / gateway는 #27의 미적용 결정이 #162(2026-10-17)로 **대체되어 휘발 적용** | #35(A17) / #27(확정) | `handler.c`, `platform_nxp.c:886-889` |
 | ~~**G11** device-info FREQ/CH~~ | **Rev1.01 §4.3.4로 확정(2026-08-06): 접속 시 주파수(접속값), 미접속 0xFFFF** → #103에서 출하 기본 `live`로 전환, `config`(Rev1.00 해석)·`auto`는 옵션 유지 | 종결 (#103, 2026-09-04) | `freq_source.{c,h}`, `handler.c`(select_devinfo_freq_ch) |

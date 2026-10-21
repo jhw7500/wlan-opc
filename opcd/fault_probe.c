@@ -100,6 +100,43 @@ int opcd_fault_parse_diskstats(const char *text, const char *dev, uint64_t *io_m
     return -1;
 }
 
+/* /proc/meminfo → memory in use (#182): MemTotal minus MemFree, Buffers,
+ * Cached and Slab — the kbmemused sysstat's `sar -r` printed on the target, so
+ * used/total is the %memused the cpu.log logger records. All five fields are
+ * required: a missing one is unknown rather than zero, so it cannot inflate
+ * the usage. Keys are matched whole, so "SwapCached" is never taken for
+ * "Cached". The not-in-use sum saturates at MemTotal (fields read as one
+ * snapshot, but not atomically), so the usage floors at 0 and the addition
+ * itself cannot wrap. */
+int opcd_fault_parse_meminfo(const char *text, uint64_t *used_kb, uint64_t *total_kb)
+{
+    if (!text || !used_kb || !total_kb) return -1;
+    static const char *const keys[] = { "MemTotal", "MemFree", "Buffers", "Cached", "Slab" };
+    enum { NKEYS = sizeof keys / sizeof keys[0] };
+    uint64_t v[NKEYS] = {0};
+    unsigned seen = 0;
+    const char *line = text;
+    while (*line) {
+        char key[32];
+        unsigned long long kb;
+        if (sscanf(line, "%31[^:]: %llu", key, &kb) == 2) {
+            for (unsigned i = 0; i < NKEYS; i++) {
+                if (strcmp(key, keys[i]) == 0) { v[i] = (uint64_t)kb; seen |= 1u << i; break; }
+            }
+        }
+        const char *nl = strchr(line, '\n');
+        if (!nl) break;
+        line = nl + 1;
+    }
+    if (seen != (1u << NKEYS) - 1u || v[0] == 0) return -1;
+    uint64_t not_used = 0;
+    for (unsigned i = 1; i < NKEYS; i++)
+        not_used = v[i] > v[0] - not_used ? v[0] : not_used + v[i];
+    *total_kb = v[0];
+    *used_kb  = v[0] - not_used;
+    return 0;
+}
+
 /* Hysteretic over-threshold test (#141). A resource that is NOT in the band
  * enters at threshold_pct; one that IS in it stays congested until utilisation
  * falls below clear_pct. clear_pct == threshold_pct is a zero-width band, i.e.
@@ -128,6 +165,7 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
                          uint64_t d_busy, uint64_t d_total,
                          uint64_t d_disk_ms, uint64_t elapsed_ms,
                          uint64_t d_net_bytes, unsigned link_mbps,
+                         uint64_t mem_used_kb, uint64_t mem_total_kb,
                          opcd_fault_report_t *out)
 {
     memset(out, 0, sizeof *out);
@@ -136,6 +174,12 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
         if (pct > 100) pct = 100;
         out->cpu_pct  = (uint16_t)pct;
         out->cpu_over = fault_over(p, p->cpu_congested, pct);
+    }
+    if (mem_total_kb > 0) {
+        uint64_t pct = mem_used_kb * 100u / mem_total_kb;
+        if (pct > 100) pct = 100;
+        out->mem_pct  = (uint16_t)pct;
+        out->mem_over = fault_over(p, p->mem_congested, pct);
     }
     if (elapsed_ms > 0) {
         uint64_t pct = d_disk_ms * 100u / elapsed_ms;
@@ -177,6 +221,7 @@ void opcd_fault_probe_init(opcd_fault_probe_t *p)
     p->probe_interval_s  = OPCD_FAULT_PROBE_INTERVAL_DEFAULT;
     snprintf(p->disk_dev,       sizeof p->disk_dev,       "mmcblk0");
     snprintf(p->path_proc_stat, sizeof p->path_proc_stat, "/proc/stat");
+    snprintf(p->path_meminfo,   sizeof p->path_meminfo,   "/proc/meminfo");
     snprintf(p->path_diskstats, sizeof p->path_diskstats, "/proc/diskstats");
     snprintf(p->net_dir,        sizeof p->net_dir,        "/sys/class/net/eth0");
 }
@@ -300,6 +345,7 @@ void opcd_fault_probe_rearm(opcd_fault_probe_t *p, opcd_fault_res_t res)
     case OPCD_FAULT_RES_CPU:  p->cpu_notified  = false; break;
     case OPCD_FAULT_RES_DISK: p->disk_notified = false; break;
     case OPCD_FAULT_RES_NET:  p->net_notified  = false; break;
+    case OPCD_FAULT_RES_MEM:  p->mem_notified  = false; break;
     }
 }
 
@@ -307,7 +353,7 @@ void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)
 {
     if (!p) return;
     /* Notify latch only — see opcd_fault_probe_rearm. */
-    p->cpu_notified = p->disk_notified = p->net_notified = false;
+    p->cpu_notified = p->mem_notified = p->disk_notified = p->net_notified = false;
 }
 
 static int read_net_bytes(const opcd_fault_probe_t *p, uint64_t *bytes)
@@ -348,6 +394,9 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
                    opcd_fault_parse_proc_stat(buf, &busy, &total) == 0;
     bool disk_ok = read_text(p->path_diskstats, buf, sizeof buf) == 0 &&
                    opcd_fault_parse_diskstats(buf, p->disk_dev, &disk) == 0;
+    uint64_t mem_used = 0, mem_total = 0;
+    bool mem_ok  = read_text(p->path_meminfo, buf, sizeof buf) == 0 &&
+                   opcd_fault_parse_meminfo(buf, &mem_used, &mem_total) == 0;
     bool net_ok  = read_net_bytes(p, &net) == 0;
     uint64_t now = mono_now_ms();
 
@@ -373,6 +422,7 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
 
         opcd_fault_evaluate(p, d_busy, d_total, d_disk, elapsed, d_net,
                             (net_ok && p->net_primed) ? read_link_mbps(p) : 0,
+                            mem_ok ? mem_used : 0, mem_ok ? mem_total : 0,
                             out);
         /* Entry latch (#121): report the transition, then remember the level
          * — but only for a source that was actually measured this sample
@@ -390,6 +440,16 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
             out->cpu_cleared  = !out->cpu_over &&  p->cpu_notified;
             p->cpu_congested  = out->cpu_over;
             p->cpu_notified   = out->cpu_over;
+        }
+        /* Memory is a level, not a counter, so it has no baseline of its own:
+         * any readable sample is a measured one. It is still evaluated only
+         * here, after the first call, so all resources share one first-sample
+         * rule (#182). An unreadable meminfo is UNKNOWN like the others. */
+        if (mem_ok) {
+            out->mem_entered  =  out->mem_over && !p->mem_notified;
+            out->mem_cleared  = !out->mem_over &&  p->mem_notified;
+            p->mem_congested  = out->mem_over;
+            p->mem_notified   = out->mem_over;
         }
         if (disk_ok && p->disk_primed) {
             out->disk_entered =  out->disk_over && !p->disk_notified;
