@@ -345,7 +345,7 @@ wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측, 로밍 
 | **P2** | ApDisconnect MAC(#47) | AP-주도 deauth 환경 필요 | AP 에서 강제 deauth 유발(테스트 AP) |
 | **P2** | #160 Logout 뒤 통지 지속(KeepAlive·InitComplete(LoggedOut)) | 실타깃 미검증(호스트 단위시험만) | §3-2 절차로 logout 뒤 sequence 증가 확인 후 `--bits 0x00`으로 해제 |
 | **P2** | NVRAM 2분 응답 예산 | 장시간 | set-password/set-ip-list/set-radio 응답시간 120s 이내 계측 |
-| **P3** | Roaming 자연발화 — 주입 없이 실제 RSSI 하회로 조건에 들어설 때 0x0004 1회 | 통지는 `wifi_roam.py` 조건 진입에서만 발행(wlan-package #368; 옛 로밍 성공 뒤 훅 #83 은 PR #369 에서 제거) — 로밍 실행 경로(bgscan 등)와는 무관 | 감쇠·이동으로 임계 하회를 만든 뒤 0x0004 수신·AP MAC=현재 AP 확인(차기) |
+| **P3** | Roaming 자연발화 — 주입 없이 실제 RSSI 하회로 조건에 들어설 때 0x0004 1회 | UDP 통지는 `wifi_roam.py` 조건 진입에서만 발행(wlan-package #368; 옛 로밍 성공 뒤 훅 #83 은 PR #369 에서 제거) — 이 보드의 userspace SME 로밍 경로(bgscan 등)와는 무관. `CMD_ROAM` 을 내는 FT·FW 오프로드는 opcd nl80211 경로가 따로 발행 | 감쇠·이동으로 임계 하회를 만든 뒤 0x0004 수신·AP MAC=현재 AP 확인(차기) |
 | **P3** | FaultDetect 실폭주 | CPU/Mem/Net 폭주 유발 | stress-ng 등으로 Congestion 유발 |
 | **P3** | 스텔스 ESSID NULL / Dual WLAN#2 | mlan1 DOWN, 단일-STA 정책 | DFK 확정상 **단일 스테이션만 유효** — Dual 은 스펙 형식만 검증 |
 | **P3** | Protocol Version 협상 · 0x0050 radio-apply 실펌웨어 | 미확정 와이어값 | 발주처 확정 후 |

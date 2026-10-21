@@ -10,7 +10,8 @@
 
 좌표는 wlan-package `dc46f38`(0.7.2)의 `dist/wlan/usr/local/logger/` 기준이다.
 
-- **보내는 곳은 한 곳뿐이다.** `wifi_roam.py` 메인 루프에서 로밍 조건에 들어선 분기(`:3417` `set_flag(1, ROAM_CONDITION_FLAG)`) 바로 뒤의 `:3425` `notify_roam(IFACE, "", station["bssid"], rssi=station["rssi"], require_link_match=True)` 이다. 로밍 성공 뒤 통지는 PR #369 에서 4곳 모두 없앴다(`_roam_to_bssid_locked()`, `route_cross_ssid_transition()`, `passive_roam.roam_to_ap()` 의 성공·timeout 경로 — §4.4·§9.2 의 3훅이 이후 코드에서 4곳이 된 것). `dist/wlan/usr/local/logger/*.py` 와 `dist/wlan/usr/local/scripts/*.sh` 를 grep 하면, `roam_notify.py` 자신의 CLI `main()` 을 빼고 `notify_roam` 호출은 이 한 곳만 나온다.
+- **UDP 통지를 보내는 곳은 한 곳뿐이다.** `wifi_roam.py` 메인 루프에서 로밍 조건에 들어선 분기(`:3417` `set_flag(1, ROAM_CONDITION_FLAG)`) 바로 뒤의 `:3425` `notify_roam(IFACE, "", station["bssid"], rssi=station["rssi"], require_link_match=True)` 이다. 로밍 성공 뒤 통지는 PR #369 에서 4곳 모두 없앴다(`_roam_to_bssid_locked()`, `route_cross_ssid_transition()`, `passive_roam.roam_to_ap()` 의 성공·timeout 경로 — §4.4·§9.2 의 3훅이 이후 코드에서 4곳이 된 것). `dist/wlan/usr/local/logger/*.py` 와 `dist/wlan/usr/local/scripts/*.sh` 를 grep 하면, `roam_notify.py` 자신의 CLI `main()` 을 빼고 `notify_roam` 호출은 이 한 곳만 나온다.
+- **opcd 의 nl80211 경로는 별개다.** opcd 에는 UDP 통지와 별도로 nl80211 `CMD_ROAM` 경로(`opcd/platform_nxp.c:1874` `case OPCD_NL_ROAM:` → `OPCD_PEVT_ROAMING` → `opcd/opcd.c:109`)가 남아 있다. FT(802.11r)나 FW 로밍 오프로드가 `CMD_ROAM` 을 내면 이 경로가 `wifi_roam.py` 와 상관없이 로밍 뒤에 0x0004 를 보낸다(§8.5·§9.0). 이 보드는 userspace SME 라 `CMD_ROAM` 이 나지 않아 이 경로는 휴면이다(§1). 아래 서술은 이 보드의 UDP 경로 기준이다.
 - **필드.** AP MAC 은 판정한 현재 BSSID, RSSI 는 그 판정에 쓴 값이다. CH·freq 는 `link.json` 의 현재 접속 값을 쓴다. SNR 은 RSSI − 그 주파수의 noise 이고, noise 가 없거나 0 이면 넣지 않는다(opcd 가 −128 = 값 없음으로 채운다). `from` 은 보내지 않는다.
 - **발행 조건(현행 기본).** 조건 진입 에지마다 AP 하나에 1회 보낸다(`:3424` `if trigger_notified_bssid != station["bssid"]:`).
   - 조건이 이어지는 동안 같은 AP 로는 다시 보내지 않는다.
@@ -22,8 +23,8 @@
 - **opcd 쪽 빈도.** Indication Period 가 0 이면 받는 즉시 보낸다. 0 보다 크면 그 주기 안의 마지막 1건만 주기 경계에 보낸다(`opcd/indication.c:135` coalesce, #105).
 - **통지하지 않는 경우.**
   - 수동·주기 로밍(`wifi <if> roam`, `passive_roam.py`, `wifi_periodic_roam`)은 임계 하회가 계기가 아니므로 보내지 않는다.
-  - 자동 로밍 데몬(`wifi_roam@<if>`)을 끈 운용에서는 0x0004 가 나가지 않는다.
-  - §8 의 "로밍 실행 경로 커버리지"는 통지가 로밍 실행에 묶여 있던 때의 분석이다. 지금은 누가 로밍을 실행하든(wpa_supplicant 자율 로밍 포함) 통지 여부는 `wifi_roam.py` 의 임계 판정만 따른다.
+  - 자동 로밍 데몬(`wifi_roam@<if>`)을 끈 운용에서는 UDP 경로의 0x0004 가 나가지 않는다(위의 nl80211 `CMD_ROAM` 경로는 별개).
+  - §8 의 "로밍 실행 경로 커버리지"는 통지가 로밍 실행에 묶여 있던 때의 분석이다. 지금 이 보드(userspace SME, `CMD_ROAM` 미발행)에서는 누가 로밍을 실행하든(wpa_supplicant 자율 로밍 포함) 통지 여부는 `wifi_roam.py` 의 임계 판정만 따른다. FT 나 FW 로밍 오프로드를 쓰면 nl80211 경로가 로밍 뒤에 0x0004 를 따로 보내므로 이 말은 성립하지 않는다(§8.5).
 - **수동 발행(시험용).** `python3 /usr/local/logger/roam_notify.py --iface mlan0 [--to <bssid>] [--rssi N]` CLI 는 남아 있다. `require_link_match` 는 적용하지 않고, 값을 주지 않으면 `link.json` 의 현재 접속 값을 쓴다. `scripts/test-all.sh` §9 가 이 경로를 쓴다.
 - **실기 확인 방법.** §7 의 `wifi mlan0 roam 0` 으로는 이제 0x0004 가 나오지 않는다. `link.json` 의 `signal_avg` 를 임계 아래로 주입해 조건을 만들고 Indication 을 캡처한다. PR #369 실기(QA 0.7.1 패키지 위에 파일 세 개를 임시로 올림)에서는 good −50 → bad −85 → good −50 → bad −85 로 주입하자 bad 에 들어설 때마다 1회씩, 모두 2회 나갔다. AP MAC 은 현재 AP, CH 0x0228(5 GHz ch40), RSSI 0xffab(−85), SNR 0x0007 이었고, 조건 판정 6회 동안 재통지는 없었다.
 
@@ -69,7 +70,7 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 > 수동 통지가 중요한 이유: `wifi <if> roam N` 으로 임의 로밍을 유발해 **Roaming(0x04) 발행을
 > 자유롭게 재현·검증**할 수 있어야 한다(테스트 진입점).
 
-> **2026-10 개정(§0)**: 이 표의 '통지' 열은 더 이상 맞지 않는다. 세 경로 모두 로밍 뒤에 통지하지 않고, `wifi_roam.py` 의 조건 진입 판정만 통지한다. 수동 재현은 `roam_notify.py` CLI 로 한다.
+> **2026-10 개정(§0)**: 이 표의 '통지' 열은 더 이상 맞지 않는다. 세 경로 모두 로밍 뒤에 통지하지 않고, UDP 통지는 `wifi_roam.py` 의 조건 진입 판정에서만 나간다. 수동 재현은 `roam_notify.py` CLI 로 한다.
 
 ## 4. 컴포넌트 설계
 
@@ -149,7 +150,7 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 
 ## 8. 커버리지 / 한계 / bgscan 차기과제 스코핑 (2026-07-07 확정)
 
-> **2026-10 개정(§0)**: 이 절은 '로밍 실행 = 통지'이던 때, 어떤 로밍 경로가 통지를 놓치는지 분석한 것이다. 지금은 통지가 `wifi_roam.py` 의 임계 판정에서 나므로, 로밍 실행 경로(bgscan 자율 로밍 포함)는 통지 여부를 바꾸지 않는다. 운영 전제(§8.4)와 FT 이중 발행(§8.5)은 이 개정 때 다시 검토하지 않았다.
+> **2026-10 개정(§0)**: 이 절은 '로밍 실행 = 통지'이던 때, 어떤 로밍 경로가 통지를 놓치는지 분석한 것이다. 지금은 UDP 통지가 `wifi_roam.py` 의 임계 판정에서 나므로, 이 보드의 userspace SME 로밍 경로(bgscan 자율 로밍 포함)는 통지 여부를 바꾸지 않는다. `CMD_ROAM` 을 내는 FT·FW 오프로드는 예외다(§0). 운영 전제(§8.4)와 FT 이중 발행(§8.5)은 이 개정 때 다시 검토하지 않았다.
 
 ### 8.1 커버리지 현황 (소스 전수 확정)
 - **프로그램적 로밍 실행체는 `wifi_roam.py`·`passive_roam.py` 2개뿐이며 same/cross-SSID 전 경로가
