@@ -2,6 +2,30 @@
 
 > 상태: **설계(검토 대기)** · 2026-07-06 · 실타겟 cts-wlan 조사 기반
 > 대상: opcd Roaming Indication(0x04) 발행을 **로밍을 실제 수행하는 호스트 데몬의 통지**로 구동한다.
+> 개정: **2026-10-21 — 통지 시점을 "로밍 성공 뒤, 대상 AP 값"에서 "로밍 조건 진입 시, 현재 AP 값"으로 바꿨다**(wlan-package #368, PR #369·#370, wlan-proc 0.7.2). 현행 동작은 **§0** 이 정본이다. §2~§9 의 "로밍 완료 시 통지" 서술은 당시 설계 기록으로 남기고, 바뀐 곳마다 §0 을 가리키는 주석을 달았다.
+
+## 0. 현행 동작 (2026-10 개정, wlan-package #368)
+
+사양 Rev1.02 §4.4.3 은 Roaming(0x0004)을 로밍 임계값을 밑돈 순간(트리거 검출)에 **그때 접속한 AP** 의 SNR·RSSI·AP MAC·CH 로 보내라고 한다. 처음 구현(§2~§9)은 로밍이 성공한 뒤 대상(로밍 후) AP 값으로 보냈다. 그래서 wlan-package PR #369(통지 시점)와 PR #370(값 섞임 방지)에서 아래처럼 바꿨다. opcd 는 바꾸지 않았다. `opcd/roam_datagram.c` 는 받은 값을 필드 검증(channel·freq 필수)과 int8 범위 clamp 만 거쳐 Roaming 이벤트로 넘긴다.
+
+좌표는 wlan-package `dc46f38`(0.7.2)의 `dist/wlan/usr/local/logger/` 기준이다.
+
+- **보내는 곳은 한 곳뿐이다.** `wifi_roam.py` 메인 루프에서 로밍 조건에 들어선 분기(`:3417` `set_flag(1, ROAM_CONDITION_FLAG)`) 바로 뒤의 `:3425` `notify_roam(IFACE, "", station["bssid"], rssi=station["rssi"], require_link_match=True)` 이다. 로밍 성공 뒤 통지는 PR #369 에서 4곳 모두 없앴다(`_roam_to_bssid_locked()`, `route_cross_ssid_transition()`, `passive_roam.roam_to_ap()` 의 성공·timeout 경로 — §4.4·§9.2 의 3훅이 이후 코드에서 4곳이 된 것). `dist/wlan/usr/local/logger/*.py` 와 `dist/wlan/usr/local/scripts/*.sh` 를 grep 하면, `roam_notify.py` 자신의 CLI `main()` 을 빼고 `notify_roam` 호출은 이 한 곳만 나온다.
+- **필드.** AP MAC 은 판정한 현재 BSSID, RSSI 는 그 판정에 쓴 값이다. CH·freq 는 `link.json` 의 현재 접속 값을 쓴다. SNR 은 RSSI − 그 주파수의 noise 이고, noise 가 없거나 0 이면 넣지 않는다(opcd 가 −128 = 값 없음으로 채운다). `from` 은 보내지 않는다.
+- **발행 조건(현행 기본).** 조건 진입 에지마다 AP 하나에 1회 보낸다(`:3424` `if trigger_notified_bssid != station["bssid"]:`).
+  - 조건이 이어지는 동안 같은 AP 로는 다시 보내지 않는다.
+  - RSSI 가 판정 임계(`predictive_threshold`, 예측 보정 포함) 이상으로 돌아오거나(`:3374`), 연결이 끊기거나 `link.json` 이 stale 이면(`:3330`) 재무장한다.
+  - 조건 중에 다른 AP 로 바뀌었고 그 AP 도 임계 아래면 그 AP 로 1회 더 보낸다.
+  - 히스테리시스가 없어서, RSSI 가 임계 근처에서 오르내리면 밑돌 때마다 1회씩 나간다.
+  - 하회가 이어지는 동안 반복해서 보낼지는 발주처 확인을 기다린다(#368 열린 설계점 1).
+- **값 섞임 방지(`require_link_match`, PR #370).** 보내기 직전에 `link.json` 을 다시 읽는다. 접속 AP 가 판정한 AP 와 다르면, 즉 그 사이 재결합이 끼었으면 보내지 않는다. 이때는 '통지함'으로 기록하지 않으므로, 조건이 이어지면 다음 판정에서 다시 시도한다.
+- **opcd 쪽 빈도.** Indication Period 가 0 이면 받는 즉시 보낸다. 0 보다 크면 그 주기 안의 마지막 1건만 주기 경계에 보낸다(`opcd/indication.c:135` coalesce, #105).
+- **통지하지 않는 경우.**
+  - 수동·주기 로밍(`wifi <if> roam`, `passive_roam.py`, `wifi_periodic_roam`)은 임계 하회가 계기가 아니므로 보내지 않는다.
+  - 자동 로밍 데몬(`wifi_roam@<if>`)을 끈 운용에서는 0x0004 가 나가지 않는다.
+  - §8 의 "로밍 실행 경로 커버리지"는 통지가 로밍 실행에 묶여 있던 때의 분석이다. 지금은 누가 로밍을 실행하든(wpa_supplicant 자율 로밍 포함) 통지 여부는 `wifi_roam.py` 의 임계 판정만 따른다.
+- **수동 발행(시험용).** `python3 /usr/local/logger/roam_notify.py --iface mlan0 [--to <bssid>] [--rssi N]` CLI 는 남아 있다. `require_link_match` 는 적용하지 않고, 값을 주지 않으면 `link.json` 의 현재 접속 값을 쓴다. `scripts/test-all.sh` §9 가 이 경로를 쓴다.
+- **실기 확인 방법.** §7 의 `wifi mlan0 roam 0` 으로는 이제 0x0004 가 나오지 않는다. `link.json` 의 `signal_avg` 를 임계 아래로 주입해 조건을 만들고 Indication 을 캡처한다. PR #369 실기(QA 0.7.1 패키지 위에 파일 세 개를 임시로 올림)에서는 good −50 → bad −85 → good −50 → bad −85 로 주입하자 bad 에 들어설 때마다 1회씩, 모두 2회 나갔다. AP MAC 은 현재 AP, CH 0x0228(5 GHz ch40), RSSI 0xffab(−85), SNR 0x0007 이었고, 조건 판정 6회 동안 재통지는 없었다.
 
 ## 1. 배경 / 문제
 
@@ -25,6 +49,8 @@ opcd의 Roaming Indication(0x04, SNR/RSSI/AP MAC/CH)은 nl80211 `NL80211_CMD_ROA
 `OPCD_PEVT_ROAMING` 이벤트로 합성해 **기존 `opcd_ind_roaming()`** 으로 Roaming(0x04)을 발행한다.
 opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가**한다.
 
+> **2026-10 개정(§0)**: 보내는 시점은 '로밍 완료 시'가 아니라 로밍 조건 진입 시이고, 값도 그때의 현재 AP 값이다. opcd 의 수신·발행 경로는 이 절 그대로다.
+
 ### opcd 측이 이미 갖춘 것 (조사 결과)
 - `opcd/platform.h`: `OPCD_PEVT_ROAMING` + `opcd_platform_evt_t.u.roaming{snr,rssi,mac,channel,idx}`
 - `opcd/indication.c`: `opcd_ind_roaming(snr,rssi,mac,ch)` (bit `OPC_IND_BIT_ROAMING=0x04` gate)
@@ -43,6 +69,8 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 > 수동 통지가 중요한 이유: `wifi <if> roam N` 으로 임의 로밍을 유발해 **Roaming(0x04) 발행을
 > 자유롭게 재현·검증**할 수 있어야 한다(테스트 진입점).
 
+> **2026-10 개정(§0)**: 이 표의 '통지' 열은 더 이상 맞지 않는다. 세 경로 모두 로밍 뒤에 통지하지 않고, `wifi_roam.py` 의 조건 진입 판정만 통지한다. 수동 재현은 `roam_notify.py` CLI 로 한다.
+
 ## 4. 컴포넌트 설계
 
 ### 4.1 공용 통지 헬퍼 (신규, DRY)
@@ -50,6 +78,8 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 - 후보: `roam_notify.py`(파이썬 모듈/함수) 또는 소형 CLI. 세 실행체가 로밍 성공 직후 호출.
 - 동작: **post-roam** `link.json`(`/var/log/cantops/json/<iface>/link.json`)을 읽어 페이로드를
   구성 → opcd로 IPC 전송.
+
+> **2026-10 개정(§0)**: 헬퍼(`roam_notify.py`)는 그대로 쓰지만, 부르는 곳은 `wifi_roam.py` 의 조건 진입 지점 한 곳이고 `link.json` 은 로밍 전 현재 접속 값으로 읽는다.
 
 ### 4.2 IPC 계약
 - **전송(권장)**: **unix-datagram 소켓**(예: `/run/opcd/roam.sock`) 또는 로컬 UDP
@@ -67,6 +97,8 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
    - `idx!=0`(mlan1) drop 정책은 기존 로직 재사용(단일-STA #35).
 
 ### 4.4 로밍 실행체 훅 지점 (조사 확정)
+> **2026-10 제거(§0)**: 아래 훅(이후 코드에서 성공·timeout 경로 포함 4곳)은 wlan-package PR #369 에서 모두 없앴다.
+
 - `wifi_roam.py:roam_to_bssid()` — `result.returncode==0` 분기, `optimize_post_roam_connectivity()` 직후.
 - `wifi_roam.py:connect_to_ssid()` — 동 성공 분기.
 - `passive_roam.py` — 로밍 성공 지점(구현 시 내부 확인; `wpa_cli roam` 성공 후).
@@ -75,6 +107,8 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 ## 5. 페이로드 매핑 (Roaming 0x04 ← link.json)
 `link.address`→AP MAC · `link.signal_avg`→RSSI · `channel_info.<freq>.noise`로 SNR(=rssi−noise) ·
 `info.channel`/`info.freq`→CH(band|ch 인코딩). (device-info live 소스와 동일 매핑 — testing-guide §D)
+
+> **2026-10 개정(§0)**: AP MAC·RSSI 는 `link.json` 보다 판정 값(현재 BSSID, 판정에 쓴 RSSI)을 먼저 싣는다. CH·freq·SNR 매핑은 같다.
 
 ## 6. 결정 사항 (2026-07-06)
 
@@ -111,7 +145,11 @@ opcd 인디케이션 코드는 사실상 무수정 — **입력 소스만 추가
 4. 기대: 수신기에 **`req_id=0x0004`(Roaming)** + SNR/RSSI/AP MAC/CH 페이로드. (현재는 0x0004 미발행)
 5. 회귀: 순수 재연결(`wpa_cli disconnect/reconnect`)은 **Roaming 미발행**(WlanStatus만) 확인 — 재연결/로밍 구분 입증.
 
+> **2026-10 개정(§0)**: 3번(`wifi mlan0 roam 0`)으로는 0x0004 가 나오지 않는다. `roam_notify.py` CLI 나 `link.json` RSSI 주입으로 시험한다.
+
 ## 8. 커버리지 / 한계 / bgscan 차기과제 스코핑 (2026-07-07 확정)
+
+> **2026-10 개정(§0)**: 이 절은 '로밍 실행 = 통지'이던 때, 어떤 로밍 경로가 통지를 놓치는지 분석한 것이다. 지금은 통지가 `wifi_roam.py` 의 임계 판정에서 나므로, 로밍 실행 경로(bgscan 자율 로밍 포함)는 통지 여부를 바꾸지 않는다. 운영 전제(§8.4)와 FT 이중 발행(§8.5)은 이 개정 때 다시 검토하지 않았다.
 
 ### 8.1 커버리지 현황 (소스 전수 확정)
 - **프로그램적 로밍 실행체는 `wifi_roam.py`·`passive_roam.py` 2개뿐이며 same/cross-SSID 전 경로가
@@ -220,6 +258,8 @@ FT 도입 시엔 커널이 CMD_ROAM을 내므로 기존 nl80211 경로로도 발
 8. **단위테스트**: `opcd/tests/test_roam_notify_conf.c`(`test_freq_source.c` 복제 — 파일없음→default / valid / 범위초과→default / last-wins). make check 배선.
 
 ### 9.2 helper + 3훅 (wlan-package)
+> **2026-10 제거(§0)**: 10~12 의 훅(이후 코드에서 4곳)은 wlan-package PR #369 에서 모두 없앴다. 9(헬퍼)는 남아 있고, 부르는 곳은 §0 의 한 곳이다.
+
 9. **신규 `dist/wlan/usr/local/logger/roam_notify.py`**: `notify_roam(iface, from_bssid, to_bssid)` + `__main__` CLI(argparse `--iface/--from/--to/--port`). post-roam `link.json`(`/var/log/cantops/json/<iface>/link.json`) 재독 → 페이로드: `ap_mac`=`link.address`, `rssi`=int(`link.signal_avg` 문자열 `' dBm'` strip), `noise`=`channel_info[str(info.freq)].noise`, `snr`=rssi−noise, `channel`=`info.channel`, `freq`=`info.freq`, `band`(freq 파생), `from`=from_bssid. **파일 `{}`(미연결)면 skip**. UDP→`127.0.0.1:<port>`(기본 50608). **전 구간 try/except, 절대 raise 안 함**(로밍 return 경로 보호).
 10. **훅1** `wifi_roam.py:roam_to_bssid()`(:1470, 시그니처 `(from_bssid, to_bssid)` — **iface 파라미터 없음, 전역 `IFACE` 사용**) — `:1507`(optimize) 직후 `:1509`(return True) 앞 `notify_roam(IFACE, from_bssid, to_bssid)`. import `from roam_notify import notify_roam`(:14 `sUTILS` import 인근).
 11. **훅2** `wifi_roam.py:route_cross_ssid_transition()`(:1723 — cross-SSID **단일 choke point**, 유일 호출 :2055). 모드 A(`select_network_for_ssid`, `wpa_cli select_network`)·모드 B(`connect_to_ssid`, 외부 `wifi connect`) 두 분기 결과 `ok` 캡처 후 `if ok: notify_roam(iface, from_bssid, to_bssid)`. ⚠️ **실측 발견**: 설계 원안의 'connect_to_ssid 내부 훅'은 모드 A(`generate_network_blocks=true`, select_network 경유, 성공점 :1698)를 **놓침**. 출하 기본은 모드 B(`GENERATE_NETWORK_BLOCKS=False` :115, wifi_init_conf.json:288)라 원안으로도 커버되나, **route 레벨 훅이 모드-무관하게 안전** → 이쪽으로 상향.
@@ -260,3 +300,4 @@ Gemini(앱/워크플로) + Codex 리뷰 4건 수용·1건 기각, `opcd.c` 하�
 - 실측·층위 분석: 세션 메모리 `on-target-indication-testing`
 - opcd: `opcd/opcd.c`(epoll) · `opcd/platform.h`(evt) · `opcd/indication.c` · `opcd/nl80211_parse.c`
 - 실행체: `wifi_roam.py`(`/usr/local/logger/`) · `passive_roam.py` · `wifi.sh`(`/usr/local/scripts/`, roam=L917)
+- 2026-10 개정: wlan-package #368 · PR #369(통지 시점) · PR #370(`require_link_match`) · wlan-proc 0.7.2(PR #374)

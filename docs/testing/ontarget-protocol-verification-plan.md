@@ -143,7 +143,7 @@ typo from Reset Req; 60 matches every other simple Ack"). 검증 기준 = **60**
 |---|---|---|---|---|---|
 | InitComplete | `0x0001` | 60 | Status | enable/login/logout, 부팅 | ✅ 동작 |
 | WlanStatusChange | `0x0002` | 60 | WLAN Status(접속0x0001/절단0x0002)+CH | `wpa_cli -i mlan0 disconnect` | ✅ 실타깃 입증(#46) |
-| Roaming | `0x0004` | 68 | SNR/RSSI/AP MAC/CH | 로밍 실행체 notify(UDP 127.0.0.1:50608)→opcd 합성(#64/#83) | ✅ 실타깃 입증(roam_notify 수동 + 2AP 라이브 로밍 ch36↔ch40) |
+| Roaming | `0x0004` | 68 | SNR/RSSI/AP MAC/CH | 로밍 조건 진입 시 `wifi_roam.py` notify(UDP 127.0.0.1:50608)→opcd 합성(#64/#83, 시점·값은 wlan-package #368) | ✅ 실타깃 입증(roam_notify 수동 + 2AP 라이브 로밍 ch36↔ch40 — 로밍 성공 뒤 보내던 옛 시점) · 조건 진입 시점은 `link.json` RSSI 주입 실기(wlan-package PR #369) |
 | ApDisconnect | `0x0008` | 68 | Message ID(Disassoc 0x000a/Deauth 0x000c)+ReasonCode+AP MAC | **AP-주도 deauth만** | ⚠ 미입증(#47) |
 | FaultDetect | `0x0010` | 60 | Congestion ID(CPU 0x1/Mem 0x2/Disk 0x3/Net 0x4)+Val | 리소스 폭주 | ⚠ 실폭주 미입증 |
 | ResetNotice | `0x0020` | 60 | Reset Cause | Reset Ack 직후, 재부팅 전(#164) | ✅ `reset_cause=0x00000001` (#164 이전 빌드 실측 — Ack→통지 순서는 재검증 필요) |
@@ -186,9 +186,12 @@ ApDisconnect 는 **AP-주도 deauth**(`NL80211_ATTR_DISCONNECTED_BY_AP`)일 때�
 로컬 disconnect 는 WlanStatusChange 만. 단일-STA 정책(#35): mlan1 이벤트는 drop(interim).
 
 **Roaming(0x0004)**: 이 보드는 host-based 로밍이라 커널이 `CMD_ROAM`을 내지 않음 → 로밍
-실행체(wifi_roam.py/passive_roam.py 훅, #83)가 opcd에 로컬 UDP(127.0.0.1:50608, #64) 통지해
-발행한다. 능동 검증 = `roam_notify.py` 수동 트리거(위, 링크 무영향, test-all.sh §9).
-실로밍 트리거는 `wifi mlan0 roam N`(passive_roam 훅 경유) — mlan0 재결합 유발 ⚠.
+데몬 `wifi_roam.py` 가 로밍 조건(임계 하회)에 들어서는 순간 현재 AP 값으로 opcd에 로컬
+UDP(127.0.0.1:50608, #64) 통지해 발행한다(wlan-package #368, PR #369·#370 — 그 전에는
+wifi_roam.py/passive_roam.py 의 로밍 성공 뒤 훅, #83). 능동 검증 = `roam_notify.py` 수동
+트리거(위, 링크 무영향, test-all.sh §9). 조건 진입 경로는 `link.json` `signal_avg` 를 임계
+아래로 주입해 확인한다(설계 `design-roam-indication-notify.md` §0). `wifi mlan0 roam N`
+(passive_roam)은 이제 0x0004 를 내지 않고 mlan0 재결합만 일으킨다 ⚠.
 
 ---
 
@@ -329,7 +332,8 @@ login/logout · device-info(408) · **P0** 빈/오타 비번 0x0010 + 비번파�
 KeepAlive 주기(teardown은 #160으로 폐기; Logout 뒤 지속은 실타깃 미검증 → 남은 갭) · ResetNotice 0x0020(#164 이전 빌드: 통지→Ack 순서) · reset+systemd 재기동(#164 이전 빌드 실측; **#164 재부팅 경로·Ack→통지 순서는 미측정 → 남은 갭**) ·
 set-ip-list START/END+conflict 0x0012 · netmask·6G freq 거부 · set-radio mode/bw/freq NG ·
 WlanStatusChange(#46) · **Roaming(0x0004) notify 경로**(#64/#83 — roam_notify 수동 트리거
-wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
+wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측, 로밍 성공 뒤 보내던 옛 시점; 조건
+진입 시점은 wlan-package PR #369 의 `link.json` RSSI 주입 실기).
 
 ### 남은 갭 (우선순위)
 
@@ -341,7 +345,7 @@ wire 실증 + 2AP 라이브 로밍 ch36↔ch40 payload 정확성 실측).
 | **P2** | ApDisconnect MAC(#47) | AP-주도 deauth 환경 필요 | AP 에서 강제 deauth 유발(테스트 AP) |
 | **P2** | #160 Logout 뒤 통지 지속(KeepAlive·InitComplete(LoggedOut)) | 실타깃 미검증(호스트 단위시험만) | §3-2 절차로 logout 뒤 sequence 증가 확인 후 `--bits 0x00`으로 해제 |
 | **P2** | NVRAM 2분 응답 예산 | 장시간 | set-password/set-ip-list/set-radio 응답시간 120s 이내 계측 |
-| **P3** | Roaming 자연발화 — 3훅 외 로밍 경로(bgscan 등) 미커버 가능성 | notify 는 wifi_roam·passive_roam 훅에서만 발행(#83) | 임계하회 자율 로밍 유발 후 0x0004 수신 확인(차기) |
+| **P3** | Roaming 자연발화 — 주입 없이 실제 RSSI 하회로 조건에 들어설 때 0x0004 1회 | 통지는 `wifi_roam.py` 조건 진입에서만 발행(wlan-package #368; 옛 로밍 성공 뒤 훅 #83 은 PR #369 에서 제거) — 로밍 실행 경로(bgscan 등)와는 무관 | 감쇠·이동으로 임계 하회를 만든 뒤 0x0004 수신·AP MAC=현재 AP 확인(차기) |
 | **P3** | FaultDetect 실폭주 | CPU/Mem/Net 폭주 유발 | stress-ng 등으로 Congestion 유발 |
 | **P3** | 스텔스 ESSID NULL / Dual WLAN#2 | mlan1 DOWN, 단일-STA 정책 | DFK 확정상 **단일 스테이션만 유효** — Dual 은 스펙 형식만 검증 |
 | **P3** | Protocol Version 협상 · 0x0050 radio-apply 실펌웨어 | 미확정 와이어값 | 발주처 확정 후 |
