@@ -380,6 +380,35 @@ static int persist_password(opcd_state_t *st, const char *candidate, size_t len,
                         ip, port, seq, reservation, deferred, outcome);
 }
 
+/* #184: the client re-sends a SetPassword answered NVRAM NG. When that write
+ * was REPLACED_UNSYNCED the new password is already live, so the re-send names
+ * the replaced value as its old password. Match it so it is written again. */
+static bool password_resend_of_unsynced(const opcd_state_t *st,
+                                        const opc_set_password_req_t *req)
+{
+    return st->password_unsynced &&
+           strncmp(req->old_password, st->password_unsynced_prev,
+                   sizeof st->password_unsynced_prev - 1) == 0 &&
+           strncmp(req->new_password, st->password,
+                   sizeof st->password - 1) == 0;
+}
+
+/* Call before publishing `candidate`: the replaced value is still in
+ * st->password. UNCHANGED keeps both the published value and this state. */
+static void password_note_outcome(opcd_state_t *st, const char *candidate,
+                                  opc_store_outcome_t outcome)
+{
+    if (outcome == OPC_STORE_DURABLE) {
+        st->password_unsynced = false;
+        memset(st->password_unsynced_prev, 0, sizeof st->password_unsynced_prev);
+    } else if (outcome == OPC_STORE_REPLACED_UNSYNCED &&
+               strncmp(candidate, st->password, sizeof st->password - 1) != 0) {
+        memcpy(st->password_unsynced_prev, st->password,
+               sizeof st->password_unsynced_prev);
+        st->password_unsynced = true;
+    }
+}
+
 static int persist_radio(opcd_state_t *st, uint32_t ip, uint16_t port,
                          uint16_t seq, int reservation, bool *deferred,
                          opc_store_outcome_t *outcome)
@@ -1004,7 +1033,8 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
         } else if (!valid_opc_charset(req.new_password)) {
             /* §3.3.5 0x0013: new password disallowed character (E1, DFK 2026-06-29) */
             result = OPC_RESULT_NG; err = OPC_ERR_NEW_PW_CHAR;
-        } else if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0) {
+        } else if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0 &&
+                   !password_resend_of_unsynced(st, &req)) {
             result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else if (newlen == 0) {
             /* Refuse an empty new password — that is how the unauthenticated
@@ -1038,6 +1068,7 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
                 *rlen = 0;   /* ack follows the NVRAM completion */
                 return 0;
             }
+            password_note_outcome(st, candidate, outcome);
             if (outcome != OPC_STORE_UNCHANGED)
                 memcpy(st->password, candidate, sizeof candidate);
         }
@@ -1981,6 +2012,7 @@ void opcd_store_async_on_ready(opcd_state_t *st)
          * is still held by pa->in_use. A second request can be admitted only
          * after the visible state agrees with the write outcome. */
         if (pa->resource == OPCD_PERSIST_PASSWORD) {
+            password_note_outcome(st, st->pending_password, done[i].outcome);
             if (done[i].outcome != OPC_STORE_UNCHANGED)
                 memcpy(st->password, st->pending_password,
                        sizeof st->password);
