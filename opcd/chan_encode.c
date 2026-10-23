@@ -1,5 +1,6 @@
 #include "chan_encode.h"
 
+#include "commands.h"   /* OPC_WLAN_CH_UNSET */
 #include "ids.h"   /* OPC_BAND_2_4GHZ / _5GHZ / _6GHZ */
 
 /* The 2.4/5/6 GHz ranges below MUST stay in sync with nl80211_parse.c's
@@ -33,11 +34,18 @@ uint16_t opc_assoc_chan_field(uint32_t evt_freq, uint16_t evt_ch,
     if (ch == 0 && fb_valid) {
         /* Accept the fallback only when it yields a band-qualified channel. A
          * source may report a channel with no recognizable frequency (freq 0 /
-         * band-gap) — a band byte of 0 means exactly that. Emit 0 rather than a
-         * half-populated (band-less) field. */
+         * band-gap) — a band byte of 0 means exactly that. Emit the unset
+         * value rather than a half-populated (band-less) field. */
         uint16_t fb_field = opc_chan_field(fb_freq, fb_ch);
         if ((fb_field >> 8) != 0)
             ch = fb_field;
     }
-    return ch;
+    return ch ? ch : OPC_WLAN_CH_UNSET;
+}
+
+uint16_t opc_notify_chan_field(uint32_t freq_mhz, uint16_t ch)
+{
+    /* Band-qualified or unset: a band byte of 0 is not a valid CH. */
+    uint16_t field = opc_chan_field(freq_mhz, ch);
+    return (field >> 8) != 0 ? field : OPC_WLAN_CH_UNSET;
 }

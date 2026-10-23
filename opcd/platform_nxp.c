@@ -1887,7 +1887,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.u.roaming.rssi    = link.rssi_valid ? link.rssi : OPC_WLAN_SIGNAL_INVALID;
         /* ROAM reliably carries WIPHY_FREQ, so the channel needs no link
          * fallback (unlike CONNECT/ASSOCIATED) — encode it directly. */
-        pe.u.roaming.channel = opc_chan_field(nev->freq_mhz, nev->channel);
+        pe.u.roaming.channel = opc_notify_chan_field(nev->freq_mhz, nev->channel);
         nl_note_ch(idx, pe.u.roaming.channel);
         memcpy(pe.u.roaming.mac, nev->mac, 6);
         nl_coalesce_put(tab, count, &pe);
@@ -1899,7 +1899,7 @@ static void nl_stage_evt(opcd_platform_evt_t *tab, size_t *count,
         pe.kind                  = OPCD_PEVT_WLAN_STATUS;
         pe.u.wlan_status.idx     = (uint8_t)idx;
         pe.u.wlan_status.status  = OPCD_WLAN_STATUS_CHANNEL_CHANGE;
-        pe.u.wlan_status.channel = opc_chan_field(nev->freq_mhz, nev->channel);
+        pe.u.wlan_status.channel = opc_notify_chan_field(nev->freq_mhz, nev->channel);
         nl_note_ch(idx, pe.u.wlan_status.channel);
         nl_coalesce_put(tab, count, &pe);
         break;

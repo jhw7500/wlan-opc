@@ -22,10 +22,15 @@ uint16_t opc_chan_field(uint32_t freq_mhz, uint16_t ch);
  * commonly omits NL80211_ATTR_WIPHY_FREQ → freq/ch 0), fall back to a secondary
  * source (a synchronous kernel GET_INTERFACE query, or a cached link readback)
  * — but only when that source is valid (fb_valid). Returns the encoded
- * (band<<8 | ch) field, or 0 when neither source yields a band-qualified
- * channel. */
+ * (band<<8 | ch) field, or the unset value 0xFFFF (OPC_WLAN_CH_UNSET, spec
+ * 4.2.2) when neither source yields a band-qualified channel (#185). */
 uint16_t opc_assoc_chan_field(uint32_t evt_freq, uint16_t evt_ch,
                               bool fb_valid, uint32_t fb_freq,
                               uint16_t fb_ch);
+
+/* Channel field for a notification sent on the wire (channel change,
+ * roaming): opc_chan_field() when it is band-qualified, otherwise the unset
+ * value 0xFFFF (spec 4.2.2) rather than 0 or a band-less field (#185). */
+uint16_t opc_notify_chan_field(uint32_t freq_mhz, uint16_t ch);
 
 #endif /* WLAN_OPC_OPCD_CHAN_ENCODE_H */

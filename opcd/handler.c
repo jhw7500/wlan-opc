@@ -704,6 +704,20 @@ static int handle_logout(opcd_state_t *st, const uint8_t *frame, size_t flen,
     return 0;
 }
 
+static ssize_t pack_basic_info_ack(const opcd_state_t *st, uint8_t *resp,
+                                   size_t rcap, uint16_t seq)
+{
+    const opcd_inventory_t *inv = opcd_inventory();
+    opc_get_basic_info_ack_t ack = {
+        .vendor_code     = inv->vendor_code,
+        .product_code    = inv->product_code,
+        .product_subcode = inv->product_subcode,
+        .device_status   = st->boot_status,
+        .station_type    = effective_station_type(st),
+    };
+    return opc_get_basic_info_ack_pack(resp, rcap, seq, &ack);
+}
+
 static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t flen,
                                  uint32_t ip, uint16_t port, uint8_t *resp, size_t rcap,
                                  ssize_t *rlen, uint16_t seq)
@@ -716,15 +730,7 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
          * GetBasicInfo needs no Login, so it must not keep a dead session alive. */
         session_touch(st);
     }
-    const opcd_inventory_t *inv = opcd_inventory();
-    opc_get_basic_info_ack_t ack = {
-        .vendor_code     = inv->vendor_code,
-        .product_code    = inv->product_code,
-        .product_subcode = inv->product_subcode,
-        .device_status   = st->boot_status,
-        .station_type    = effective_station_type(st),
-    };
-    emit_ack(rlen, opc_get_basic_info_ack_pack(resp, rcap, seq, &ack));
+    emit_ack(rlen, pack_basic_info_ack(st, resp, rcap, seq));
     return 0;
 }
 
@@ -1901,7 +1907,10 @@ size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered)
  * other source is dropped silently, preserving the SEC-003 no-reflection
  * stance. The first OPC_FIXED_HEADER_SIZE bytes of `frame` must hold the
  * (possibly truncated) datagram's start; req_id and seq are echoed from
- * them so the client can correlate the NG. */
+ * them so the client can correlate the NG. The two requests whose responses
+ * are not the general ACK answer in their own formats (#185): GetBasicInfo
+ * always answers with basic info (§4.3.3), as a body that fails to parse does,
+ * and GetDeviceInfo answers its 416 B form with the 0x0003 NG. */
 void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport)
 {
@@ -1912,9 +1921,23 @@ void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
     if (!frame || valid_len < OPC_FIXED_HEADER_SIZE ||
         opc_fixed_header_unpack(frame, valid_len, &hdr) != 0) return;
     uint8_t resp[OPC_FRAME_MAX];
-    ssize_t n = opc_simple_ack_pack(resp, sizeof resp, hdr.req_indication_id,
-                                    hdr.sequence_number, OPC_SIMPLE_ACK_LENGTH,
-                                    OPC_RESULT_NG, OPC_ERR_PACKET_SIZE);
+    ssize_t n;
+    /* Request IDs share their values with Indication IDs (0x0001/0x0002), so
+     * only a REQUEST frame selects the command's own format. */
+    const bool request = hdr.command_type == OPC_CMD_REQUEST;
+    if (request && hdr.req_indication_id == OPC_REQ_GET_BASIC_INFO) {
+        n = pack_basic_info_ack(st, resp, sizeof resp, hdr.sequence_number);
+    } else if (request && hdr.req_indication_id == OPC_REQ_GET_DEVICE_INFO) {
+        opc_get_device_info_ack_t ack;
+        memset(&ack, 0, sizeof ack);
+        ack.result      = OPC_RESULT_NG;
+        ack.error_cause = OPC_ERR_PACKET_SIZE;
+        n = opc_get_device_info_ack_pack(resp, sizeof resp, hdr.sequence_number, &ack);
+    } else {
+        n = opc_simple_ack_pack(resp, sizeof resp, hdr.req_indication_id,
+                                hdr.sequence_number, OPC_SIMPLE_ACK_LENGTH,
+                                OPC_RESULT_NG, OPC_ERR_PACKET_SIZE);
+    }
     if (n <= 0 || st->udp_fd < 0) return;
     struct sockaddr_in dst = {0};
     dst.sin_family      = AF_INET;
