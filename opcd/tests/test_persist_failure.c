@@ -890,6 +890,260 @@ static void test_radio_reconciliation(const char *pw_path,
     close(client);
 }
 
+static uint16_t unpack_password_result(const uint8_t *wire, ssize_t n, uint16_t *err)
+{
+    opc_set_password_ack_t ack = {0};
+    if (n <= 0 || opc_set_password_ack_unpack(wire, (size_t)n, &ack) != 0)
+        return UINT16_MAX;
+    if (err) *err = ack.error_cause;
+    return ack.result;
+}
+
+static uint16_t unpack_login_result(const uint8_t *wire, ssize_t n, uint16_t *err)
+{
+    opc_login_ack_t ack = {0};
+    if (n <= 0 || opc_login_ack_unpack(wire, (size_t)n, &ack) != 0)
+        return UINT16_MAX;
+    if (err) *err = ack.error_cause;
+    return ack.result;
+}
+
+static uint16_t unpack_radio_result(const uint8_t *wire, ssize_t n, uint16_t *err)
+{
+    opc_set_radio_config_ack_t ack = {0};
+    if (n <= 0 || opc_set_radio_config_ack_unpack(wire, (size_t)n, &ack) != 0)
+        return UINT16_MAX;
+    if (err) *err = ack.error_cause;
+    return ack.result;
+}
+
+/* #184: a write whose rename landed but whose directory sync failed answers
+ * NVRAM NG while the new value is already live. The client re-sends the same
+ * request (a split IP list from its START); every resource must converge to OK
+ * on that re-send and leave the new value in its file. */
+static void test_unsynced_retry_converges(const char *pw_path,
+                                          const char *ip_path,
+                                          const char *radio_path)
+{
+    uint16_t port = 0;
+    int server = bind_loopback(NULL);
+    int client = bind_loopback(&port);
+    opc_store_async_t *store = opc_store_async_create();
+    CHECK(server >= 0 && client >= 0 && store != NULL,
+          "unsynced retry: async handler rig created");
+    if (server < 0 || client < 0 || !store) return;
+    opcd_state_t st;
+    init_state(&st, pw_path, ip_path, radio_path, server, store, port);
+    CHECK(opc_store_write_atomic(pw_path, OPC_PASSWORD_DEFAULT,
+                                 strlen(OPC_PASSWORD_DEFAULT), 0600) == 0,
+          "unsynced retry password: old durable baseline written");
+
+    uint8_t resp[OPC_FRAME_MAX], wire[OPC_FRAME_MAX];
+    uint16_t err = 0;
+    const char *next = "RetrySecret1";
+
+    fault_arm(FAULT_DIR_FSYNC);
+    CHECK(dispatch_password(&st, port, 400, OPC_PASSWORD_DEFAULT, next, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry password: original write completes");
+    opcd_store_async_on_ready(&st);
+    ssize_t n = recv_ack(client, wire, 1000);
+    CHECK(unpack_password_result(wire, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_NVRAM && strcmp(st.password, next) == 0,
+          "unsynced retry password: original answers NVRAM NG with the new value live");
+
+    n = dispatch_password(&st, port, 401, "WrongOld9", next, resp);
+    CHECK(unpack_password_result(resp, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_PASSWORD_MISMATCH,
+          "unsynced retry password: a wrong old password is still a mismatch");
+
+    n = dispatch_password(&st, port, 408, OPC_PASSWORD_DEFAULT, "OtherNew3", resp);
+    CHECK(unpack_password_result(resp, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_PASSWORD_MISMATCH && strcmp(st.password, next) == 0,
+          "unsynced retry password: the replaced password cannot set another new one");
+
+    fault_arm(FAULT_DIR_FSYNC);
+    n = dispatch_password(&st, port, 402, OPC_PASSWORD_DEFAULT, next, resp);
+    CHECK(n == 0 && wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry password: the same request is written again");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_password_result(wire, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_NVRAM,
+          "unsynced retry password: a re-send that is still unsynced answers NVRAM NG");
+
+    fault_arm(FAULT_RENAME);
+    n = dispatch_password(&st, port, 409, OPC_PASSWORD_DEFAULT, next, resp);
+    CHECK(n == 0 && wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry password: a re-send failing before rename completes");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_password_result(wire, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_NVRAM && strcmp(st.password, next) == 0,
+          "unsynced retry password: a re-send failing before rename answers NVRAM NG");
+
+    n = dispatch_password(&st, port, 403, OPC_PASSWORD_DEFAULT, next, resp);
+    CHECK(n == 0 && wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry password: a later re-send is written again");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_password_result(wire, n, &err) == OPC_RESULT_OK &&
+          strcmp(st.password, next) == 0 &&
+          file_equals(pw_path, next, strlen(next)),
+          "unsynced retry password: the durable re-send answers OK");
+
+    n = dispatch_password(&st, port, 404, OPC_PASSWORD_DEFAULT, next, resp);
+    CHECK(unpack_password_result(resp, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_PASSWORD_MISMATCH,
+          "unsynced retry password: after a durable write the old password no longer matches");
+
+    CHECK(dispatch_logout(&st, port, 405, resp) > 0, "unsynced retry password: Logout");
+    n = dispatch_login(&st, port, 406, OPC_PASSWORD_DEFAULT, resp);
+    CHECK(unpack_login_result(resp, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_PASSWORD_MISMATCH,
+          "unsynced retry password: Login rejects the old password");
+    n = dispatch_login(&st, port, 407, next, resp);
+    CHECK(unpack_login_result(resp, n, &err) == OPC_RESULT_OK,
+          "unsynced retry password: Login accepts the new password");
+
+    /* Two unsynced changes in a row: the re-send of the second one names the
+     * first one's value as its old password. */
+    const char *second = "SecondSecret4", *third = "ThirdSecret5";
+    fault_arm(FAULT_DIR_FSYNC);
+    CHECK(dispatch_password(&st, port, 410, next, second, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry chain: first change write completes");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    fault_arm(FAULT_DIR_FSYNC);
+    CHECK(dispatch_password(&st, port, 411, second, third, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry chain: second change write completes");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_password_result(wire, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_NVRAM && strcmp(st.password, third) == 0,
+          "unsynced retry chain: second change answers NVRAM NG with its value live");
+    n = dispatch_password(&st, port, 412, next, second, resp);
+    CHECK(unpack_password_result(resp, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_PASSWORD_MISMATCH,
+          "unsynced retry chain: a re-send of the superseded change is a mismatch");
+    n = dispatch_password(&st, port, 413, second, third, resp);
+    CHECK(n == 0 && wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry chain: the re-send of the second change is written again");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_password_result(wire, n, &err) == OPC_RESULT_OK &&
+          file_equals(pw_path, third, strlen(third)),
+          "unsynced retry chain: the re-send of the second change answers OK");
+
+    fault_clear();
+    opcd_ip_list_t empty = {0};
+    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+          "unsynced retry ip: old durable baseline written");
+    opc_ipcfg_entry_t one = ip_entry(3, OPC_LIST_BOUNDARY_START_END,
+                                     0xc6336432u, "retry_one");
+    fault_arm(FAULT_DIR_FSYNC);
+    CHECK(dispatch_ip_list(&st, port, 420, &one, 1, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry ip: single-frame write completes");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_NG && err == OPC_ERR_NVRAM,
+          "unsynced retry ip: single-frame original answers NVRAM NG");
+    CHECK(dispatch_ip_list(&st, port, 421, &one, 1, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry ip: single-frame re-send is written again");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_OK &&
+          st.ip_list.present[2] && st.ip_list.slots[2].ip_address == one.ip_address &&
+          file_equals(ip_path, &st.ip_list, sizeof st.ip_list),
+          "unsynced retry ip: single-frame re-send answers OK and the file keeps the slot");
+
+    opc_ipcfg_entry_t start = ip_entry(4, OPC_LIST_BOUNDARY_START,
+                                       0xc633643cu, "retry_start");
+    opc_ipcfg_entry_t end = ip_entry(5, OPC_LIST_BOUNDARY_END,
+                                     0xc6336446u, "retry_end");
+    n = dispatch_ip_list(&st, port, 430, &start, 1, resp);
+    CHECK(unpack_ip_result(resp, n, &err) == OPC_RESULT_OK,
+          "unsynced retry ip: split START is staged");
+    fault_arm(FAULT_DIR_FSYNC);
+    CHECK(dispatch_ip_list(&st, port, 431, &end, 1, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry ip: split END write completes");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_NG && err == OPC_ERR_NVRAM,
+          "unsynced retry ip: split END answers NVRAM NG");
+    n = dispatch_ip_list(&st, port, 432, &start, 1, resp);
+    CHECK(unpack_ip_result(resp, n, &err) == OPC_RESULT_OK,
+          "unsynced retry ip: re-sent START opens a new cycle");
+    CHECK(dispatch_ip_list(&st, port, 433, &end, 1, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry ip: re-sent END is written again");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_OK &&
+          st.ip_list.present[3] && st.ip_list.present[4] &&
+          file_equals(ip_path, &st.ip_list, sizeof st.ip_list),
+          "unsynced retry ip: re-sent cycle answers OK and the file keeps both slots");
+
+    opc_set_radio_config_req_t base = radio_config(OPC_STATION_SINGLE, 36, 0);
+    opc_set_radio_config_req_t cand = radio_config(OPC_STATION_SINGLE, 44, 0);
+    fault_clear();
+    st.radio = base;
+    st.radio_committed = true;
+    st.radio_applied_known = true;
+    CHECK(opc_store_write_atomic(radio_path, &base, sizeof base, 0644) == 0,
+          "unsynced retry radio: old durable baseline written");
+    fault_arm(FAULT_DIR_FSYNC);
+    CHECK(dispatch_radio(&st, port, 440, &cand, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry radio: original write completes");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_radio_result(wire, n, &err) == OPC_RESULT_NG && err == OPC_ERR_NVRAM &&
+          !st.radio_committed && memcmp(&st.radio, &cand, sizeof cand) == 0,
+          "unsynced retry radio: original answers NVRAM NG with the candidate live");
+    CHECK(dispatch_radio(&st, port, 441, &cand, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "unsynced retry radio: re-send is written again");
+    opcd_store_async_on_ready(&st);
+    n = recv_ack(client, wire, 1000);
+    CHECK(unpack_radio_result(wire, n, &err) == OPC_RESULT_OK && st.radio_committed &&
+          file_equals(radio_path, &cand, sizeof cand),
+          "unsynced retry radio: re-send answers OK and commits the candidate");
+
+    fault_clear();
+    opc_store_async_finish(store);
+    opcd_store_async_on_ready(&st);
+    st.store_async = NULL;
+    opc_store_async_destroy(store);
+    close(server);
+    close(client);
+
+    /* The synchronous fallback (no writer thread) follows the same rule. */
+    fault_clear();
+    opcd_state_t sync_st;
+    init_state(&sync_st, pw_path, ip_path, radio_path, -1, NULL, 41002);
+    CHECK(opc_store_write_atomic(pw_path, OPC_PASSWORD_DEFAULT,
+                                 strlen(OPC_PASSWORD_DEFAULT), 0600) == 0,
+          "unsynced retry sync: old durable baseline written");
+    fault_arm(FAULT_DIR_FSYNC);
+    n = dispatch_password(&sync_st, 41002, 450, OPC_PASSWORD_DEFAULT,
+                          "SyncRetry2", resp);
+    CHECK(unpack_password_result(resp, n, &err) == OPC_RESULT_NG &&
+          err == OPC_ERR_NVRAM && strcmp(sync_st.password, "SyncRetry2") == 0,
+          "unsynced retry sync: original answers NVRAM NG with the new value live");
+    n = dispatch_password(&sync_st, 41002, 451, OPC_PASSWORD_DEFAULT,
+                          "SyncRetry2", resp);
+    CHECK(unpack_password_result(resp, n, &err) == OPC_RESULT_OK &&
+          file_equals(pw_path, "SyncRetry2", strlen("SyncRetry2")),
+          "unsynced retry sync: the re-send answers OK");
+    fault_clear();
+}
+
 int main(void)
 {
     opcd_platform_register();
@@ -907,6 +1161,7 @@ int main(void)
     test_ip_publication_and_no_ack(pw_path, ip_path, radio_path);
     test_ip_failed_commit_drops_dependent_staging(pw_path, ip_path, radio_path);
     test_radio_reconciliation(pw_path, ip_path, radio_path);
+    test_unsynced_retry_converges(pw_path, ip_path, radio_path);
 
     unlink(pw_path);
     unlink(ip_path);

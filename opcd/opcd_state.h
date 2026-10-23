@@ -136,6 +136,12 @@ typedef struct opcd_state {
 
     /* Persistent app state. */
     char     password[128];
+    /* #184: `password` came from a write whose rename landed but whose
+     * directory sync failed (answered NVRAM NG). The value it replaced is kept
+     * so a re-send of that same SetPassword still matches and is written
+     * again; the next durable password write clears both. */
+    bool     password_unsynced;
+    char     password_unsynced_prev[128];
     opc_set_radio_config_req_t radio;
     /* True once `radio` has been applied AND its NVRAM write completed (or it
      * was loaded from radio.conf). Gates the identical-request shortcut in
