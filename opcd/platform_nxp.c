@@ -981,7 +981,10 @@ static uint16_t validate_one_radio(const opc_wlan_radio_cfg_t *w, bool mlan1)
     if (radio_mode_token(w->mode) == NULL ||
         (mlan1 && w->mode == OPC_WLAN_MODE_11AX) ||
         ((w->mode == OPC_WLAN_MODE_11B || w->mode == OPC_WLAN_MODE_11G) &&
-         w->scan_band == OPC_SCAN_BAND_5GHZ))
+         w->scan_band == OPC_SCAN_BAND_5GHZ) ||
+        /* #186: 11a is 5 GHz only; with a 2.4 GHz SCAN Band the device would
+         * run 11g instead. An unset band leaves 11a unrestricted. */
+        (w->mode == OPC_WLAN_MODE_11A && w->scan_band == OPC_SCAN_BAND_2_4GHZ))
         return OPC_ERR_RADIO_MODE;
     if (radio_bw_token(w->bandwidth) == NULL)
         return OPC_ERR_RADIO_BW;
