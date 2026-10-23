@@ -202,7 +202,7 @@ vhlctl [--host HOST] [--port PORT] [--timeout MS] [--dump] [--hex] SUBCOMMAND
 NXP backend는 주파수 목록과 mode/BW를 실제 driver helper에 함께 전달한다. mode는
 기존 Wi-Fi CLI와 같은 최대 규격 상한, BW는 20/40/80MHz 상한이다. 따라서 낮은 규격의
 AP에 연결되면 `device-info`가 반환하는 실제 협상 규격/폭은 요청보다 낮을 수 있다.
-mlan1의 ax와 b/g의 5GHz 전용 조합은 변경 전에 0x0013, 현재 적용 helper가 구현하지
+mlan1의 ax, b/g의 5GHz 전용 조합과 11a의 2.4GHz 전용 조합은 변경 전에 0x0013, 현재 적용 helper가 구현하지
 않는 160/80+80/320MHz는 0x0014를 반환한다. 일반 enum을 수용하는 host stub 결과를
 NXP 하드웨어 지원 증거로 사용하지 않는다. Dual `priority_ch`는 실적용 정책 미결이다.
 

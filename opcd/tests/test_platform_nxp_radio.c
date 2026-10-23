@@ -577,6 +577,47 @@ int main(int argc, char **argv)
     ASSERT(access(g_exec_log, F_OK) != 0,
            "unsupported mlan1 mode rejects before mlan0 changes");
 
+    /* #186: a legacy mode paired with the other band's SCAN Band is an
+     * unsupported Mode combination (0x0013) in both directions; an unset band
+     * leaves 11a unrestricted. */
+    struct band_case {
+        uint8_t mode;
+        uint16_t band;
+        uint16_t want;
+        const char *label;
+    } band_cases[] = {
+        { OPC_WLAN_MODE_11A, OPC_SCAN_BAND_2_4GHZ, OPC_ERR_RADIO_MODE,
+          "#186: 11a + 2.4 GHz SCAN Band is rejected with 0x0013" },
+        { OPC_WLAN_MODE_11A, OPC_SCAN_BAND_5GHZ, 0,
+          "#186: 11a + 5 GHz SCAN Band stays accepted" },
+        { OPC_WLAN_MODE_11A, OPC_SCAN_BAND_UNSET, 0,
+          "#186: 11a + unset SCAN Band stays accepted" },
+        { OPC_WLAN_MODE_11B, OPC_SCAN_BAND_5GHZ, OPC_ERR_RADIO_MODE,
+          "#186: 11b + 5 GHz SCAN Band stays rejected with 0x0013" },
+        { OPC_WLAN_MODE_11G, OPC_SCAN_BAND_5GHZ, OPC_ERR_RADIO_MODE,
+          "#186: 11g + 5 GHz SCAN Band stays rejected with 0x0013" },
+    };
+    for (size_t i = 0; i < sizeof band_cases / sizeof band_cases[0]; i++) {
+        memset(&cfg, 0, sizeof cfg);
+        cfg.station_type = OPC_STATION_SINGLE;
+        cfg.wlan1.mode = band_cases[i].mode;
+        cfg.wlan1.bandwidth = OPC_BANDWIDTH_20;
+        cfg.wlan1.scan_band = band_cases[i].band;
+        ASSERT(ops->validate_radio_config(&cfg) == band_cases[i].want,
+               band_cases[i].label);
+    }
+    unlink(g_exec_log);
+    memset(&cfg, 0, sizeof cfg);
+    cfg.station_type = OPC_STATION_SINGLE;
+    cfg.wlan1.mode = OPC_WLAN_MODE_11A;
+    cfg.wlan1.bandwidth = OPC_BANDWIDTH_20;
+    cfg.wlan1.scan_band = OPC_SCAN_BAND_2_4GHZ;
+    opc_scan_list_set_channel(cfg.wlan1.scan_chlist, OPC_SCAN_BAND_2_4GHZ, 6);
+    ASSERT(ops->apply_radio_config(&cfg) != 0,
+           "#186: apply defensively rejects 11a + 2.4 GHz");
+    ASSERT(access(g_exec_log, F_OK) != 0,
+           "#186: 11a + 2.4 GHz reaches no helper");
+
     /* A timed-out helper may have spawned a driver subprocess. The platform
      * must signal the entire process group so the helper's TERM cleanup runs
      * and no descendant continues mutating after the response deadline. */
