@@ -809,8 +809,9 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
         } else {
             /* Static identity (vendor/product/hardware/serial/dates/caps)
              * comes from /usr/local/opc/etc/device_info.json via inventory.h.
-             * Live-queried fields (firmware version, ntp server, MAC/IP, link
-             * state) come from the platform vtable. ack was memset(0) above,
+             * Live-queried fields (ntp server, MAC/IP, link state; the
+             * firmware version is cached at init, #187) come from the
+             * platform vtable. ack was memset(0) above,
              * so any failed lookup leaves an empty/zero field rather than
              * failing the whole Ack — GetDeviceInfo on a partly-readable
              * device is more useful than NG. */

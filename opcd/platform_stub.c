@@ -153,6 +153,11 @@ static int stub_get_firmware_version(char *buf, size_t cap)
     return stub_copy_string(buf, cap, "");
 }
 
+static void stub_refresh_firmware_version(uint32_t elapsed_s)
+{
+    (void)elapsed_s;
+}
+
 static int stub_get_ntp_server(uint32_t *server_host)
 {
     /* No timesyncd in stub environment — return "unconfigured" (0). */
@@ -369,6 +374,7 @@ static const opcd_platform_ops_t g_stub_ops = {
     .get_wlan_mac          = stub_get_wlan_mac,
     .get_essid             = stub_get_essid,
     .get_firmware_version  = stub_get_firmware_version,
+    .refresh_firmware_version = stub_refresh_firmware_version,
     .get_ntp_server        = stub_get_ntp_server,
     .get_wlan_count        = stub_get_wlan_count,
     .get_link              = stub_get_link,

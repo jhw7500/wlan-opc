@@ -135,7 +135,7 @@ sshpass -p '' ssh root@192.168.0.100        # 빈 비번
 | Ack 필드 | 소스 (파일/명령) | 계층 | 갱신 |
 |---|---|---|---|
 | vendor/product/subcode, hardware, serial, 802.11, 날짜 | `/usr/local/opc/etc/device_info.json` | static | **부팅 시 1회** |
-| firmware | `dpkg-query -W -f='${Version}' wlan-proc` | dynamic | 첫 요청 1회(캐시) |
+| firmware | `dpkg-query -W -f='${Version}' wlan-proc` | dynamic | 기동 때 1회(캐시), 실패 시 60초마다 최대 5회 재시도(#187) |
 | ntp_server | `/run/systemd/timesyncd.conf.d/opc-ntp.conf`(ChangeIp가 쓴 휘발 drop-in)가 있으면 그 `NTP=`, 없으면 `/etc/systemd/timesyncd.conf` 의 `NTP=` | dynamic | 매 요청 |
 | ethernet_mac | `/var/log/cantops/json/eth0/link.json` (항상 eth0 — mlan0 MAC은 클론이라 오보고) | live | 매 요청 |
 | ip/netmask/gateway | `opc.conf::device_ip_iface` 토글에 따라 `eth0/link.json`(기본) 또는 `mlan0/link.json` — 읽기와 change-ip 적용 대상이 **같은 선택자**를 따름 | live | 매 요청 |

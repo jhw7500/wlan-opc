@@ -336,6 +336,8 @@ static int nl_event_socket_open(void)
 
 static void nl_seed_ch_cache(void);
 
+static void nxp_fw_version_init(void);
+
 static int nxp_init(void)
 {
     /* Best-effort nl80211 event socket. Failure degrades to no-event
@@ -343,6 +345,7 @@ static int nxp_init(void)
      * serves the pull API and the polled FaultDetect probe. */
     (void)nl_event_socket_open();
     nl_seed_ch_cache();    /* best-effort too: a failed query leaves 0xFFFF */
+    nxp_fw_version_init(); /* best-effort: a failed read is retried later */
     return 0;
 }
 
@@ -504,15 +507,18 @@ static int nxp_copy_string(char *buf, size_t cap, const char *src)
     return 0;
 }
 
-/* dpkg-query result cache. Populated lazily on the first
- * nxp_get_firmware_version() call after opcd boot. Empty string means
- * "not yet queried OR dpkg-query failed" — the caller cannot tell the
- * difference, which is fine because both yield the same empty wire field. */
+/* dpkg-query result cache (#187). Read once by nxp_init, before opcd starts
+ * receiving, so GetDeviceInfo never runs the query. Empty means the read has
+ * not succeeded yet; the timer hook then retries it every
+ * FW_RETRY_INTERVAL_S, at most FW_RETRY_MAX times. */
 #define WLAN_PROC_PKG       "wlan-proc"
 #define DPKG_QUERY_BIN      "/usr/bin/dpkg-query"
 #define FW_CACHE_LEN        OPC_VERSION_FIELD_LEN
-static char  g_fw_cache[FW_CACHE_LEN];
-static bool  g_fw_cache_ready;
+#define FW_RETRY_INTERVAL_S 60u
+#define FW_RETRY_MAX        5u
+static char     g_fw_cache[FW_CACHE_LEN];
+static unsigned g_fw_retries_left;
+static uint32_t g_fw_retry_wait_s;
 
 /* Compare two monotonic timespecs; returns true if `a` is at or past `b`. */
 static bool ts_at_or_past(const struct timespec *a, const struct timespec *b)
@@ -532,8 +538,9 @@ static long timespec_diff_ms(const struct timespec *end,
 }
 
 /* Run `dpkg-query -W -f='${Version}' wlan-proc` once and copy stdout into
- * g_fw_cache (truncated to fit). Stays silent on every failure mode — the
- * empty cache string is the documented "unknown" response. fork+exec rather
+ * `out` (truncated to fit); 0 on a non-empty version, -1 otherwise with `out`
+ * empty. Stays silent on every failure mode — the empty string is the
+ * documented "unknown" response. fork+exec rather
  * than popen() so we can give the child a bounded close-on-exec pipe and
  * waitpid() it deterministically.
  *
@@ -543,21 +550,20 @@ static long timespec_diff_ms(const struct timespec *end,
  * If the child wedges without ever closing stdout, the deadline triggers
  * SIGKILL — the original blocking read() loop could not reach the
  * waitpid timeout in that scenario. */
-static void nxp_refresh_fw_cache(void)
+static int nxp_query_fw_version(char *out, size_t cap)
 {
-    g_fw_cache_ready = true;
-    g_fw_cache[0] = '\0';
+    out[0] = '\0';
 
     /* pipe2(O_CLOEXEC) closes both ends across any future exec() in opcd.
      * O_CLOEXEC on the *child's* write end is dropped by dup2() below,
      * which is the standard pattern for redirecting stdout to a pipe. */
     int pipefd[2];
-    if (pipe2(pipefd, O_CLOEXEC) != 0) return;
+    if (pipe2(pipefd, O_CLOEXEC) != 0) return -1;
 
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]); close(pipefd[1]);
-        return;
+        return -1;
     }
     if (pid == 0) {
         /* child */
@@ -633,9 +639,9 @@ static void nxp_refresh_fw_cache(void)
     }
     close(pipefd[0]);
 
-    if (killed) return;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return;
-    if (off == 0) return;
+    if (killed) return -1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -1;
+    if (off == 0) return -1;
 
     /* dpkg-query may end the version with a trailing newline depending on
      * stdio buffering — trim it. */
@@ -643,15 +649,47 @@ static void nxp_refresh_fw_cache(void)
                        buf[off-1] == ' '  || buf[off-1] == '\t')) {
         off--;
     }
-    if (off == 0) return;
-    if (off >= sizeof g_fw_cache) off = sizeof g_fw_cache - 1;
-    memcpy(g_fw_cache, buf, off);
-    g_fw_cache[off] = '\0';
+    if (off == 0) return -1;
+    if (off >= cap) off = cap - 1;
+    memcpy(out, buf, off);
+    out[off] = '\0';
+    return 0;
+}
+
+/* Test seam (like g_iface_freq_query below): the host test substitutes the
+ * query so it never runs the build host's dpkg-query. */
+static int (*g_fw_version_query)(char *out, size_t cap) = nxp_query_fw_version;
+
+static void nxp_fw_version_init(void)
+{
+    g_fw_retries_left = FW_RETRY_MAX;
+    g_fw_retry_wait_s = 0;
+    g_fw_cache[0] = '\0';
+    if (g_fw_version_query(g_fw_cache, sizeof g_fw_cache) != 0)
+        fprintf(stderr, "opcd: firmware version unavailable at startup — "
+                        "retrying every %us, at most %u times\n",
+                FW_RETRY_INTERVAL_S, FW_RETRY_MAX);
+}
+
+/* Timer hook: retry a failed read outside the request path. One retry may
+ * block the main loop for the query's 2 s budget. */
+static void nxp_refresh_firmware_version(uint32_t elapsed_s)
+{
+    if (g_fw_cache[0] != '\0' || g_fw_retries_left == 0) return;
+    g_fw_retry_wait_s = elapsed_s >= FW_RETRY_INTERVAL_S - g_fw_retry_wait_s
+                        ? FW_RETRY_INTERVAL_S : g_fw_retry_wait_s + elapsed_s;
+    if (g_fw_retry_wait_s < FW_RETRY_INTERVAL_S) return;
+    g_fw_retry_wait_s = 0;
+    g_fw_retries_left--;
+    if (g_fw_version_query(g_fw_cache, sizeof g_fw_cache) == 0)
+        fprintf(stderr, "opcd: firmware version read on retry: %s\n", g_fw_cache);
+    else if (g_fw_retries_left == 0)
+        fprintf(stderr, "opcd: firmware version still unavailable — retries "
+                        "exhausted, reported empty until restart\n");
 }
 
 static int nxp_get_firmware_version(char *buf, size_t cap)
 {
-    if (!g_fw_cache_ready) nxp_refresh_fw_cache();
     return nxp_copy_string(buf, cap, g_fw_cache);
 }
 
@@ -1996,6 +2034,7 @@ static const opcd_platform_ops_t g_nxp_ops = {
     .get_wlan_mac          = nxp_get_wlan_mac,
     .get_essid             = nxp_get_essid,
     .get_firmware_version  = nxp_get_firmware_version,
+    .refresh_firmware_version = nxp_refresh_firmware_version,
     .get_ntp_server        = nxp_get_ntp_server,
     .get_wlan_count        = nxp_get_wlan_count,
     .get_link              = nxp_get_link,
