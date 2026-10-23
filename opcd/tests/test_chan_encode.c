@@ -69,18 +69,18 @@ int main(void)
     ASSERT(opc_assoc_chan_field(0, 0, true, 5180, 36) == CH(OPC_BAND_5GHZ, 36),
            "assoc: empty event → link fallback");
 
-    /* Event has no freq + link reports NOT associated → stay 0 (no stale
-     * channel from a prior session). */
-    ASSERT(opc_assoc_chan_field(0, 0, false, 5180, 36) == 0,
-           "assoc: empty event + unassociated link → 0");
+    /* Event has no freq + link reports NOT associated → unset 0xFFFF (spec
+     * 4.2.2; no stale channel from a prior session, #185). */
+    ASSERT(opc_assoc_chan_field(0, 0, false, 5180, 36) == 0xFFFF,
+           "assoc: empty event + unassociated link → 0xFFFF");
 
-    /* Event has no freq + associated link but link channel also 0 → 0. */
-    ASSERT(opc_assoc_chan_field(0, 0, true, 5180, 0) == 0,
-           "assoc: empty event + link ch 0 → 0");
+    /* Event has no freq + associated link but link channel also 0 → 0xFFFF. */
+    ASSERT(opc_assoc_chan_field(0, 0, true, 5180, 0) == 0xFFFF,
+           "assoc: empty event + link ch 0 → 0xFFFF");
 
-    /* Everything empty → 0. */
-    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 0) == 0,
-           "assoc: all empty → 0");
+    /* Everything empty → 0xFFFF. */
+    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 0) == 0xFFFF,
+           "assoc: all empty → 0xFFFF");
 
     /* Link fallback must be band-qualified. nxp_get_link parses link.json's
      * freq and channel independently, so an associated readback can carry a
@@ -88,15 +88,25 @@ int main(void)
      * 5896..5954). The event path can never produce this (its channel is
      * derived from freq via freq_to_channel), so reject the band-less result
      * rather than emit a half-populated field (band byte 0 + channel). */
-    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 36) == 0,
-           "assoc: link ch without freq → 0 (no band)");
-    ASSERT(opc_assoc_chan_field(0, 0, true, 5900, 40) == 0,
-           "assoc: link band-gap freq (5896-5954) → 0");
+    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 36) == 0xFFFF,
+           "assoc: link ch without freq → 0xFFFF (no band)");
+    ASSERT(opc_assoc_chan_field(0, 0, true, 5900, 40) == 0xFFFF,
+           "assoc: link band-gap freq (5896-5954) → 0xFFFF");
 
     /* Corrupt link channel (>255) must not overflow into the band byte and be
      * mistaken for a valid band-qualified fallback. */
-    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 256) == 0,
-           "assoc: link overflow ch (>255) → 0");
+    ASSERT(opc_assoc_chan_field(0, 0, true, 0, 256) == 0xFFFF,
+           "assoc: link overflow ch (>255) → 0xFFFF");
+
+    /* ---- opc_notify_chan_field: channel change / roaming (#185) ---------- */
+    ASSERT(opc_notify_chan_field(5180, 36) == CH(OPC_BAND_5GHZ, 36),
+           "notify: known channel is encoded");
+    ASSERT(opc_notify_chan_field(0, 0) == 0xFFFF,
+           "notify: unknown channel → 0xFFFF");
+    ASSERT(opc_notify_chan_field(2412, 256) == 0xFFFF,
+           "notify: overflow channel → 0xFFFF");
+    ASSERT(opc_notify_chan_field(0, 36) == 0xFFFF,
+           "notify: channel without a band → 0xFFFF");
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);

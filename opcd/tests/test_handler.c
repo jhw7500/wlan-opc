@@ -2460,6 +2460,22 @@ int main(void)
          *     the logged-in session's IP; any other source stays silent. */
         uint8_t badf[30];
         memset(badf, 0, sizeof badf);
+        /* The non-session source gets its own bound address (127.0.0.2) so a
+         * reply, were one sent, would arrive and fail the silence checks; a
+         * reply to an unbound address could never be observed (#185). */
+        int other = socket(AF_INET, SOCK_DGRAM, 0);
+        uint16_t other_port = 0;
+        {
+            struct sockaddr_in oa = {0};
+            oa.sin_family      = AF_INET;
+            oa.sin_addr.s_addr = htonl(LOOP + 1);
+            socklen_t ol = sizeof oa;
+            ASSERT(other >= 0 &&
+                   bind(other, (struct sockaddr *)&oa, sizeof oa) == 0 &&
+                   getsockname(other, (struct sockaddr *)&oa, &ol) == 0,
+                   "D13: non-session observer bound on 127.0.0.2");
+            other_port = ntohs(oa.sin_port);
+        }
         {
             opc_header_t bh = { .protocol_version  = OPC_PROTOCOL_VERSION,
                                 .command_type      = OPC_CMD_REQUEST,
@@ -2482,9 +2498,91 @@ int main(void)
                bad_ack.result == OPC_RESULT_NG &&
                bad_ack.error_cause == OPC_ERR_PACKET_SIZE,
                "D13: NG echoes req/seq with 0x0003");
-        opcd_reject_bad_length(&st, badf, sizeof badf, LOOP + 1, cli_port);
-        ASSERT(wait_fd_readable(cli, 300) != 0,
+        ASSERT(rn == 68, "#185: other commands keep the 68 B general NG");
+
+        /* #185: the two commands whose responses are not the general ACK
+         * answer a bad-length frame in their own formats. */
+        {
+            uint8_t infof[30];
+            memset(infof, 0, sizeof infof);
+            opc_header_t ih = { .protocol_version  = OPC_PROTOCOL_VERSION,
+                                .command_type      = OPC_CMD_REQUEST,
+                                .req_indication_id = OPC_REQ_GET_BASIC_INFO,
+                                .sequence_number   = 78,
+                                .length            = 22 };
+            (void)opc_fixed_header_pack(infof, &ih);
+            opcd_reject_bad_length(&st, infof, sizeof infof, LOOP, cli_port);
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "#185: bad-length GetBasicInfo is answered");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_get_basic_info_ack_t bi;
+            ASSERT(rn == 80 &&
+                   opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.req_indication_id == OPC_REQ_GET_BASIC_INFO &&
+                   ahdr.sequence_number == 78 &&
+                   opc_get_basic_info_ack_unpack(rx_buf, (size_t)rn, &bi) == 0 &&
+                   bi.device_status == st.boot_status,
+                   "#185: bad-length GetBasicInfo answers the 80 B basic info");
+            {
+                uint8_t qf[OPC_FRAME_MAX], qr[OPC_FRAME_MAX];
+                ssize_t qn = opc_get_basic_info_req_pack(qf, sizeof qf, 80);
+                ssize_t qrlen = -1;
+                ASSERT(qn > 0 &&
+                       opcd_dispatch(&st, qf, (size_t)qn, LOOP, cli_port,
+                                     qr, sizeof qr, &qrlen) == 0 &&
+                       qrlen == 80 && rn == 80 &&
+                       memcmp(qr + 64, rx_buf + 64, 16) == 0,
+                       "#185: bad-length GetBasicInfo body equals the normal answer");
+            }
+            opcd_reject_bad_length(&st, infof, sizeof infof, LOOP + 1, other_port);
+            ASSERT(wait_fd_readable(other, 300) != 0,
+                   "#185: bad-length GetBasicInfo from a non-session source stays silent");
+
+            ih.req_indication_id = OPC_REQ_GET_DEVICE_INFO;
+            ih.sequence_number   = 79;
+            memset(infof, 0, sizeof infof);
+            (void)opc_fixed_header_pack(infof, &ih);
+            opcd_reject_bad_length(&st, infof, sizeof infof, LOOP, cli_port);
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "#185: bad-length GetDeviceInfo is answered");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            opc_get_device_info_ack_t di;
+            ASSERT(rn == 416 &&
+                   opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.req_indication_id == OPC_REQ_GET_DEVICE_INFO &&
+                   ahdr.sequence_number == 79 &&
+                   opc_get_device_info_ack_unpack(rx_buf, (size_t)rn, &di) == 0 &&
+                   di.result == OPC_RESULT_NG &&
+                   di.error_cause == OPC_ERR_PACKET_SIZE,
+                   "#185: bad-length GetDeviceInfo answers a 416 B NG 0x0003");
+            {
+                bool rest_zero = rn == 416;
+                for (ssize_t i = 68; rest_zero && i < rn; i++)
+                    if (rx_buf[i] != 0) rest_zero = false;
+                ASSERT(rest_zero,
+                       "#185: bad-length GetDeviceInfo NG carries a zero body after the result");
+            }
+
+            /* Indication IDs reuse 0x0001/0x0002: a non-REQUEST frame keeps
+             * the general NG. */
+            ih.command_type      = OPC_CMD_INDICATION;
+            ih.req_indication_id = OPC_REQ_GET_BASIC_INFO;
+            ih.sequence_number   = 81;
+            memset(infof, 0, sizeof infof);
+            (void)opc_fixed_header_pack(infof, &ih);
+            opcd_reject_bad_length(&st, infof, sizeof infof, LOOP, cli_port);
+            ASSERT(wait_fd_readable(cli, 1000) == 0,
+                   "#185: bad-length non-REQUEST 0x0001 is answered");
+            rn = recv(cli, rx_buf, sizeof rx_buf, 0);
+            ASSERT(rn == 68 &&
+                   opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                   ahdr.sequence_number == 81,
+                   "#185: a non-REQUEST frame keeps the 68 B general NG");
+        }
+        opcd_reject_bad_length(&st, badf, sizeof badf, LOOP + 1, other_port);
+        ASSERT(wait_fd_readable(other, 300) != 0,
                "D13: non-session source stays silent");
+        if (other >= 0) close(other);
         opcd_reject_bad_length(&st, badf, 4 /* <8 B: no header to echo */,
                                LOOP, cli_port);
         ASSERT(wait_fd_readable(cli, 300) != 0,

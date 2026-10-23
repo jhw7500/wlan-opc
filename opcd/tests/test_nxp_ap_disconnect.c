@@ -336,9 +336,45 @@ static void test_disconnect_channel(void)
     expect_disc_ch(0, 0xFFFF, "#166: unresolvable roam channel falls back to 0xFFFF");
 }
 
+/* #185: a notification whose channel cannot be resolved carries the spec 4.2.2
+ * unset value 0xFFFF, not 0: association (no WIPHY_FREQ and a failed kernel
+ * query, ifindex 0), channel change and roaming alike. */
+static void test_unknown_notify_channel(void)
+{
+    opcd_platform_evt_t tab[NL_COALESCE_MAX] = {0};
+    size_t count = 0;
+    opcd_nl_evt_t evt = {0};
+    evt.kind = OPCD_NL_CONNECT;
+    nl_stage_evt(tab, &count, &evt, 0);
+    const opcd_platform_evt_t *ws = find_status(tab, count, 0);
+    ASSERT(ws && ws->u.wlan_status.status == OPCD_WLAN_STATUS_ASSOCIATED &&
+           ws->u.wlan_status.channel == 0xFFFF,
+           "#185: association with an unresolvable channel carries 0xFFFF");
+
+    memset(tab, 0, sizeof tab);
+    count = 0;
+    evt.kind = OPCD_NL_CH_SWITCH;
+    nl_stage_evt(tab, &count, &evt, 0);
+    ws = find_status(tab, count, 0);
+    ASSERT(ws && ws->u.wlan_status.status == OPCD_WLAN_STATUS_CHANNEL_CHANGE &&
+           ws->u.wlan_status.channel == 0xFFFF,
+           "#185: channel change with an unresolvable channel carries 0xFFFF");
+
+    memset(tab, 0, sizeof tab);
+    count = 0;
+    evt.kind = OPCD_NL_ROAM;
+    nl_stage_evt(tab, &count, &evt, 0);
+    const opcd_platform_evt_t *roam = NULL;
+    for (size_t i = 0; i < count; i++)
+        if (tab[i].kind == OPCD_PEVT_ROAMING && tab[i].u.roaming.idx == 0) roam = &tab[i];
+    ASSERT(roam && roam->u.roaming.channel == 0xFFFF,
+           "#185: roaming with an unresolvable channel carries 0xFFFF");
+}
+
 int main(void)
 {
     test_disconnect_channel();
+    test_unknown_notify_channel();
     test_captured_deauth_and_fast_reconnect();
     test_disassoc_and_explicit_mac();
     test_hint_lifetime_and_interface();
