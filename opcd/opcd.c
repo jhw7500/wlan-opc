@@ -578,12 +578,17 @@ int main(int argc, char **argv)
                         opcd_session_logout(&st);
                     }
                 }
-                opcd_ind_tick_elapsed(&st, elapsed > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)elapsed);
+                const uint32_t elapsed_s = elapsed > 0xFFFFFFFFu ? 0xFFFFFFFFu
+                                                                 : (uint32_t)elapsed;
+                opcd_ind_tick_elapsed(&st, elapsed_s);
                 /* Deliberately emitted by the main epoll loop, never by the
                  * async store worker: if this loop is alive-but-hung, pings
                  * stop and systemd restarts only the OPCd process. */
                 if (opcd_systemd_watchdog(&systemd_notify) < 0)
                     LOG("systemd WATCHDOG notification failed: %s", strerror(errno));
+                /* After the ping and the indication tick: a retried read may
+                 * block for up to its 2 s budget (#187). */
+                plat->refresh_firmware_version(elapsed_s);
             } else if (fd == store_fd) {
                 /* store_fd is -1 when no async writer is attached (creation or
                  * epoll_ctl failed); a real fd never equals -1, so this branch

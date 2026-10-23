@@ -201,10 +201,15 @@ typedef struct opcd_platform_ops {
     /* SSID string for the indexed WLAN interface. NUL-terminated, silently
      * truncated to cap. Empty string when not associated. */
     int  (*get_essid)(int idx, char *buf, size_t cap);
-    /* Live-queried fields. Static identity (hardware version / serial /
+    /* Live-queried fields (the firmware version is read once at init and
+     * cached, #187). Static identity (hardware version / serial /
      * manufacture+shipment date / capability bits / vendor+product codes)
      * lives in inventory.h, not on this vtable. */
     int  (*get_firmware_version)(char *buf, size_t cap);
+    /* Called from the main loop's 1 s timer with the seconds elapsed since
+     * the previous call. A platform that reads the firmware version outside
+     * the request path retries a failed read here (#187); no-op otherwise. */
+    void (*refresh_firmware_version)(uint32_t elapsed_s);
     /* IPv4 NTP server in host byte order; 0 when unconfigured or when the
      * platform cannot determine it (e.g. timesyncd.conf carries a hostname
      * rather than a literal IP). */
