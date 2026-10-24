@@ -85,6 +85,8 @@ else printf '  \033[31mFAIL\033[0m  KeepAlive 수신 부족(%s)\n' "$ka"; fail=$
 # ============ 4. SetPassword (백업/복원) ============
 sec "4. SetPassword"
 chk "set-password old오타 → NG 0x0010"      "0x0010"       $VHL set-password --old WRONGold --new NewPass1234
+# #200(통신 사양서 [표15]): 빈 새 비밀번호는 기존 비밀번호가 맞아도 0x0013, 비밀번호는 그대로.
+chk "set-password 빈 새 비번 → NG 0x0013"    "0x0013"       $VHL set-password --old "$PW" --new ""
 chk "set-password OK"                        "OK"           $VHL set-password --old "$PW" --new NewPass1234
 vhl_ssh 'systemctl restart opcd; sleep 1' >/dev/null 2>&1
 chk "새 비번 restart 잔존 → login OK"        "OK"           $VHL login --password NewPass1234

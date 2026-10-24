@@ -1397,15 +1397,15 @@ static int handle_set_password(opcd_state_t *st, const uint8_t *frame, size_t fl
         } else if (!valid_opc_charset(req.old_password)) {
             /* §3.3.5 0x0011: old password disallowed character (E1, DFK 2026-06-29) */
             result = OPC_RESULT_NG; err = OPC_ERR_OLD_PW_CHAR;
-        } else if (!valid_opc_charset(req.new_password)) {
-            /* §3.3.5 0x0013: new password disallowed character (E1, DFK 2026-06-29) */
+        } else if (newlen == 0 || !valid_opc_charset(req.new_password)) {
+            /* §3.3.5 0x0013: new password disallowed character (E1, DFK 2026-06-29)
+             * or empty (#200, communication spec [표15]). An empty new password
+             * is how the unauthenticated empty-login state became reachable, so
+             * it is refused — here, ahead of the old-password check, so a host
+             * that sent the right old password is not told it was wrong. */
             result = OPC_RESULT_NG; err = OPC_ERR_NEW_PW_CHAR;
         } else if (strncmp(req.old_password, st->password, sizeof st->password - 1) != 0 &&
                    !password_resend_of_unsynced(st, &req)) {
-            result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
-        } else if (newlen == 0) {
-            /* Refuse an empty new password — that is how the unauthenticated
-             * empty-login state became reachable. Reject at the source. */
             result = OPC_RESULT_NG; err = OPC_ERR_PASSWORD_MISMATCH;
         } else {
             int reservation = -1;

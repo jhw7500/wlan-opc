@@ -89,7 +89,7 @@
  * or invalid-station-type depending on which command produced it. This
  * overload is a spec limitation, not something opcd can fix unilaterally. */
 #define OPC_ERR_INDICATION_SETTING_VIOLATION  0x0010  /* GetDeviceInfo while indication enabled */
-#define OPC_ERR_PASSWORD_MISMATCH             0x0010  /* Login/SetPassword: wrong or empty password */
+#define OPC_ERR_PASSWORD_MISMATCH             0x0010  /* Login: wrong or empty password; SetPassword: wrong old password */
 #define OPC_ERR_SLOT_RANGE                    0x0010  /* SetIpConfigList/ChangeIpAddress: slot # out of range */
 #define OPC_ERR_STATION_TYPE                  0x0010  /* SetRadioConfig: invalid station_type */
 #define OPC_ERR_SLOT_EMPTY                    0x0011  /* ChangeIpAddress: target slot empty */
@@ -173,7 +173,7 @@
                                                        * character (E1; charset confirmed by DFK
                                                        * 2026-06-29 — A-Z a-z 0-9 . - _ + / : = ~ @) */
 #define OPC_ERR_OLD_PW_CHAR                   0x0011  /* SetPassword §3.3.5: old password disallowed char (E1) */
-#define OPC_ERR_NEW_PW_CHAR                   0x0013  /* SetPassword §3.3.5: new password disallowed char (E1) */
+#define OPC_ERR_NEW_PW_CHAR                   0x0013  /* SetPassword §3.3.5: new password disallowed char (E1) or empty (#200) */
 #define OPC_ERR_IPCFG_IP                      0x0011  /* SetIpConfigList: impossible IP (0.0.0.0/bcast/mcast) */
 #define OPC_ERR_IPCFG_NETMASK                 0x0012  /* SetIpConfigList: not a valid netmask */
 #define OPC_ERR_IPCFG_GW                      0x0013  /* SetIpConfigList: gateway outside the entry's subnet */
