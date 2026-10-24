@@ -148,6 +148,9 @@ static void state_set_defaults(opcd_state_t *st)
     st->paths.reset_cause    = OPC_PATH_RESET_CAUSE;
     st->paths.password    = OPC_PATH_PASSWORD;
     st->paths.ip_list     = OPC_PATH_IPLIST;
+    st->paths.ip_list_legacy = OPC_PATH_IPLIST_LEGACY;
+    st->paths.ip_list_user   = OPC_PATH_IPLIST_USER;
+    st->paths.ip_list_user_last = OPC_PATH_IPLIST_USER_LAST;
     st->paths.radio       = OPC_PATH_RADIO;
     st->paths.device_info = OPC_PATH_DEVICE_INFO;
     st->paths.temp_dir    = OPC_PATH_TEMP;
@@ -185,11 +188,9 @@ static void state_load_from_disk(opcd_state_t *st)
     /* radio.conf: read, decide and (on migration) write back — all in handler.c
      * so the whole startup behaviour is host-testable via st->paths.radio. */
     (void)opcd_radio_conf_load(st);
-    n = opc_store_read_all(st->paths.ip_list, &st->ip_list, sizeof st->ip_list);
-    if (n > 0 && (size_t)n != sizeof st->ip_list) {
-        LOG("iplist size mismatch (%zd vs %zu) — discarding", n, sizeof st->ip_list);
-        memset(&st->ip_list, 0, sizeof st->ip_list);
-    }
+    /* IP list (#194, spec 6.5): opcd's copy, then a replaced customer file —
+     * handler.c. */
+    (void)opcd_iplist_load(st, NULL);
 }
 
 static int ensure_dirs(const opcd_state_t *st)

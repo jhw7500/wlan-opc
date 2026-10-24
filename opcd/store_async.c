@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
@@ -20,6 +21,7 @@ typedef enum {
 typedef struct {
     job_state_t state;
     char        path[1024];
+    char        echo_path[1024];   /* "" = none; see opc_store_async_submit_echo */
     uint8_t     data[OPC_STORE_ASYNC_DATA_MAX];
     size_t      len;
     mode_t      mode;
@@ -83,6 +85,11 @@ static void *worker_main(void *arg)
         opc_store_outcome_t outcome;
         int rc = opc_store_write_atomic_ex(j->path, j->data, j->len, j->mode, &outcome);
         int e  = (rc != 0) ? errno : 0;
+        /* The echo records what the target now shows, so it follows a visible
+         * replacement only; its own failure leaves the job's result alone. */
+        if (j->echo_path[0] && outcome != OPC_STORE_UNCHANGED &&
+            opc_store_write_atomic(j->echo_path, j->data, j->len, j->mode) != 0)
+            fprintf(stderr, "opcd: store: writing %s failed: %s\n", j->echo_path, strerror(errno));
 
         pthread_mutex_lock(&sa->mu);
         j->result      = rc;
@@ -181,6 +188,7 @@ int opc_store_async_reserve(opc_store_async_t *sa, const char *path, size_t len)
     }
     job_t *j = &sa->jobs[ji];
     memcpy(j->path, path, plen + 1);
+    j->echo_path[0] = '\0';
     j->len = len;
     j->state = JOB_RESERVED;
     pthread_mutex_unlock(&sa->mu);
@@ -207,13 +215,14 @@ int opc_store_async_submit_reserved(opc_store_async_t *sa, int reservation,
     }
     pthread_mutex_lock(&sa->mu);
     job_t *j = &sa->jobs[reservation];
-    if (sa->shutdown || j->state != JOB_RESERVED || j->len != len) {
+    if (sa->shutdown || j->state != JOB_RESERVED || len > j->len) {
         int e = sa->shutdown ? ECANCELED : EINVAL;
         pthread_mutex_unlock(&sa->mu);
         errno = e;
         return -1;
     }
     if (len > 0) memcpy(j->data, data, len);
+    j->len = len;
     j->mode = mode;
     j->token = token;
     j->result = 0;
@@ -225,6 +234,29 @@ int opc_store_async_submit_reserved(opc_store_async_t *sa, int reservation,
     pthread_cond_broadcast(&sa->cv);
     pthread_mutex_unlock(&sa->mu);
     return 0;
+}
+
+int opc_store_async_submit_echo(opc_store_async_t *sa, const char *path,
+                                const char *echo_path, const void *data,
+                                size_t len, mode_t mode, uint64_t token)
+{
+    if (!echo_path || strlen(echo_path) >= sizeof sa->jobs[0].echo_path) {
+        errno = echo_path ? ENAMETOOLONG : EINVAL;
+        return -1;
+    }
+    if (len > 0 && !data) { errno = EINVAL; return -1; }
+    int reservation = opc_store_async_reserve(sa, path, len);
+    if (reservation < 0) return -1;
+    pthread_mutex_lock(&sa->mu);
+    strcpy(sa->jobs[reservation].echo_path, echo_path);
+    pthread_mutex_unlock(&sa->mu);
+    int rc = opc_store_async_submit_reserved(sa, reservation, data, len, mode, token);
+    if (rc != 0) {
+        int e = errno;
+        opc_store_async_cancel(sa, reservation);
+        errno = e;
+    }
+    return rc;
 }
 
 int opc_store_async_submit(opc_store_async_t *sa, const char *path,

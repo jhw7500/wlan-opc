@@ -184,16 +184,17 @@ int main(void)
                "cancelled reservation never reaches persistent storage");
     }
 
-    /* 5d. submit_reserved accepts only its captured length, consumes the
-     *     handle exactly once, and retains the reservation after a rejected
-     *     length so the owner can still submit or cancel it deliberately. */
+    /* 5d. submit_reserved accepts up to its captured length (#194: the IP
+     *     list text is sized only after the mutation), consumes the handle
+     *     exactly once, and retains the reservation after a rejected length
+     *     so the owner can still submit or cancel it deliberately. */
     {
         int reservation = opc_store_async_reserve(sa, path_reserved, 5);
         ASSERT(reservation >= 0, "second reservation succeeds");
         ASSERT(opc_store_async_submit_reserved(sa, reservation,
-                                               "bad", 3, 0644, 300u) == -1 &&
+                                               "toolong", 7, 0644, 300u) == -1 &&
                errno == EINVAL,
-               "reserved submit rejects length different from admission");
+               "reserved submit rejects a length beyond the admission");
         ASSERT(opc_store_async_submit_reserved(sa, reservation,
                                                "right", 5, 0644, 301u) == 0,
                "reservation remains usable after rejected submit");
@@ -207,6 +208,19 @@ int main(void)
                read_file(path_reserved, buf, sizeof buf - 1) == 5 &&
                strcmp(buf, "right") == 0,
                "reserved submit preserves token and writes captured path");
+    }
+
+    /* 5d'. A shorter submission than reserved writes exactly its own bytes. */
+    {
+        int reservation = opc_store_async_reserve(sa, path_reserved, 24);
+        ASSERT(reservation >= 0 &&
+               opc_store_async_submit_reserved(sa, reservation, "ok", 2, 0644, 303u) == 0,
+               "reserved submit accepts a length below the admission");
+        n = drain_n(sa, done, 1);
+        memset(buf, 0, sizeof buf);
+        ASSERT(n == 1 && done[0].token == 303u &&
+               read_file(path_reserved, buf, sizeof buf - 1) == 2 && strcmp(buf, "ok") == 0,
+               "a shorter reserved submit writes only its own length");
     }
 
     /* Reservations do not impose worker order.  Jobs enter FIFO when they are

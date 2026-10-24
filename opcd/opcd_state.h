@@ -47,7 +47,10 @@ typedef struct opcd_conf {
 typedef struct opcd_paths {
     const char *conf;
     const char *password;
-    const char *ip_list;
+    const char *ip_list;          /* opcd's copy of the list in effect, spec Figure 4-5 text (#194) */
+    const char *ip_list_user;     /* the customer's copy, replaceable over FTP (#194, spec 6.5) */
+    const char *ip_list_user_last;/* what opcd last put in (or applied from) the customer's copy */
+    const char *ip_list_legacy;   /* pre-#194 binary list, migrated once at boot */
     const char *radio;
     const char *device_info;
     const char *temp_dir;
@@ -58,7 +61,12 @@ typedef struct opcd_paths {
 #define OPC_PATH_BASE        "/usr/local/opc/etc"
 #define OPC_PATH_CONF        OPC_PATH_BASE "/opc.conf"
 #define OPC_PATH_PASSWORD    OPC_PATH_BASE "/password"
-#define OPC_PATH_IPLIST      OPC_PATH_BASE "/iplist.cfg"
+#define OPC_PATH_IPLIST      OPC_PATH_BASE "/iplist.txt"
+#define OPC_PATH_IPLIST_LEGACY OPC_PATH_BASE "/iplist.cfg"
+/* The file-transfer (FTP) account's home: the customer can replace this file
+ * with any transfer means (spec 6.5). */
+#define OPC_PATH_IPLIST_USER "/home/admin/iplist.txt"
+#define OPC_PATH_IPLIST_USER_LAST OPC_PATH_BASE "/iplist.user.last"
 #define OPC_PATH_RADIO       OPC_PATH_BASE "/radio.conf"
 #define OPC_PATH_DEVICE_INFO OPC_PATH_BASE "/device_info.json"
 #define OPC_PATH_WIFI_INIT_CONF "/usr/local/etc/wifi_init_conf.json"   /* wlan-package */

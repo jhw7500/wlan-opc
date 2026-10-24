@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "../handler.h"
+#include "../iplist_text.h"
 #include "../platform.h"
 #include "../store.h"
 #include "../store_async.h"
@@ -160,9 +161,17 @@ static int bind_loopback(uint16_t *port_out)
 
 static int file_equals(const char *path, const void *want, size_t want_len)
 {
-    uint8_t buf[8192];
+    static uint8_t buf[OPC_IPLIST_TEXT_MAX + 1];
     ssize_t n = opc_store_read_all(path, buf, sizeof buf);
     return n == (ssize_t)want_len && memcmp(buf, want, want_len) == 0;
+}
+
+/* #194: the IP list file is the spec Figure 4-5 text of the list. */
+static int ip_file_equals(const char *path, const opcd_ip_list_t *l)
+{
+    static char want[OPC_IPLIST_TEXT_MAX];
+    ssize_t n = opc_iplist_text_format(l, want, sizeof want);
+    return n >= 0 && file_equals(path, want, (size_t)n);
 }
 
 static void init_state(opcd_state_t *st, const char *pw_path, const char *ip_path,
@@ -515,7 +524,7 @@ static void test_ip_publication_and_no_ack(const char *pw_path,
           ip_err == OPC_ERR_NVRAM,
           "ip replaced-unsynced: original request receives NVRAM NG");
     CHECK(st.ip_list.present[0] && st.ip_list.slots[0].ip_address == e.ip_address &&
-          file_equals(ip_path, &st.ip_list, sizeof st.ip_list),
+          ip_file_equals(ip_path, &st.ip_list),
           "ip replaced-unsynced: visible target and published list agree");
 
     n = dispatch_change_ip(&st, port, 202, 1, resp);
@@ -593,8 +602,7 @@ static void test_ip_failed_commit_drops_dependent_staging(const char *pw_path,
     if (server < 0 || client < 0 || !store) return;
     opcd_state_t st;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
-    opcd_ip_list_t empty = {0};
-    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+    CHECK(opc_store_write_atomic(ip_path, "", 0, 0644) == 0,
           "ip chain async: old durable baseline written");
     fault_arm(FAULT_RENAME);
     CHECK(dispatch_ip_list(&st, port, 220, chained, 2, resp) == 0,
@@ -628,7 +636,7 @@ static void test_ip_failed_commit_drops_dependent_staging(const char *pw_path,
           "ip chain durable: handler rig created");
     if (server < 0 || client < 0 || !store) return;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
-    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+    CHECK(opc_store_write_atomic(ip_path, "", 0, 0644) == 0,
           "ip chain durable: old durable baseline written");
     fault_arm(FAULT_BLOCK_FILE_FSYNC);
     CHECK(dispatch_ip_list(&st, port, 245, chained, 2, resp) == 0 &&
@@ -668,7 +676,7 @@ static void test_ip_failed_commit_drops_dependent_staging(const char *pw_path,
           "ip chain session: handler rig created");
     if (server < 0 || client < 0 || !store) return;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
-    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+    CHECK(opc_store_write_atomic(ip_path, "", 0, 0644) == 0,
           "ip chain session: old durable baseline written");
     fault_arm(FAULT_BLOCK_FILE_FSYNC);
     CHECK(dispatch_ip_list(&st, port, 250, chained, 2, resp) == 0 &&
@@ -700,7 +708,7 @@ static void test_ip_failed_commit_drops_dependent_staging(const char *pw_path,
 
     /* Synchronous fallback must use the same unchanged publication rule. */
     init_state(&st, pw_path, ip_path, radio_path, -1, NULL, 42001);
-    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+    CHECK(opc_store_write_atomic(ip_path, "", 0, 0644) == 0,
           "ip chain sync: old durable baseline written");
     fault_arm(FAULT_RENAME);
     n = dispatch_ip_list(&st, 42001, 230, chained, 2, resp);
@@ -721,7 +729,7 @@ static void test_ip_failed_commit_drops_dependent_staging(const char *pw_path,
           "ip chain partial: handler rig created");
     if (server < 0 || client < 0 || !store) return;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
-    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+    CHECK(opc_store_write_atomic(ip_path, "", 0, 0644) == 0,
           "ip chain partial: old durable baseline written");
     opc_ipcfg_entry_t partial[3] = { chained[0], chained[1],
         ip_entry(0, OPC_LIST_BOUNDARY_START_END, 0xc633642bu, "bad_slot") };
@@ -921,6 +929,66 @@ static uint16_t unpack_radio_result(const uint8_t *wire, ssize_t n, uint16_t *er
  * NVRAM NG while the new value is already live. The client re-sends the same
  * request (a split IP list from its START); every resource must converge to OK
  * on that re-send and leave the new value in its file. */
+/* #194: the list is written as text. A full list is far larger than both the
+ * old 8 KiB job buffer and the sizeof(opcd_ip_list_t) the admission used to
+ * reserve, yet the deferred write must succeed and leave every list on disk. */
+static void test_ip_full_list_text(const char *pw_path, const char *ip_path,
+                                   const char *radio_path)
+{
+    uint16_t port = 0;
+    int server = bind_loopback(NULL);
+    int client = bind_loopback(&port);
+    opc_store_async_t *store = opc_store_async_create();
+    CHECK(server >= 0 && client >= 0 && store != NULL, "full list: async handler rig created");
+    if (server < 0 || client < 0 || !store) return;
+    opcd_state_t st;
+    init_state(&st, pw_path, ip_path, radio_path, server, store, port);
+    char user_path[300], last_path[300];
+    snprintf(user_path, sizeof user_path, "%s.user", ip_path);
+    snprintf(last_path, sizeof last_path, "%s.last", ip_path);
+    unlink(user_path);
+    unlink(last_path);
+    st.paths.ip_list_user = user_path;
+    st.paths.ip_list_user_last = last_path;
+    for (uint16_t i = 0; i < OPC_IPCFG_LIST_MAX_SLOTS - 1; i++) {
+        st.ip_list.slots[i] = ip_entry((uint16_t)(i + 1), 0, 0x0a000001u | ((uint32_t)i << 8),
+                                       "abcdefghijklmnopqrstuvwxyz01234");
+        st.ip_list.slots[i].default_gateway = 0x0a0000feu | ((uint32_t)i << 8);
+        st.ip_list.slots[i].ntp_server = 0x0a000002u;
+        st.ip_list.present[i] = 1;
+    }
+    uint8_t resp[OPC_FRAME_MAX], wire[OPC_FRAME_MAX];
+    opc_ipcfg_entry_t last = ip_entry(OPC_IPCFG_LIST_MAX_SLOTS, OPC_LIST_BOUNDARY_START_END,
+                                      0x0a007f01u, "last_list");
+    CHECK(dispatch_ip_list(&st, port, 500, &last, 1, resp) == 0 &&
+          wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "full list: the 128th list defers its ack and the write completes");
+    opcd_store_async_on_ready(&st);
+    uint16_t err = 0;
+    ssize_t n = recv_ack(client, wire, 1000);
+    struct stat sb;
+    CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_OK &&
+          st.ip_list.present[OPC_IPCFG_LIST_MAX_SLOTS - 1],
+          "full list: answers OK and publishes all 128 lists");
+    CHECK(ip_file_equals(ip_path, &st.ip_list) && stat(ip_path, &sb) == 0 &&
+          sb.st_size > 8192 && (size_t)sb.st_size > sizeof(opcd_ip_list_t),
+          "full list: the whole list is on disk as text larger than the old limits");
+    CHECK(wait_readable(opc_store_async_event_fd(store), 3000) == 0,
+          "full list: the customer-file copy is written by the worker");
+    opcd_store_async_on_ready(&st);
+    CHECK(ip_file_equals(user_path, &st.ip_list) && ip_file_equals(last_path, &st.ip_list),
+          "full list: the customer file holds the same text, recorded once it shows (spec 6.5)");
+    unlink(user_path);
+    unlink(last_path);
+
+    opc_store_async_finish(store);
+    opcd_store_async_on_ready(&st);
+    st.store_async = NULL;
+    opc_store_async_destroy(store);
+    close(server);
+    close(client);
+}
+
 static void test_unsynced_retry_converges(const char *pw_path,
                                           const char *ip_path,
                                           const char *radio_path)
@@ -1038,8 +1106,7 @@ static void test_unsynced_retry_converges(const char *pw_path,
           "unsynced retry chain: the re-send of the second change answers OK");
 
     fault_clear();
-    opcd_ip_list_t empty = {0};
-    CHECK(opc_store_write_atomic(ip_path, &empty, sizeof empty, 0644) == 0,
+    CHECK(opc_store_write_atomic(ip_path, "", 0, 0644) == 0,
           "unsynced retry ip: old durable baseline written");
     opc_ipcfg_entry_t one = ip_entry(3, OPC_LIST_BOUNDARY_START_END,
                                      0xc6336432u, "retry_one");
@@ -1058,7 +1125,7 @@ static void test_unsynced_retry_converges(const char *pw_path,
     n = recv_ack(client, wire, 1000);
     CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_OK &&
           st.ip_list.present[2] && st.ip_list.slots[2].ip_address == one.ip_address &&
-          file_equals(ip_path, &st.ip_list, sizeof st.ip_list),
+          ip_file_equals(ip_path, &st.ip_list),
           "unsynced retry ip: single-frame re-send answers OK and the file keeps the slot");
 
     opc_ipcfg_entry_t start = ip_entry(4, OPC_LIST_BOUNDARY_START,
@@ -1086,7 +1153,7 @@ static void test_unsynced_retry_converges(const char *pw_path,
     n = recv_ack(client, wire, 1000);
     CHECK(unpack_ip_result(wire, n, &err) == OPC_RESULT_OK &&
           st.ip_list.present[3] && st.ip_list.present[4] &&
-          file_equals(ip_path, &st.ip_list, sizeof st.ip_list),
+          ip_file_equals(ip_path, &st.ip_list),
           "unsynced retry ip: re-sent cycle answers OK and the file keeps both slots");
 
     opc_set_radio_config_req_t base = radio_config(OPC_STATION_SINGLE, 36, 0);
@@ -1154,7 +1221,7 @@ int main(void)
 
     char pw_path[256], ip_path[256], radio_path[256];
     snprintf(pw_path, sizeof pw_path, "%s/password", tmp);
-    snprintf(ip_path, sizeof ip_path, "%s/iplist.cfg", tmp);
+    snprintf(ip_path, sizeof ip_path, "%s/iplist.txt", tmp);
     snprintf(radio_path, sizeof radio_path, "%s/radio.conf", tmp);
     test_password_resource_gate_and_outcomes(pw_path, ip_path, radio_path);
     test_password_sync_fallback_outcomes(pw_path, ip_path, radio_path);
@@ -1162,6 +1229,7 @@ int main(void)
     test_ip_failed_commit_drops_dependent_staging(pw_path, ip_path, radio_path);
     test_radio_reconciliation(pw_path, ip_path, radio_path);
     test_unsynced_retry_converges(pw_path, ip_path, radio_path);
+    test_ip_full_list_text(pw_path, ip_path, radio_path);
 
     unlink(pw_path);
     unlink(ip_path);

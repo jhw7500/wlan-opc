@@ -18,6 +18,8 @@ The legacy int API remains for existing callers. Its -1 must never be interprete
 
 ## Publication and recovery
 
+The IP list is stored as the host specification's configuration-file text (issue 194, `iplist_text.h`), whose length is known only after the commit. Admission therefore reserves the largest text, 24 KiB, and the commit submits its actual length, which may not exceed that reservation. The reply follows opcd's own copy; once that copy is published, the same text is queued for the customer file as a log-only write, so a failure there leaves the published list and the reply unchanged. That write also records the bytes it put in the customer file (`iplist.user.last`) once the file shows them. At the next start a customer file equal to that record has not been replaced by the customer, so opcd's own copy stays in effect; a commit whose customer-file write failed is therefore not undone by the older file.
+
 Each persisted resource admits one unresolved transaction across all UDP source ports. Password and committed IP-list candidates remain private until completion. UNCHANGED retains the prior published state; either visible replacement outcome publishes the candidate. A partial-IP validation failure keeps its immediate error response, while its prefix commit retains ownership and reconciles without a second ACK.
 
 Trailing IP staging can depend on a prefix committed earlier in the same request. It remains private with that commit and publishes only when the prefix becomes visible. Logout or fresh Login invalidates this trailing cycle through the session generation, so a late completion cannot revive an earlier session's staging. Pre-rename failure cannot leak failed entries into a later END request.

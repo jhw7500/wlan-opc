@@ -34,13 +34,22 @@ int opc_store_write_atomic_ex(const char *path, const void *data, size_t len,
      * inaccessible parent cannot leave a freshly renamed unconfirmed target. */
     int dirfd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dirfd < 0) return -1;
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    /* #194 writes the IP list into the file-transfer account's home: the
+     * candidate is created fresh without following a link that account may
+     * have planted at this name, and handed to the directory's owner so the
+     * account can replace the file later. Root-owned directories are unaffected. */
+    (void)unlink(tmp_path);
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode);
     if (fd < 0) {
         int e = errno;
         close(dirfd);
         errno = e;
         return -1;
     }
+    struct stat dsb;
+    if (geteuid() == 0 && fstat(dirfd, &dsb) == 0 && dsb.st_uid != 0 &&
+        fchown(fd, dsb.st_uid, dsb.st_gid) != 0)
+        goto unchanged_failure;
     size_t written = 0;
     while (written < len) {
         ssize_t w = write(fd, (const char *)data + written, len - written);

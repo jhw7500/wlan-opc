@@ -254,7 +254,7 @@ int main(void)
 
     char pw_path[256], ip_path[256], radio_path[256], fill_path[256];
     snprintf(pw_path, sizeof pw_path, "%s/password", tmp);
-    snprintf(ip_path, sizeof ip_path, "%s/iplist.cfg", tmp);
+    snprintf(ip_path, sizeof ip_path, "%s/iplist.txt", tmp);
     snprintf(radio_path, sizeof radio_path, "%s/radio.conf", tmp);
     snprintf(fill_path, sizeof fill_path, "%s/fill", tmp);
 

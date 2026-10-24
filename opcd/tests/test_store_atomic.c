@@ -127,11 +127,51 @@ int main(void)
     CHECK(opc_store_write_atomic_ex(NULL,"x",1,0600,&outcome)==-1 &&
           errno==EINVAL && outcome==OPC_STORE_UNCHANGED,
           "invalid write cannot leave an old success outcome");
+    {
+        /* #194: the candidate name may be planted by the directory's owner
+         * (the FTP account's home); a link there must not be followed. */
+        char victim[300], lpath[300], ltemp[320];
+        snprintf(victim,sizeof victim,"%s/victim",dir);
+        snprintf(lpath,sizeof lpath,"%s/linked",dir);
+        snprintf(ltemp,sizeof ltemp,"%s.tmp.%d",lpath,(int)getpid());
+        reset();
+        CHECK(opc_store_write_atomic(victim,"keep",4,0600)==0 && symlink(victim,ltemp)==0,
+              "a link to another file is planted at the candidate name");
+        CHECK(opc_store_write_atomic(lpath,"linked",6,0600)==0 && equals(lpath,"linked") &&
+              equals(victim,"keep") && access(ltemp,F_OK)!=0,
+              "the write replaces the link instead of writing through it");
+        unlink(victim);
+        unlink(lpath);
+    }
 
     opc_store_async_t *writer=opc_store_async_create();
     CHECK(writer!=NULL,"async outcome test creates real worker");
     if (writer) {
         opc_store_async_done_t done;
+        {
+            /* #194: the echo records what the target now shows — written
+             * after a replacement, not after a failure before the rename. */
+            char echo[300], target[300];
+            snprintf(echo,sizeof echo,"%s/echo",dir);
+            snprintf(target,sizeof target,"%s/echoed",dir);
+            struct pollfd pf={opc_store_async_event_fd(writer),POLLIN,0};
+            reset();
+            CHECK(opc_store_async_submit_echo(writer,target,echo,"first",5,0600,601)==0 &&
+                  poll(&pf,1,3000)==1 && opc_store_async_drain(writer,&done,1)==1 &&
+                  done.result==0 && equals(target,"first") && equals(echo,"first"),
+                  "echo follows a replaced target with the same bytes");
+            /* Only the target fails (its directory is missing), so a wrong echo
+             * would still land — a global rename fault would block both. */
+            char missing[320];
+            snprintf(missing,sizeof missing,"%s/missing/echoed",dir);
+            reset();
+            CHECK(opc_store_async_submit_echo(writer,missing,echo,"second",6,0600,602)==0 &&
+                  poll(&pf,1,3000)==1 && opc_store_async_drain(writer,&done,1)==1 &&
+                  done.result==-1 && done.outcome==OPC_STORE_UNCHANGED && equals(echo,"first"),
+                  "no echo when the target was not replaced");
+            reset();
+            unlink(echo); unlink(target);
+        }
         reset();fail_file_sync=1;
         CHECK(async_result(writer,path,501,&done)==0 && done.token==501 &&
               done.result==-1 && done.saved_errno==ENOSPC &&
