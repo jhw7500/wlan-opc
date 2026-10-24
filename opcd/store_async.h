@@ -112,6 +112,15 @@ int opc_store_async_submit(opc_store_async_t *sa, const char *path,
                            const void *data, size_t len, mode_t mode,
                            uint64_t token);
 
+/* submit(), then — once the write replaced `path` (rename done, even if the
+ * directory sync failed) — the same bytes to `echo_path` with the same mode.
+ * The echo is a record of what `path` now holds (#194: the IP list text opcd
+ * last put in the customer file); its failure is only logged and does not
+ * change the job's result. */
+int opc_store_async_submit_echo(opc_store_async_t *sa, const char *path,
+                                const char *echo_path, const void *data,
+                                size_t len, mode_t mode, uint64_t token);
+
 /* Reserve capacity BEFORE a caller changes settings. Validates and captures
  * path/len; returns a slot >=0, or -1 with the same errors as submit().
  * `len` is the most the caller will submit: submit_reserved takes any length

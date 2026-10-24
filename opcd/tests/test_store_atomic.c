@@ -148,6 +148,30 @@ int main(void)
     CHECK(writer!=NULL,"async outcome test creates real worker");
     if (writer) {
         opc_store_async_done_t done;
+        {
+            /* #194: the echo records what the target now shows — written
+             * after a replacement, not after a failure before the rename. */
+            char echo[300], target[300];
+            snprintf(echo,sizeof echo,"%s/echo",dir);
+            snprintf(target,sizeof target,"%s/echoed",dir);
+            struct pollfd pf={opc_store_async_event_fd(writer),POLLIN,0};
+            reset();
+            CHECK(opc_store_async_submit_echo(writer,target,echo,"first",5,0600,601)==0 &&
+                  poll(&pf,1,3000)==1 && opc_store_async_drain(writer,&done,1)==1 &&
+                  done.result==0 && equals(target,"first") && equals(echo,"first"),
+                  "echo follows a replaced target with the same bytes");
+            /* Only the target fails (its directory is missing), so a wrong echo
+             * would still land — a global rename fault would block both. */
+            char missing[320];
+            snprintf(missing,sizeof missing,"%s/missing/echoed",dir);
+            reset();
+            CHECK(opc_store_async_submit_echo(writer,missing,echo,"second",6,0600,602)==0 &&
+                  poll(&pf,1,3000)==1 && opc_store_async_drain(writer,&done,1)==1 &&
+                  done.result==-1 && done.outcome==OPC_STORE_UNCHANGED && equals(echo,"first"),
+                  "no echo when the target was not replaced");
+            reset();
+            unlink(echo); unlink(target);
+        }
         reset();fail_file_sync=1;
         CHECK(async_result(writer,path,501,&done)==0 && done.token==501 &&
               done.result==-1 && done.saved_errno==ENOSPC &&

@@ -24,7 +24,7 @@ static int failures = 0;
     else      { printf("FAIL %s\n", (label)); failures++; }\
 } while (0)
 
-static char dir[64], own[128], user[128], rejected[160], legacy[128], migrated[160];
+static char dir[64], own[128], user[128], rejected[160], legacy[128], migrated[160], record[160];
 
 static void put_file(const char *path, const char *data, size_t len)
 {
@@ -61,6 +61,7 @@ static opcd_iplist_user_t start(void)
     memset(&st, 0, sizeof st);
     st.paths.ip_list = own;
     st.paths.ip_list_user = user;
+    st.paths.ip_list_user_last = record;
     st.paths.ip_list_legacy = legacy;
     return opcd_iplist_load(&st, &own_verdict);
 }
@@ -79,12 +80,12 @@ static bool list_is_fig45(void)
 /* The customer replaced the file with `text`: applied as a whole. */
 static void accept_text(const char *text, size_t len, const char *label)
 {
-    unlink(own); unlink(rejected);
+    unlink(own); unlink(rejected); unlink(record);
     put_file(user, text, len);
     char l[200];
     snprintf(l, sizeof l, "applied: %s", label);
     ASSERT(start() == OPCD_IPLIST_USER_APPLIED && list_is_fig45() && FIG45_IS(own) &&
-           access(rejected, F_OK) != 0, l);
+           access(rejected, F_OK) != 0 && file_is(record, text, len), l);
 }
 #define ACCEPT(text, label) accept_text((text), sizeof(text) - 1, (label))
 
@@ -94,12 +95,12 @@ static void accept_text(const char *text, size_t len, const char *label)
 static void reject_text(const char *text, size_t len, const char *label)
 {
     put_file(own, FIG45, sizeof FIG45 - 1);
-    unlink(rejected);
+    unlink(rejected); unlink(record);
     put_file(user, text, len);
     char l[200];
     snprintf(l, sizeof l, "rejected: %s", label);
     ASSERT(start() == OPCD_IPLIST_USER_REJECTED && list_is_fig45() && FIG45_IS(own) &&
-           FIG45_IS(user) && file_is(rejected, text, len), l);
+           FIG45_IS(user) && FIG45_IS(record) && file_is(rejected, text, len), l);
 }
 #define REJECT(text, label) reject_text((text), sizeof(text) - 1, (label))
 
@@ -112,6 +113,7 @@ int main(void)
     snprintf(rejected, sizeof rejected, "%s/iplist.txt.rejected", dir);
     snprintf(legacy, sizeof legacy, "%s/iplist.cfg", dir);
     snprintf(migrated, sizeof migrated, "%s/iplist.cfg.migrated", dir);
+    snprintf(record, sizeof record, "%s/iplist.user.last", dir);
 
     /* ---- the customer file replaces the whole list ---- */
     ACCEPT(FIG45, "Figure 4-5 as is");
@@ -129,8 +131,32 @@ int main(void)
            "IPDefaultGateway1=172.17.65.254\r\n"
            "NTPServer1=172.17.2.1",
            "UTF-8 BOM, CRLF, blank lines, any key order, no final line break");
-    ASSERT(start() == OPCD_IPLIST_USER_APPLIED && list_is_fig45(),
-           "the same file applies again at the next start (idempotent)");
+    ASSERT(start() == OPCD_IPLIST_USER_KEPT && list_is_fig45() && FIG45_IS(own),
+           "the next start with the same file keeps the list (the file is as recorded)");
+
+    /* ---- Tribunal A-R1-001: an unreplaced customer file never undoes opcd's copy ---- */
+    {
+        static const char OLDER[] =
+            "IPAddress9=10.0.9.5\nIPSubnetMask9=255.255.255.0\nIPDefaultGateway9=0.0.0.0\n"
+            "WL54EssId9=\"older\"\nNTPServer9=0.0.0.0\n";
+        put_file(own, FIG45, sizeof FIG45 - 1);              /* a commit that was answered OK */
+        put_file(user, OLDER, sizeof OLDER - 1);             /* its customer-file copy failed: */
+        put_file(record, OLDER, sizeof OLDER - 1);           /* the file is what opcd wrote before */
+        ASSERT(start() == OPCD_IPLIST_USER_KEPT && list_is_fig45() && FIG45_IS(own) &&
+               FIG45_IS(user) && FIG45_IS(record) && !st.ip_list.present[8],
+               "unreplaced older customer file: opcd's copy stays and is written back");
+        put_file(own, FIG45, sizeof FIG45 - 1);
+        put_file(user, OLDER, sizeof OLDER - 1);             /* the customer replaced the file */
+        put_file(record, FIG45, sizeof FIG45 - 1);
+        ASSERT(start() == OPCD_IPLIST_USER_APPLIED && st.ip_list.present[8] && !st.ip_list.present[0] &&
+               file_is(record, OLDER, sizeof OLDER - 1),
+               "replaced customer file (differs from the record): applied and recorded");
+        put_file(user, OLDER, sizeof OLDER - 1);
+        unlink(record);
+        put_file(own, FIG45, sizeof FIG45 - 1);
+        ASSERT(start() == OPCD_IPLIST_USER_APPLIED && st.ip_list.present[8],
+               "no record yet: a valid customer file is applied");
+    }
 
     put_file(own, FIG45, sizeof FIG45 - 1);
     put_file(user, "", 0);
@@ -186,9 +212,9 @@ int main(void)
 
     /* ---- the customer file missing or unusable ---- */
     put_file(own, FIG45, sizeof FIG45 - 1);
-    unlink(user);
-    ASSERT(start() == OPCD_IPLIST_USER_CREATED && list_is_fig45() && FIG45_IS(user),
-           "missing file: previous list kept and written back");
+    unlink(user); unlink(record);
+    ASSERT(start() == OPCD_IPLIST_USER_CREATED && list_is_fig45() && FIG45_IS(user) && FIG45_IS(record),
+           "missing file: previous list kept, written back and recorded");
     {
         char target[160];
         snprintf(target, sizeof target, "%s/target.txt", dir);
@@ -261,7 +287,7 @@ int main(void)
                memcmp(buf, &bin, sizeof bin) == 0,
                "upgrade: the binary is renamed *.migrated, bytes intact");
     }
-    ASSERT(start() == OPCD_IPLIST_USER_APPLIED && own_verdict == OPCD_IPLIST_LOAD_TEXT &&
+    ASSERT(start() == OPCD_IPLIST_USER_KEPT && own_verdict == OPCD_IPLIST_LOAD_TEXT &&
            st.ip_list.present[0] && !st.ip_list.present[6],
            "upgrade: the next start reads the text, no second conversion");
 
@@ -271,12 +297,33 @@ int main(void)
            !st.ip_list.present[0] && access(own, F_OK) != 0 && access(legacy, F_OK) == 0,
            "upgrade: a binary of the wrong size is discarded");
 
-    put_file(own, FIG45, sizeof FIG45 - 1);
-    put_file(legacy, (const char *)&bin, sizeof bin);
-    unlink(migrated); unlink(user);
-    ASSERT(start() == OPCD_IPLIST_USER_CREATED && own_verdict == OPCD_IPLIST_LOAD_TEXT &&
-           list_is_fig45() && access(legacy, F_OK) != 0 && access(migrated, F_OK) == 0,
-           "upgrade: with the text present the stale binary is only renamed");
+    {
+        /* A binary older than opcd's text is stale: set aside unread. */
+        struct timespec past[2] = { { 1000000, 0 }, { 1000000, 0 } };
+        put_file(own, FIG45, sizeof FIG45 - 1);
+        put_file(legacy, (const char *)&bin, sizeof bin);
+        utimensat(AT_FDCWD, legacy, past, 0);
+        unlink(migrated); unlink(user);
+        ASSERT(start() == OPCD_IPLIST_USER_CREATED && own_verdict == OPCD_IPLIST_LOAD_TEXT &&
+               list_is_fig45() && access(legacy, F_OK) != 0 && access(migrated, F_OK) == 0,
+               "upgrade: a binary older than the text is only renamed");
+        /* Tribunal A-R1-002: after a downgrade the older opcd saved the list in
+         * the binary; re-upgrading converts that newer binary, and the customer
+         * file left from before (as opcd wrote it) does not override it. */
+        put_file(own, FIG45, sizeof FIG45 - 1);
+        put_file(user, FIG45, sizeof FIG45 - 1);
+        put_file(record, FIG45, sizeof FIG45 - 1);
+        utimensat(AT_FDCWD, own, past, 0);
+        put_file(legacy, (const char *)&bin, sizeof bin);
+        unlink(migrated);
+        ASSERT(start() == OPCD_IPLIST_USER_KEPT && own_verdict == OPCD_IPLIST_LOAD_MIGRATED &&
+               st.ip_list.present[0] && st.ip_list.slots[0].ip_address == 0xC0A80165u &&
+               !st.ip_list.present[1] && access(migrated, F_OK) == 0,
+               "re-upgrade: a binary newer than the text is converted and wins");
+        ssize_t wn = opc_iplist_text_format(&st.ip_list, want, sizeof want);
+        ASSERT(wn > 0 && file_is(own, want, (size_t)wn) && file_is(user, want, (size_t)wn),
+               "re-upgrade: both text files now hold the binary's list");
+    }
 
     {
         char nodir[160];
@@ -292,7 +339,7 @@ int main(void)
                "upgrade: a failed text write keeps the binary for the next start");
     }
 
-    unlink(own); unlink(legacy); unlink(migrated); unlink(user); unlink(rejected);
+    unlink(own); unlink(legacy); unlink(migrated); unlink(user); unlink(rejected); unlink(record);
     ASSERT(start() == OPCD_IPLIST_USER_CREATED && own_verdict == OPCD_IPLIST_LOAD_NONE &&
            !st.ip_list.present[0] && file_is(user, "", 0),
            "no file at all (factory reset): empty list and an empty customer file");
@@ -312,7 +359,7 @@ int main(void)
                "the longest possible list is 21,604 bytes and needs every one of them");
     }
 
-    unlink(own); unlink(user); unlink(rejected); unlink(legacy); unlink(migrated);
+    unlink(own); unlink(user); unlink(rejected); unlink(legacy); unlink(migrated); unlink(record);
     rmdir(dir);
     if (failures) { printf("test_iplist: %d failure(s)\n", failures); return 1; }
     printf("test_iplist: all passed\n");

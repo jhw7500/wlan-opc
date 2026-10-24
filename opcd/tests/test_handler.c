@@ -1208,6 +1208,38 @@ int main(void)
         ASSERT(on > 0 && un == on && memcmp(own_text, user_text, (size_t)on) == 0,
                "#194: the commit also writes the customer file (spec 6.5)");
     }
+    {
+        /* Tribunal A-R1-001: a SetIpConfigList answered OK whose customer-file
+         * copy failed is still the list after the next start. */
+        static opcd_state_t st2;
+        char udir[64], upath[96], rpath[96];
+        snprintf(udir, sizeof udir, "test_handler_udir_%d", (int)getpid());
+        snprintf(upath, sizeof upath, "%s/iplist.txt", udir);
+        snprintf(rpath, sizeof rpath, "test_handler_iplist_last_%d.tmp", (int)getpid());
+        (void)mkdir(udir, 0755);
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.paths.ip_list_user = upath;
+        st.paths.ip_list_user_last = rpath;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        uint16_t r1 = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START_END, 0x0A000001);
+        (void)chmod(udir, 0555);                      /* the customer-file copy now fails */
+        uint16_t r2 = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START_END, 0x0A000002);
+        (void)chmod(udir, 0755);
+        init_state(&st2, OPC_PASSWORD_DEFAULT);
+        st2.paths.ip_list_user = upath;
+        st2.paths.ip_list_user_last = rpath;
+        opcd_iplist_user_t u = opcd_iplist_load(&st2, NULL);
+        if (geteuid() == 0) {
+            printf("PASS A-R1-001: skipped as root (a 0555 directory does not stop root)\n");
+        } else {
+            ASSERT(r1 == OPC_RESULT_OK && r2 == OPC_RESULT_OK && u == OPCD_IPLIST_USER_KEPT &&
+                   st2.ip_list.present[0] && st2.ip_list.slots[0].ip_address == 0x0A000002,
+                   "A-R1-001: an OK commit whose customer-file copy failed survives the next start");
+        }
+        unlink(upath);
+        rmdir(udir);
+        unlink(rpath);
+    }
 
     /* 14e. #107: 0x0003 is self-contained. A CONTINUE/END that FOLLOWS it has no
      *      open cycle → START-less sequence → NG 0x0018, exactly like a lone one,

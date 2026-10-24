@@ -943,10 +943,13 @@ static void test_ip_full_list_text(const char *pw_path, const char *ip_path,
     if (server < 0 || client < 0 || !store) return;
     opcd_state_t st;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
-    char user_path[300];
+    char user_path[300], last_path[300];
     snprintf(user_path, sizeof user_path, "%s.user", ip_path);
+    snprintf(last_path, sizeof last_path, "%s.last", ip_path);
     unlink(user_path);
+    unlink(last_path);
     st.paths.ip_list_user = user_path;
+    st.paths.ip_list_user_last = last_path;
     for (uint16_t i = 0; i < OPC_IPCFG_LIST_MAX_SLOTS - 1; i++) {
         st.ip_list.slots[i] = ip_entry((uint16_t)(i + 1), 0, 0x0a000001u | ((uint32_t)i << 8),
                                        "abcdefghijklmnopqrstuvwxyz01234");
@@ -973,9 +976,10 @@ static void test_ip_full_list_text(const char *pw_path, const char *ip_path,
     CHECK(wait_readable(opc_store_async_event_fd(store), 3000) == 0,
           "full list: the customer-file copy is written by the worker");
     opcd_store_async_on_ready(&st);
-    CHECK(ip_file_equals(user_path, &st.ip_list),
-          "full list: the customer file holds the same text (spec 6.5)");
+    CHECK(ip_file_equals(user_path, &st.ip_list) && ip_file_equals(last_path, &st.ip_list),
+          "full list: the customer file holds the same text, recorded once it shows (spec 6.5)");
     unlink(user_path);
+    unlink(last_path);
 
     opc_store_async_finish(store);
     opcd_store_async_on_ready(&st);

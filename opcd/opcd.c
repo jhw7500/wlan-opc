@@ -150,6 +150,7 @@ static void state_set_defaults(opcd_state_t *st)
     st->paths.ip_list     = OPC_PATH_IPLIST;
     st->paths.ip_list_legacy = OPC_PATH_IPLIST_LEGACY;
     st->paths.ip_list_user   = OPC_PATH_IPLIST_USER;
+    st->paths.ip_list_user_last = OPC_PATH_IPLIST_USER_LAST;
     st->paths.radio       = OPC_PATH_RADIO;
     st->paths.device_info = OPC_PATH_DEVICE_INFO;
     st->paths.temp_dir    = OPC_PATH_TEMP;

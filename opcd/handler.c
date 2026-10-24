@@ -692,39 +692,12 @@ static void iplist_retire_legacy(const char *legacy)
         fprintf(stderr, "opcd: iplist: renaming %s failed: %s\n", legacy, strerror(errno));
 }
 
-/* opcd's own copy → st->ip_list, converting the pre-#194 binary once. */
-static opcd_iplist_load_t iplist_load_own(opcd_state_t *st)
+/* The pre-#194 binary → st->ip_list and opcd's text copy, re-checking every
+ * list; on success the binary is renamed out of the way. */
+static opcd_iplist_load_t iplist_convert_legacy(opcd_state_t *st)
 {
-    static char text[OPC_IPLIST_TEXT_MAX + 1];
     static uint8_t legacy_buf[sizeof(opcd_ip_list_t) + 1];
-    char why[128] = "";
-    struct stat sb;
     memset(&st->ip_list, 0, sizeof st->ip_list);
-
-    if (stat(st->paths.ip_list, &sb) == 0) {
-        ssize_t n = opc_store_read_all(st->paths.ip_list, text, sizeof text);
-        if (n < 0) {
-            fprintf(stderr, "opcd: iplist: %s unreadable: %s — empty list\n",
-                    st->paths.ip_list, strerror(errno));
-            return OPCD_IPLIST_LOAD_ERROR;
-        }
-        if ((size_t)n > OPC_IPLIST_TEXT_MAX) {
-            fprintf(stderr, "opcd: iplist: %s is larger than any list opcd writes — "
-                            "ignored, empty list\n", st->paths.ip_list);
-            return OPCD_IPLIST_LOAD_TOO_LARGE;
-        }
-        (void)iplist_from_text(text, (size_t)n, false, &st->ip_list, why, sizeof why);
-        if (st->paths.ip_list_legacy && access(st->paths.ip_list_legacy, F_OK) == 0)
-            iplist_retire_legacy(st->paths.ip_list_legacy);
-        return OPCD_IPLIST_LOAD_TEXT;
-    }
-    if (errno != ENOENT) {
-        fprintf(stderr, "opcd: iplist: %s: %s — empty list\n", st->paths.ip_list, strerror(errno));
-        return OPCD_IPLIST_LOAD_ERROR;
-    }
-
-    /* No text yet: an upgrade from the binary list (pre-#194) converts it once. */
-    if (!st->paths.ip_list_legacy) return OPCD_IPLIST_LOAD_NONE;
     ssize_t n = opc_store_read_all(st->paths.ip_list_legacy, legacy_buf, sizeof legacy_buf);
     if (n < 0) {
         if (errno != ENOENT)
@@ -765,6 +738,61 @@ static opcd_iplist_load_t iplist_load_own(opcd_state_t *st)
     return OPCD_IPLIST_LOAD_MIGRATED;
 }
 
+static bool mtime_after(const struct stat *a, const struct stat *b)
+{
+    return a->st_mtim.tv_sec > b->st_mtim.tv_sec ||
+           (a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec > b->st_mtim.tv_nsec);
+}
+
+/* opcd's own copy → st->ip_list, converting the pre-#194 binary once. */
+static opcd_iplist_load_t iplist_load_own(opcd_state_t *st)
+{
+    static char text[OPC_IPLIST_TEXT_MAX + 1];
+    char why[128] = "";
+    struct stat sb, lsb;
+    memset(&st->ip_list, 0, sizeof st->ip_list);
+
+    if (stat(st->paths.ip_list, &sb) == 0) {
+        if (st->paths.ip_list_legacy && stat(st->paths.ip_list_legacy, &lsb) == 0) {
+            /* Both opcd's own files, so their times compare: a binary written
+             * after the text was saved by an older opcd after a downgrade, and
+             * holds the newer list (Tribunal A-R1-002). An older one is stale. */
+            if ((size_t)lsb.st_size == sizeof(opcd_ip_list_t) && mtime_after(&lsb, &sb)) {
+                fprintf(stderr, "opcd: iplist: %s is newer than %s (saved by an older opcd) — "
+                                "converting it\n", st->paths.ip_list_legacy, st->paths.ip_list);
+                opcd_iplist_load_t cr = iplist_convert_legacy(st);
+                if (cr == OPCD_IPLIST_LOAD_MIGRATED || cr == OPCD_IPLIST_LOAD_LEGACY_UNSAVED)
+                    return cr;
+                memset(&st->ip_list, 0, sizeof st->ip_list);
+            } else {
+                fprintf(stderr, "opcd: iplist: %s is older than %s — set aside unread\n",
+                        st->paths.ip_list_legacy, st->paths.ip_list);
+                iplist_retire_legacy(st->paths.ip_list_legacy);
+            }
+        }
+        ssize_t n = opc_store_read_all(st->paths.ip_list, text, sizeof text);
+        if (n < 0) {
+            fprintf(stderr, "opcd: iplist: %s unreadable: %s — empty list\n",
+                    st->paths.ip_list, strerror(errno));
+            return OPCD_IPLIST_LOAD_ERROR;
+        }
+        if ((size_t)n > OPC_IPLIST_TEXT_MAX) {
+            fprintf(stderr, "opcd: iplist: %s is larger than any list opcd writes — "
+                            "ignored, empty list\n", st->paths.ip_list);
+            return OPCD_IPLIST_LOAD_TOO_LARGE;
+        }
+        (void)iplist_from_text(text, (size_t)n, false, &st->ip_list, why, sizeof why);
+        return OPCD_IPLIST_LOAD_TEXT;
+    }
+    if (errno != ENOENT) {
+        fprintf(stderr, "opcd: iplist: %s: %s — empty list\n", st->paths.ip_list, strerror(errno));
+        return OPCD_IPLIST_LOAD_ERROR;
+    }
+    /* No text yet: an upgrade from the binary list (pre-#194) converts it once. */
+    if (!st->paths.ip_list_legacy) return OPCD_IPLIST_LOAD_NONE;
+    return iplist_convert_legacy(st);
+}
+
 /* The customer file: 0 read, 1 absent, -1 not usable (left untouched),
  * -2 over OPC_IPLIST_IMPORT_MAX (a bad file). Never follows a link. */
 static int iplist_read_user(const char *path, char *buf, size_t cap, size_t *len,
@@ -803,6 +831,42 @@ static int iplist_read_user(const char *path, char *buf, size_t cap, size_t *len
     return 0;
 }
 
+/* Write the list in effect to the customer file and, once it shows there, the
+ * same bytes to the record of what opcd last put in it (st->paths.ip_list_user_last). */
+static int iplist_write_user(opcd_state_t *st)
+{
+    static char text[OPC_IPLIST_TEXT_MAX];
+    ssize_t n = opc_iplist_text_format(&st->ip_list, text, sizeof text);
+    if (n < 0) { errno = EOVERFLOW; return -1; }
+    opc_store_outcome_t outcome = OPC_STORE_UNCHANGED;
+    int rc = opc_store_write_atomic_ex(st->paths.ip_list_user, text, (size_t)n, 0644, &outcome);
+    int e = errno;
+    if (outcome != OPC_STORE_UNCHANGED && st->paths.ip_list_user_last &&
+        opc_store_write_atomic(st->paths.ip_list_user_last, text, (size_t)n, 0644) != 0)
+        fprintf(stderr, "opcd: iplist: writing %s failed: %s\n",
+                st->paths.ip_list_user_last, strerror(errno));
+    errno = e;
+    return rc;
+}
+
+/* The customer file still holds exactly what opcd last put in it (or applied
+ * from it): the customer has not replaced it since. */
+static bool iplist_user_unreplaced(const opcd_state_t *st, const char *in, size_t n)
+{
+    static char rec[OPC_IPLIST_IMPORT_MAX + 1];
+    if (!st->paths.ip_list_user_last) return false;
+    ssize_t r = opc_store_read_all(st->paths.ip_list_user_last, rec, sizeof rec);
+    return r >= 0 && (size_t)r == n && memcmp(rec, in, n) == 0;
+}
+
+static bool iplist_same(const opcd_ip_list_t *a, const opcd_ip_list_t *b)
+{
+    static char ta[OPC_IPLIST_TEXT_MAX], tb[OPC_IPLIST_TEXT_MAX];
+    ssize_t na = opc_iplist_text_format(a, ta, sizeof ta);
+    ssize_t nb = opc_iplist_text_format(b, tb, sizeof tb);
+    return na >= 0 && na == nb && memcmp(ta, tb, (size_t)na) == 0;
+}
+
 opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own)
 {
     static char in[OPC_IPLIST_IMPORT_MAX + 1];
@@ -815,7 +879,7 @@ opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own)
     size_t n = 0;
     int rr = iplist_read_user(user, in, sizeof in, &n, why, sizeof why);
     if (rr == 1) {
-        if (iplist_write(user, &st->ip_list, false) != 0)
+        if (iplist_write_user(st) != 0)
             fprintf(stderr, "opcd: iplist: writing %s failed: %s\n", user, strerror(errno));
         return OPCD_IPLIST_USER_CREATED;
     }
@@ -826,9 +890,23 @@ opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own)
     }
     opcd_ip_list_t list;
     if (rr == 0 && iplist_from_text(in, n, true, &list, why, sizeof why) == 0) {
+        if (iplist_user_unreplaced(st, in, n)) {
+            /* Not replaced since opcd wrote it: opcd's own copy is the list in
+             * effect. A later SetIpConfigList whose customer-file copy did not
+             * land must not be undone here (Tribunal A-R1-001). */
+            if (!iplist_same(&list, &st->ip_list) && iplist_write_user(st) != 0)
+                fprintf(stderr, "opcd: iplist: writing %s failed: %s\n", user, strerror(errno));
+            return OPCD_IPLIST_USER_KEPT;
+        }
         st->ip_list = list;
         if (iplist_write(st->paths.ip_list, &st->ip_list, true) != 0)
             fprintf(stderr, "opcd: iplist: writing %s failed: %s\n", st->paths.ip_list, strerror(errno));
+        /* Record the customer's bytes as applied, so a later commit whose
+         * customer-file copy fails is not overridden by them at the next start. */
+        if (st->paths.ip_list_user_last &&
+            opc_store_write_atomic(st->paths.ip_list_user_last, in, n, 0644) != 0)
+            fprintf(stderr, "opcd: iplist: writing %s failed: %s\n",
+                    st->paths.ip_list_user_last, strerror(errno));
         fprintf(stderr, "opcd: iplist: %s applied (%u lists)\n", user, iplist_count(&st->ip_list));
         return OPCD_IPLIST_USER_APPLIED;
     }
@@ -839,13 +917,15 @@ opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own)
             user, why, iplist_count(&st->ip_list));
     if (snprintf(rej, sizeof rej, "%s.rejected", user) < (int)sizeof rej && rename(user, rej) != 0)
         fprintf(stderr, "opcd: iplist: renaming %s failed: %s\n", user, strerror(errno));
-    if (iplist_write(user, &st->ip_list, false) != 0)
+    if (iplist_write_user(st) != 0)
         fprintf(stderr, "opcd: iplist: writing %s failed: %s\n", user, strerror(errno));
     return OPCD_IPLIST_USER_REJECTED;
 }
 
 /* SetIpConfigList published a new list (own copy written): show it in the
- * customer file too, so the next start does not bring an older one back. */
+ * customer file too, and record it once it shows there, so the next start
+ * neither brings an older file back nor mistakes a failed copy for the
+ * customer's replacement. */
 static void iplist_mirror_user(opcd_state_t *st)
 {
     static char text[OPC_IPLIST_TEXT_MAX];
@@ -853,11 +933,15 @@ static void iplist_mirror_user(opcd_state_t *st)
     if (!user) return;
     ssize_t n = opc_iplist_text_format(&st->ip_list, text, sizeof text);
     if (n < 0) return;
-    if (st->store_async &&
-        opc_store_async_submit(st->store_async, user, text, (size_t)n, 0644,
-                               OPCD_STORE_TOKEN_MIRROR) == 0)
-        return;
-    if (opc_store_write_atomic(user, text, (size_t)n, 0644) != 0)
+    if (st->store_async) {
+        int rc = st->paths.ip_list_user_last
+            ? opc_store_async_submit_echo(st->store_async, user, st->paths.ip_list_user_last,
+                                          text, (size_t)n, 0644, OPCD_STORE_TOKEN_MIRROR)
+            : opc_store_async_submit(st->store_async, user, text, (size_t)n, 0644,
+                                     OPCD_STORE_TOKEN_MIRROR);
+        if (rc == 0) return;
+    }
+    if (iplist_write_user(st) != 0)
         fprintf(stderr, "opcd: iplist: writing %s failed: %s\n", user, strerror(errno));
 }
 

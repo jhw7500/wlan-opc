@@ -154,6 +154,7 @@ typedef enum {
     OPCD_IPLIST_USER_UNSET,     /* no customer file path */
     OPCD_IPLIST_USER_CREATED,   /* absent: written from the list in effect */
     OPCD_IPLIST_USER_APPLIED,   /* valid: the whole list is now its content, own copy updated */
+    OPCD_IPLIST_USER_KEPT,      /* valid but as opcd last wrote it: opcd's copy stays in effect */
     OPCD_IPLIST_USER_REJECTED,  /* a bad line: previous list kept, file renamed *.rejected and rewritten */
     OPCD_IPLIST_USER_UNUSABLE,  /* not a regular file or unreadable: previous list kept, file untouched */
 } opcd_iplist_user_t;
@@ -168,8 +169,13 @@ typedef enum {
  * 2. The customer file, read strictly (opened O_NOFOLLOW, a regular file of
  *    at most OPC_IPLIST_IMPORT_MAX bytes, every line well formed, every list
  *    with all five keys and SetIpConfigList-valid values; an empty file is an
- *    empty list). Valid: it becomes the list. Otherwise the list from step 1
- *    stays, as the return value says.
+ *    empty list). Valid and replaced by the customer (it differs from the
+ *    record st->paths.ip_list_user_last of what opcd last put there or
+ *    applied from it): it becomes the list. Valid but unreplaced: opcd's copy
+ *    stays, so a commit whose customer-file copy failed is not undone.
+ *    Otherwise the list from step 1 stays, as the return value says.
+ *    A binary written after opcd's text copy (an older opcd after a
+ *    downgrade) is converted again instead of the text.
  * Lives here, like opcd_radio_conf_load, so the start-up behaviour is
  * host-testable through st->paths. */
 opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own);
