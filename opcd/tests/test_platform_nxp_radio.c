@@ -394,6 +394,12 @@ int main(int argc, char **argv)
                "#161 marker is committed after a successful ESSID apply (conf token recorded)");
         ASSERT(mk != NULL && strstr(mk, "target=736974652d42\n") != NULL,
                "#161 marker records the requested SSID (target= hex) before the apply");
+        /* #193: GetDeviceInfo ESSID is the configured one — the conf's ssid=,
+         * read with no link.json on this host. The fake helper does not edit
+         * the conf on success, so it still holds the original. */
+        char es[32];
+        ASSERT(ops->get_essid(0, es, sizeof es) == 0 && strcmp(es, "site-A") == 0,
+               "#193 ESSID = the conf's ssid while no link.json exists");
 
         ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
         setenv("OPCD_NXP_FAIL_WLAN_APPLY", "1", 1);
@@ -411,6 +417,8 @@ int main(int argc, char **argv)
         mk = ipt_slurp(IPT_MARKER);
         ASSERT(mk != NULL && strstr(mk, "essid=\"site-A\"\n") != NULL && strstr(mk, "applied=\"site-B\"\n") != NULL,
                "#161 apply failed after the conf install -> marker settled with the installed token (restorable)");
+        ASSERT(ops->get_essid(0, es, sizeof es) == 0 && strcmp(es, "site-B") == 0,
+               "#193 ESSID follows the conf the ChangeIp helper installed");
         ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
         setenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT", "foreign", 1);
         ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#161 apply failed while another writer changed the conf: IP result stays success");

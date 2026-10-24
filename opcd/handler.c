@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include "chan_encode.h"
+#include "devinfo_cfg.h"
 #include "handler.h"
 #include "indication.h"
 #include "inventory.h"
@@ -795,6 +796,22 @@ static void devinfo_wlan_invalid(opc_wlan_radio_state_t *w)
     w->scan_band = OPC_SCAN_BAND_UNSET;
 }
 
+/* GetDeviceInfo Mode/Band Width: the configured value, never the link's
+ * (#193). A received SetRadioConfig value wins (mode 0 = never received —
+ * every valid request sets a mode, and BANDWIDTH_20 == 0 is a real value);
+ * otherwise the device's own radio configuration in wifi_init_conf.json
+ * (devinfo_cfg.h), else the unset marker. */
+static void devinfo_wlan_cfg(const opcd_state_t *st, const opc_wlan_radio_cfg_t *radio,
+                             const char *iface, opc_wlan_radio_state_t *w)
+{
+    if (radio->mode != 0 && radio->mode != OPC_WLAN_MODE_UNSET) {
+        w->mode      = radio->mode;
+        w->bandwidth = radio->bandwidth;
+        return;
+    }
+    opcd_devinfo_cfg_read(st->paths.wifi_init_conf, iface, &w->mode, &w->bandwidth);
+}
+
 static void select_devinfo_freq_ch(opcd_freq_source_t src, bool assoc,
                                    uint16_t live_freq, uint16_t live_ch,
                                    uint16_t cfg_freq, uint16_t cfg_ch,
@@ -886,16 +903,11 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             (void)plat->get_wlan_mac(0, ack.wlan1.mac);
             /* Ack carries a single essid field — DUAL always reports mlan0 */
             (void)plat->get_essid(0, ack.essid, sizeof ack.essid);
-            /* Runtime link readback — overwrites the radio-state portion of
-             * wlan{1,2}. mode/bandwidth are taken from the live link when
-             * available; freq/channel still come from the set-radio cache
-             * (set below). mode and bandwidth are tracked separately because
-             * legacy associations (11a/b/g) report mode=0 (no HE-/VHT-/MCS
-             * prefix in the bitrate), and bandwidth uses a valid flag because
-             * BANDWIDTH_20 == 0 cannot be distinguished from a missing field. */
+            /* Runtime link readback — fills the measured portion of wlan{1,2}
+             * (Status, SNR/RSSI, Connect AP MAC, live FREQ/CH). Mode and Band
+             * Width are configured values and never come from the link (#193,
+             * set below). */
             opcd_platform_link_t link = {0};
-            bool w1_mode_live = false, w1_bw_live = false;
-            bool w2_mode_live = false, w2_bw_live = false;
             /* Live freq/channel captured per-WLAN at get_link() time (link is
              * reused for wlan2 below, so the values must be saved here). */
             bool w1_assoc = false, w2_assoc = false;
@@ -916,14 +928,6 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                 w1_assoc = true;
                 w1_lfreq = link.freq_mhz;
                 w1_lch   = link.channel;
-                if (link.mode != 0) {
-                    ack.wlan1.mode = link.mode;
-                    w1_mode_live = true;
-                }
-                if (link.bandwidth_valid) {
-                    ack.wlan1.bandwidth = link.bandwidth;
-                    w1_bw_live = true;
-                }
             }
             if (st->radio.station_type == OPC_STATION_DUAL) {
                 (void)plat->get_wlan_mac(1, ack.wlan2.mac);
@@ -936,14 +940,6 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                     w2_assoc = true;
                     w2_lfreq = link.freq_mhz;
                     w2_lch   = link.channel;
-                    if (link.mode != 0) {
-                        ack.wlan2.mode = link.mode;
-                        w2_mode_live = true;
-                    }
-                    if (link.bandwidth_valid) {
-                        ack.wlan2.bandwidth = link.bandwidth;
-                        w2_bw_live = true;
-                    }
                 }
             }
             ack.ieee_11r  = inv->ieee_11r;
@@ -969,12 +965,7 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
             select_devinfo_freq_ch(st->conf.device_info_freq_source, w1_assoc,
                                    w1_lfreq, w1_lch, w1_cfreq, w1_cch,
                                    &ack.wlan1.freq_mhz, &ack.wlan1.channel);
-            /* Mode/BW: live when associated, else the SetRadioConfig value; a
-             * never-configured WLAN (mode 0 — every valid request sets a mode,
-             * and BANDWIDTH_20 == 0 is a real value) reports the unset marker. */
-            const bool w1_cfg = st->radio.wlan1.mode != 0;
-            if (!w1_mode_live) ack.wlan1.mode      = w1_cfg ? st->radio.wlan1.mode      : OPC_WLAN_MODE_UNSET;
-            if (!w1_bw_live)   ack.wlan1.bandwidth = w1_cfg ? st->radio.wlan1.bandwidth : OPC_BANDWIDTH_UNSET;
+            devinfo_wlan_cfg(st, &st->radio.wlan1, "mlan0", &ack.wlan1);
             if (ack.station_type != OPC_STATION_DUAL) {
                 /* Single station: the whole WLAN#2 block is invalid. */
                 devinfo_wlan_invalid(&ack.wlan2);
@@ -987,9 +978,7 @@ static int handle_get_device_info(opcd_state_t *st, const uint8_t *frame, size_t
                 select_devinfo_freq_ch(st->conf.device_info_freq_source, w2_assoc,
                                        w2_lfreq, w2_lch, w2_cfreq, w2_cch,
                                        &ack.wlan2.freq_mhz, &ack.wlan2.channel);
-                const bool w2_cfg = st->radio.wlan2.mode != 0 && st->radio.wlan2.mode != OPC_WLAN_MODE_UNSET;
-                if (!w2_mode_live) ack.wlan2.mode      = w2_cfg ? st->radio.wlan2.mode      : OPC_WLAN_MODE_UNSET;
-                if (!w2_bw_live)   ack.wlan2.bandwidth = w2_cfg ? st->radio.wlan2.bandwidth : OPC_BANDWIDTH_UNSET;
+                devinfo_wlan_cfg(st, &st->radio.wlan2, "mlan1", &ack.wlan2);
             }
         }
     }

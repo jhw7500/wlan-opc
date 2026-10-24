@@ -304,6 +304,40 @@ int main(void)
     ASSERT(restore_() < 0 && exists(g_marker) && conf_has("ssid=\"extra\""),
            "#161 restore: multi-network conf -> error, marker and conf untouched");
 
+    /* #193 opc_wpa_conf_ssid: the configured SSID GetDeviceInfo reports. */
+    {
+        char s[32];
+#define CONF_SSID(text, cap, want, label) do {                                   \
+        put(g_conf, (text));                                                     \
+        memset(s, 'x', sizeof s);                                                \
+        ASSERT(opc_wpa_conf_ssid(g_conf, s, (cap)) == 0 && strcmp(s, (want)) == 0, \
+               (label));                                                         \
+    } while (0)
+        CONF_SSID("network={\n    ssid=\"site-A\"\n}\n", sizeof s, "site-A", "#193 quoted ssid");
+        CONF_SSID("network={\n\tssid=736974652d43\r\n}\n", sizeof s, "site-C", "#193 bare hex ssid, tab indent, CRLF");
+        CONF_SSID("network={\n    ssid=\"\"\n}\n", sizeof s, "", "#193 empty quoted ssid");
+        CONF_SSID("network={\n    ssid=\"a\"b\"\n}\n", sizeof s, "a\"b", "#193 quoted value is literal between the outer quotes");
+        CONF_SSID("network={\n    #ssid=\"old\"\n    scan_ssid=1\n    bssid=00:11:22:33:44:55\n    ssid=\"real\"\n}\n",
+                  sizeof s, "real", "#193 #ssid=, scan_ssid=, bssid= are not the ssid");
+        CONF_SSID("network={\n    ssid=\"base\"\n}\nnetwork={\n    ssid=\"extra\"\n}\n", sizeof s, "base",
+                  "#193 several network blocks (extra_ssid) -> the first, the base SSID");
+        CONF_SSID("network={\n    ssid=P\"site\\x41\"\n}\n", sizeof s, "", "#193 P\"...\" escapes are not decoded -> empty");
+        CONF_SSID("network={\n    ssid=73697\n}\n", sizeof s, "", "#193 odd-length hex -> empty");
+        CONF_SSID("network={\n    ssid=7z\n}\n", sizeof s, "", "#193 non-hex digit -> empty");
+        CONF_SSID("network={\n    ssid=7300\n}\n", sizeof s, "", "#193 hex with a NUL byte -> empty, not a cut SSID");
+        CONF_SSID("network={\n    ssid=\"0123456789012345678901234567890\"\n}\n", sizeof s,
+                  "0123456789012345678901234567890", "#193 31-byte SSID fits a 32-byte field");
+        CONF_SSID("network={\n    ssid=\"01234567890123456789012345678901\"\n}\n", sizeof s, "",
+                  "#193 32-byte SSID does not fit -> empty, never truncated");
+        CONF_SSID("network={\n    ssid=3031323334353637383930313233343536373839303132333435363738393031\n}\n",
+                  sizeof s, "", "#193 32-byte hex SSID does not fit -> empty");
+        CONF_SSID("network={\n    priority=1\n}\n", sizeof s, "", "#193 no ssid= -> empty");
+#undef CONF_SSID
+        unlink(g_conf);
+        memset(s, 'x', sizeof s);
+        ASSERT(opc_wpa_conf_ssid(g_conf, s, sizeof s) < 0 && s[0] == '\0', "#193 unreadable conf -> error, empty");
+    }
+
     printf(failures ? "test_essid_marker: %d FAILED\n" : "test_essid_marker: all passed\n", failures);
     return failures ? 1 : 0;
 }

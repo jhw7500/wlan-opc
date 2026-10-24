@@ -27,7 +27,8 @@ OPCD_OBJS_SNAPSHOT  := $(OPCDOBJ)/snapshot.o
 OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o \
                        $(OPCDOBJ)/indication.o $(OPCDOBJ)/fault_probe.o \
                        $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/snapshot.o \
-                       $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/opcd_log.o $(OPCDOBJ)/platform_stub.o
+                       $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/opcd_log.o $(OPCDOBJ)/platform_stub.o \
+                       $(OPCDOBJ)/devinfo_cfg.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
 OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 # Pure parser — no platform backend, no protocol library.
@@ -38,6 +39,8 @@ OPCD_OBJS_CHAN      := $(OPCDOBJ)/chan_encode.o
 OPCD_OBJS_FREQSRC   := $(OPCDOBJ)/freq_source.o
 OPCD_OBJS_IPIFACE   := $(OPCDOBJ)/ip_iface.o
 OPCD_OBJS_TOPOLOGY  := $(OPCDOBJ)/topology.o
+# Pure wifi_init_conf.json radio-config scanner (#193) + json_util for the file read.
+OPCD_OBJS_DEVINFOCFG := $(OPCDOBJ)/devinfo_cfg.o $(OPCDOBJ)/json_util.o
 OPCD_OBJS_ROUTELOOKUP := $(OPCDOBJ)/route_lookup.o
 OPCD_OBJS_RESETCAUSE:= $(OPCDOBJ)/reset_cause.o
 # Pure opc.conf roam-notify-port parser — no platform backend, no protocol library.
@@ -57,7 +60,8 @@ OPCD_OBJS_NXP_TEST  := $(TESTDIR)/platform_nxp_test.o $(OPCD_OBJS_NXP_COMMON)
 TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler test_persist_admission test_persist_failure \
          test_store_async test_store_atomic test_fault_probe test_nl80211_parse test_chan_encode \
          test_freq_source test_ip_iface test_topology test_route_lookup test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log \
-         test_platform_nxp_radio test_nxp_ap_disconnect test_systemd_notify test_essid_marker
+         test_platform_nxp_radio test_nxp_ap_disconnect test_systemd_notify test_essid_marker \
+         test_devinfo_cfg
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -140,6 +144,9 @@ $(TESTDIR)/test_ip_iface: $(TESTDIR)/test_ip_iface.o $(OPCD_OBJS_IPIFACE)
 # Management-topology resolver test (#122) — links only topology.o.
 $(TESTDIR)/test_topology: $(TESTDIR)/test_topology.o $(OPCD_OBJS_TOPOLOGY)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_topology.o $(OPCD_OBJS_TOPOLOGY)
+
+$(TESTDIR)/test_devinfo_cfg: $(TESTDIR)/test_devinfo_cfg.o $(OPCD_OBJS_DEVINFOCFG)
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_devinfo_cfg.o $(OPCD_OBJS_DEVINFOCFG)
 
 # /proc/net/route direct-reachability lookup (#159) — links only route_lookup.o.
 $(TESTDIR)/test_route_lookup: $(TESTDIR)/test_route_lookup.o $(OPCD_OBJS_ROUTELOOKUP)

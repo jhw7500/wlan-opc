@@ -197,6 +197,33 @@ static int token_is_ssid(const char *tok, const char *target_hex)
     return 1;
 }
 
+int opc_wpa_conf_ssid(const char *conf_path, char *out, size_t cap)
+{
+    if (!out || cap == 0) return -EINVAL;
+    out[0] = '\0';
+    int err = 0;
+    char *conf = slurp(conf_path, &err);
+    if (!conf) return -err;
+    const char *vs = NULL, *ve = NULL;
+    size_t tl = find_ssid(conf, &vs, &ve) > 0 ? (size_t)(ve - vs) : 0;
+    if (tl >= 2 && vs[0] == '"' && vs[tl - 1] == '"') {
+        if (tl - 2 < cap) {
+            memcpy(out, vs + 1, tl - 2);
+            out[tl - 2] = '\0';
+        }
+    } else if (tl > 0 && tl % 2 == 0 && tl / 2 < cap) {
+        size_t n = tl / 2, i;
+        for (i = 0; i < n; i++) {
+            int hi = hexval(vs[2 * i]), lo = hexval(vs[2 * i + 1]);
+            if (hi < 0 || lo < 0 || hi * 16 + lo == 0) break;
+            out[i] = (char)(hi * 16 + lo);
+        }
+        out[i == n ? n : 0] = '\0';
+    }
+    free(conf);
+    return 0;
+}
+
 static int load_marker(const char *marker_path, marker_t *m)
 {
     int err = 0;

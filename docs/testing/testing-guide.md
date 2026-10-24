@@ -139,22 +139,23 @@ sshpass -p '' ssh root@192.168.0.100        # 빈 비번
 | ntp_server | `/run/systemd/timesyncd.conf.d/opc-ntp.conf`(ChangeIp가 쓴 휘발 drop-in)가 있으면 그 `NTP=`, 없으면 `/etc/systemd/timesyncd.conf` 의 `NTP=` | dynamic | 매 요청 |
 | ethernet_mac | `/var/log/cantops/json/eth0/link.json` (항상 eth0 — mlan0 MAC은 클론이라 오보고) | live | 매 요청 |
 | ip/netmask/gateway | `opc.conf::device_ip_iface` 토글에 따라 `eth0/link.json`(기본) 또는 `mlan0/link.json` — 읽기와 change-ip 적용 대상이 **같은 선택자**를 따름 | live | 매 요청 |
-| essid, WLAN mac, AP mac, RSSI, SNR, mode, bw | `/var/log/cantops/json/mlan0/link.json` (mlan1=WLAN#2) | live | 매 요청 |
+| WLAN mac, AP mac, RSSI, SNR | `/var/log/cantops/json/mlan0/link.json` (mlan1=WLAN#2) | live | 매 요청 |
+| essid | `/etc/wpa_supplicant/wpa_supplicant-mlan0.conf` 의 첫 `ssid=`(설정값, 접속 여부 무관 — ChangeIp 적용값·#161 부팅 복원·공장초기화를 그대로 따름, #193) | config | 매 요청 |
+| mode, bw | SetRadioConfig 값(`radio.conf`) → 없으면 `/usr/local/etc/wifi_init_conf.json` `.mlanN.radio.mode`/`.radio.bw` → mode는 `.mlanN.STANDARD`(비면 `.global.STANDARD`) → 없으면 0xFF. 접속 링크 값은 쓰지 않음(#193) | config | 매 요청 |
 | WLAN 개수(1/2) | `/var/log/cantops/json/mlan1/link.json` 존재 여부 | live | — |
 | freq/channel, station_type, priority_ch | `/usr/local/opc/etc/radio.conf` (set-radio 캐시: SCAN band+채널 목록). freq/channel은 `opc.conf::device_info_freq_source` 토글에 따라 `live`(기본, Rev1.01)=접속 시 live·미접속 0xFFFF / `auto`=접속 시 live·미접속 시 설정 파생값 / `config`=설정 파생값(Rev1.00 해석). priority_ch는 Single이면 0xFFFF | live(기본)/config | set-radio·매 요청 |
 | device_status | opcd 런타임 세션 | runtime | 실시간 |
 
-mlan0/link.json 키 매핑: `info.ssid`→essid, `info.address`→WLAN mac, `link.address`→connect_ap_mac(=associated),
-`link.signal_avg`→RSSI, `channel_info.<freq>.noise`→SNR(`rssi−noise`), `link.tx_bitrate`(HE-/VHT-/MCS)→mode,
-`info.width`→bw. freq/channel은 **`device_info_freq_source`(opc.conf) 토글**: `live`(기본, Rev1.01 §4.3.4)=접속 시 live값(미접속·주파수 없는 링크→0xFFFF/0xFFFF) / `auto`=접속 시 live값, 미접속 시 설정 파생값(없으면 0xFFFF) / `config`=설정 파생값(Rev1.00 해석). mode/bw는 항상 live가 있으면 우선, 설정한 적 없으면 0xFF. 미접속 시 SNR/RSSI −128·AP MAC 0·status 0, Single이면 WLAN#2 블록 전체 무효값(0xFF/0xFFFF/−128) — Rev1.01 §4.2.2. (실타겟 검증: `docs/implementation/verify-device-info-freq-source.md`)
+mlan0/link.json 키 매핑: `info.address`→WLAN mac, `link.address`→connect_ap_mac(=associated),
+`link.signal_avg`→RSSI, `channel_info.<freq>.noise`→SNR(`rssi−noise`). freq/channel은 **`device_info_freq_source`(opc.conf) 토글**: `live`(기본, Rev1.01 §4.3.4)=접속 시 live값(미접속·주파수 없는 링크→0xFFFF/0xFFFF) / `auto`=접속 시 live값, 미접속 시 설정 파생값(없으면 0xFFFF) / `config`=설정 파생값(Rev1.00 해석). mode/bw/essid는 설정값이며 접속 링크 값으로 덮어쓰지 않는다(#193, 위 표). 미접속 시 SNR/RSSI −128·AP MAC 0·status 0, Single이면 WLAN#2 블록 전체 무효값(0xFF/0xFFFF/−128) — Rev1.01 §4.2.2. (실타겟 검증: `docs/implementation/verify-device-info-freq-source.md`)
 
 ### live 필드는 재시작 없이 즉시 반영 — 파일을 바꿔 입증
 ```bash
-# 실장치에서 essid가 link.json에서 온다는 것 입증
+# 실장치에서 WLAN#1 mac이 link.json(info.address — 파일의 첫 "address")에서 온다는 것 입증
 cp /var/log/cantops/json/mlan0/link.json /tmp/bak.json
-sed -i 's/"jhw_wlan"/"TEST_SSID"/' /var/log/cantops/json/mlan0/link.json
+sed -i '0,/"address": "[^"]*"/s//"address": "02:00:00:00:00:01"/' /var/log/cantops/json/mlan0/link.json
 $VHL login --password MyPassword
-$VHL device-info | grep essid          # → essid='TEST_SSID'
+$VHL device-info | grep 'WLAN#1 mac'   # → WLAN#1 mac = 02:00:00:00:00:01
 cp /tmp/bak.json /var/log/cantops/json/mlan0/link.json    # 원복
 ```
 > logger가 link.json을 주기적으로 덮어쓴다(파일 내 `"date"`가 갱신 시각). 편집 직후 빠르게 요청하거나
@@ -165,6 +166,7 @@ cp /tmp/bak.json /var/log/cantops/json/mlan0/link.json    # 원복
 make native PLATFORM=nxp     # 경로는 코드에 #define으로 하드코딩됨 (arch/PLATFORM 전환은 clean 불필요)
 sudo mkdir -p /var/log/cantops/json/eth0 /var/log/cantops/json/mlan0
 # eth0/link.json, mlan0/link.json 을 실장치 샘플 형식으로 작성
+# (essid는 /etc/wpa_supplicant/wpa_supplicant-mlan0.conf, mode/bw 기본값은 /usr/local/etc/wifi_init_conf.json)
 sudo ./build/native/opcd/opcd -p 55555 -i 120
 ./build/native/vhlctl/vhlctl --host 127.0.0.1 --port 55555 login --password MyPassword
 ./build/native/vhlctl/vhlctl --host 127.0.0.1 --port 55555 device-info   # 내가 만든 파일 값이 그대로 나옴

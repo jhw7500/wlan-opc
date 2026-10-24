@@ -198,8 +198,9 @@ typedef struct opcd_platform_ops {
      * as "cannot be sent directly"). */
     int  (*lookup_direct_route)(uint32_t dst_host, uint32_t *netmask_host);
     int  (*get_wlan_mac)(int idx /*0=mlan0,1=mlan1*/, uint8_t mac[6]);
-    /* SSID string for the indexed WLAN interface. NUL-terminated, silently
-     * truncated to cap. Empty string when not associated. */
+    /* Configured SSID of the indexed WLAN interface — the ESSID it is set up
+     * to join, whether or not it is associated (#193). NUL-terminated; empty
+     * when unknown or longer than cap-1 bytes (never truncated). */
     int  (*get_essid)(int idx, char *buf, size_t cap);
     /* Live-queried fields (the firmware version is read once at init and
      * cached, #187). Static identity (hardware version / serial /
