@@ -199,6 +199,16 @@ void stub_set_link_signal(int idx, bool rssi_valid, int8_t rssi,
     s_link[idx].snr_valid  = snr_valid;  s_link[idx].snr  = snr;
 }
 
+/* Classified standard/width of an injected link (stub_set_link() clears them):
+ * lets the handler test show GetDeviceInfo never reports the link's (#193). */
+void stub_set_link_rate(int idx, uint8_t mode, bool bandwidth_valid, uint8_t bandwidth)
+{
+    if (idx < 0 || idx > 1) return;
+    s_link[idx].mode            = mode;
+    s_link[idx].bandwidth_valid = bandwidth_valid;
+    s_link[idx].bandwidth       = bandwidth;
+}
+
 void stub_reset_link(void) { s_link_set[0] = s_link_set[1] = false; }
 
 static int stub_get_link(int idx, opcd_platform_link_t *out)

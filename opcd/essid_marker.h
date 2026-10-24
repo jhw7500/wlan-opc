@@ -64,6 +64,9 @@
 #ifndef OPC_PATH_WPA_CONF_MLAN0
 #define OPC_PATH_WPA_CONF_MLAN0 "/etc/wpa_supplicant/wpa_supplicant-mlan0.conf"
 #endif
+#ifndef OPC_PATH_WPA_CONF_MLAN1
+#define OPC_PATH_WPA_CONF_MLAN1 "/etc/wpa_supplicant/wpa_supplicant-mlan1.conf"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,6 +104,14 @@ int opc_essid_marker_settle(const char *marker_path, const char *conf_path);
  * committed applied token nor the requested SSID recorded at arm; negative
  * errno = marker or conf unusable (both left untouched). */
 int opc_essid_marker_restore(const char *marker_path, const char *conf_path);
+
+/* The SSID a wpa_supplicant conf is configured to join (#193): its first
+ * `ssid=` value, decoded — "quoted" literally, bare even-length hex as bytes
+ * (the two forms the package writers produce). Anything else — P"..."
+ * escapes, odd or non-hex digits, a NUL byte, an SSID longer than cap-1
+ * bytes — yields an empty string rather than a wrong or truncated SSID.
+ * 0 = `out` set (possibly empty); negative errno = conf unreadable, `out` "". */
+int opc_wpa_conf_ssid(const char *conf_path, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

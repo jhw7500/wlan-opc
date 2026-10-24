@@ -68,6 +68,7 @@ extern int      stub_validate_radio_calls(void);
 /* device-info live-link injection (freq-source toggle test) */
 extern void     stub_set_link(int idx, bool assoc, uint16_t freq, uint16_t ch);
 extern void     stub_set_link_signal(int idx, bool rssi_valid, int8_t rssi, bool snr_valid, int8_t snr);
+extern void     stub_set_link_rate(int idx, uint8_t mode, bool bandwidth_valid, uint8_t bandwidth);
 extern void     stub_reset_link(void);
 
 #define ASSERT(cond, label) do {                                              \
@@ -3890,6 +3891,57 @@ int main(void)
         ASSERT(ack.wlan1.snr == -128 && ack.wlan1.rssi == -128, "28: assoc without signal → SNR/RSSI -128, not 0/0");
         ASSERT(ack.wlan1.status == 0x0001, "28: assoc without signal still Status 0x0001");
         stub_reset_link();
+    }
+
+    /* 28b(#193). GetDeviceInfo Mode/BW are configured values, never the live
+     *     link's: a link classified as another standard/width does not override
+     *     the SetRadioConfig value (WLAN#1 and Dual WLAN#2); without one the
+     *     device's wifi_init_conf.json radio configuration is reported; with
+     *     neither, the unset marker stays even while associated. */
+    {
+        opc_get_device_info_ack_t ack;
+        char wic[] = "/tmp/opcd_th_wic_XXXXXX";
+        int wfd = mkstemp(wic);
+        FILE *wf = wfd >= 0 ? fdopen(wfd, "w") : NULL;
+        if (!wf) { perror("28b: mkstemp"); return 2; }
+        fputs("{\"mlan0\":{\"STANDARD\":\"ax\"},"
+              "\"mlan1\":{\"STANDARD\":\"ac\",\"radio\":{\"mode\":\"n\",\"bw\":\"40\"}}}\n", wf);
+        fclose(wf);
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        stub_reset_link();
+        /* a) no SetRadioConfig, no wifi_init_conf, associated 11AC/80 */
+        stub_set_link(0, true, 5240, 48);
+        stub_set_link_rate(0, OPC_WLAN_MODE_11AC, true, OPC_BANDWIDTH_80);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28b: devinfo (no config, assoc 11AC/80)");
+        ASSERT(ack.wlan1.mode == OPC_WLAN_MODE_UNSET && ack.wlan1.bandwidth == OPC_BANDWIDTH_UNSET,
+               "28b: no config anywhere → Mode/BW 0xFF even while associated");
+        /* b) the device's wifi_init_conf.json: STANDARD ax, no width setting */
+        st.paths.wifi_init_conf = wic;
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28b: devinfo (wifi_init_conf only)");
+        ASSERT(ack.wlan1.mode == OPC_WLAN_MODE_11AX && ack.wlan1.bandwidth == OPC_BANDWIDTH_UNSET,
+               "28b: no SetRadioConfig → STANDARD ax, BW unset (not the link's 11AC/80)");
+        /* c) SetRadioConfig 11AX/20 wins over the link and the file */
+        (void)do_set_radio(&st, CIP, 5180, (uint16_t)((OPC_BAND_5GHZ << 8) | 36));
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28b: devinfo (configured, assoc 11AC/80)");
+        ASSERT(ack.wlan1.mode == OPC_WLAN_MODE_11AX && ack.wlan1.bandwidth == OPC_BANDWIDTH_20,
+               "28b: SetRadioConfig 11AX/20 reported while the link is 11AC/80");
+        ASSERT(ack.wlan1.status == 0x0001 && ack.wlan1.freq_mhz == 5240,
+               "28b: measured Status/FREQ still come from the link");
+        /* d) Dual: WLAN#2 configured 11AX/20, link #2 classified 11N/40 */
+        ASSERT(do_set_radio_dual(&st, CIP, 5180, 36, 5200, 40) == 0, "28b: dual SetRadioConfig accepted");
+        stub_set_link(1, true, 5200, 40);
+        stub_set_link_rate(1, OPC_WLAN_MODE_11N, true, OPC_BANDWIDTH_40);
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28b: devinfo (dual)");
+        ASSERT(ack.wlan2.mode == OPC_WLAN_MODE_11AX && ack.wlan2.bandwidth == OPC_BANDWIDTH_20,
+               "28b: Dual WLAN#2 reports its SetRadioConfig 11AX/20, not the link's 11N/40");
+        /* e) Dual WLAN#2 without a SetRadioConfig value → mlan1 radio n/40 */
+        st.radio.wlan2.mode = 0;
+        ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28b: devinfo (dual, WLAN#2 unconfigured)");
+        ASSERT(ack.wlan2.mode == OPC_WLAN_MODE_11N && ack.wlan2.bandwidth == OPC_BANDWIDTH_40,
+               "28b: Dual WLAN#2 without SetRadioConfig → mlan1 radio n/40");
+        stub_reset_link();
+        unlink(wic);
     }
 
     /* 27(#90). ChangeIp 반대편 서브넷 겹침 가드 (OPC_ERR_IP_CHANGE_CLASH 0x0050).

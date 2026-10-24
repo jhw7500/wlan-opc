@@ -4,7 +4,7 @@
  * Reads runtime device state from JSON files maintained by the cantops
  * logger pipeline:
  *   /var/log/cantops/json/eth0/link.json   — ethernet mac / ip / netmask
- *   /var/log/cantops/json/mlan0/link.json  — wlan0 mac / ssid / channel / ...
+ *   /var/log/cantops/json/mlan0/link.json  — wlan0 mac / channel / ...
  *   /var/log/cantops/json/mlan1/link.json  — wlan1 (when enabled)
  *
  * Design choice: no ioctl, no netlink, no mlanutl exec. The logger pipeline
@@ -471,26 +471,19 @@ static int nxp_get_essid(int idx, char *buf, size_t cap)
 {
     if (idx < 0 || idx >= nxp_get_wlan_count()) return -ENODEV;
     if (cap == 0) return -EINVAL;
-    buf[0] = '\0';
-    const char *path = (idx == 0) ? MLAN0_LINK_JSON : MLAN1_LINK_JSON;
-    char *json = opc_json_slurp_file(path);
-    if (json) {
-        int rc = opc_json_string_section(json, "info", "ssid", buf, cap);
-        free(json);
-        if (rc != 0) buf[0] = '\0';
-    }
-    /* link.json is the ONLY source (#142). There is deliberately NO kernel
-     * fallback: the SSID of a managed station is not interface state, so a
-     * NL80211_CMD_GET_INTERFACE reply never carries NL80211_ATTR_SSID. Verified
-     * on-target while associated — `iw mlan0 info` (same command) prints no
-     * ssid line, while `wpa_cli -i mlan0 status` reports ssid=<name>. The
-     * removed fallback could therefore never fire; it only made this path look
-     * defended. The logger fills info.ssid from wpa_supplicant
-     * (wlan-package #336), so if that is empty this field is empty too.
+    /* The CONFIGURED SSID, associated or not (#193): the first `ssid=` of the
+     * interface's persistent wpa_supplicant conf. That file already follows
+     * every way the ESSID changes — a ChangeIpAddress edit (and the #161
+     * restore at boot), the package's SSID settings, factory reset — so no
+     * other state is kept. The associated SSID (link.json info.ssid) is empty
+     * while disconnected, and the kernel has none for a managed station
+     * (#142: NL80211_CMD_GET_INTERFACE never carries NL80211_ATTR_SSID).
      *
      * Best-effort: always returns 0 with buf possibly an empty string. Callers
      * read buf directly — a non-zero return must NOT be relied on to detect
      * "no SSID available". */
+    (void)opc_wpa_conf_ssid(idx == 0 ? OPC_PATH_WPA_CONF_MLAN0 : OPC_PATH_WPA_CONF_MLAN1,
+                            buf, cap);
     return 0;
 }
 
