@@ -29,10 +29,10 @@ complete. Until Phase 3 lands, sections marked `[Phase ≥ 3]` are placeholders.
 ## 3. Configuration writes [Phase ≥ 2]
 
 - [ ] `set-password --old <secret> --new <newsecret>` returns OK and survives `systemctl restart opcd`
-- [ ] `set-ip-list --file iplist.cfg` (covering all 128 slots in multiple requests) commits **only** when the boundary-end flag is seen — verified by `stat /usr/local/opc/etc/iplist.cfg`
+- [ ] `set-ip-list --file iplist.cfg` (covering all 128 slots in multiple requests) commits **only** when the boundary-end flag is seen — verified by `stat /usr/local/opc/etc/iplist.txt`
 - [ ] Sending `change-ip --slot 25` **before** the boundary-end flag returns NG with Error Cause = `0x0012` (conflict)
 - [ ] `change-ip --slot 25` followed by `logout` applies the new IP **after** Logout response is sent (verify with `ip addr` on the target post-logout)
-- [ ] Power-cycle the target — IP returns to the value stored in `iplist.cfg` (the change-ip change is volatile, as spec'd)
+- [ ] Power-cycle the target — IP returns to the value stored in `iplist.txt` (the change-ip change is volatile, as spec'd)
 - [ ] `set-radio --station single --w1-freq 5180 --w1-ch 0x0224 --w1-mode 11 --w1-bw 2` returns OK and persists across reboot
 
 ## 4. Indications [Phase ≥ 2]

@@ -60,6 +60,8 @@ extern "C" {
  * next boot. The raise widens that worst case from 4 writes to 16 (bounded by
  * OPC_STORE_ASYNC_DATA_MAX: 32 KiB -> 128 KiB; the largest blob actually
  * persisted is sizeof(opcd_ip_list_t) = 6784 B, so ~106 KiB in practice).
+ * #194 raised DATA_MAX to 24 KiB for the text IP list (at most 21,604 B):
+ * 16 x 24 KiB = 384 KiB of job buffers.
  *
  * Accepted rather than capped: reaching it needs an abrupt kill DURING a
  * saturating burst, the lost writes are config the VHL can re-send, and the
@@ -69,7 +71,7 @@ extern "C" {
  * share of the queue, which is the portion no client will ever retry because
  * it was already answered NG) is a separate follow-up, not part of this fix. */
 #define OPC_STORE_ASYNC_QUEUE_DEPTH 16
-#define OPC_STORE_ASYNC_DATA_MAX    8192
+#define OPC_STORE_ASYNC_DATA_MAX    24576
 
 typedef struct opc_store_async opc_store_async_t;
 
@@ -112,6 +114,8 @@ int opc_store_async_submit(opc_store_async_t *sa, const char *path,
 
 /* Reserve capacity BEFORE a caller changes settings. Validates and captures
  * path/len; returns a slot >=0, or -1 with the same errors as submit().
+ * `len` is the most the caller will submit: submit_reserved takes any length
+ * up to it (a text whose final size is known only after the mutation).
  * Reserved slots count toward the fixed capacity but never reach the worker.
  * A caller owns its handle until exactly one submit_reserved or cancel.
  * The handler consumes reservations within one dispatch; it never retains

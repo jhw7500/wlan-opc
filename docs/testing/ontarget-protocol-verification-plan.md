@@ -307,7 +307,7 @@ echo "== RESULT: $pass PASS / $fail FAIL =="
 | 명령 | 부작용 | 영속성 | 원복 / 주의 |
 |---|---|---|---|
 | `set-password` | `/usr/local/opc/etc` 비번 갱신 | 영구(restart 잔존) | **사전 sha 백업** 후 검증, NG 경로 우선. 잠기면 복구 곤란 |
-| `set-ip-list` | `iplist.cfg` END 시 commit | 영구(NVRAM) | `cp iplist.cfg{,.bak}` → 검증 → 복원 → sha 대조 |
+| `set-ip-list` | `iplist.txt` END 시 commit(#194 텍스트, 그 전에는 바이너리 `iplist.cfg`) | 영구(NVRAM) | `cp iplist.txt{,.bak}` → 검증 → 복원 → sha 대조 |
 | `set-radio` | **wpa_supplicant conf의 freq 실제 수정** | 영구(reboot 잔존) | OK 경로는 링크 끊김 가능 → **NG 경로 우선**(apply 전 거부, 링크 무영향) |
 | `change-ip` | nxp 백엔드가 **eth0 관리 IP 를 `ip addr` 로 실변경** | 휘발(reboot→`22-eth0.network` 복원; mlan /32 보존) | **OK(armed)는 logout 시 ssh 경로 IP 변경→끊김** → 콘솔 필요. 원격은 **conflict(0x0012) 거부 경로만** |
 | `reset` | **보드 재부팅**(`wlan_reboot_policy.sh --source opc_reset --force`; MFG/uptime/cooldown/loop 게이트 우회, #164) | 휘발 상태 전부 초기화(ssh 세션 단절, change-ip 런타임 IP·set-indication 설정 소멸) | 재부팅 완료까지 대기(boot_id 변경 → opcd active → basic-info). 스크립트 부재·실행기 실패(exit≠0)면 재부팅 없이 opcd만 재시작(`RestartSec=2`); SIGTERM 아닌 시그널 종료는 "미확인"(재부팅이 이어질 수도 있음, 감사 로그 "could not confirm a reboot")이라 보드가 살아 있으면 opcd만 재시작 |

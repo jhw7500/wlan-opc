@@ -133,6 +133,47 @@ opcd_radio_restore_t opcd_radio_conf_restore(const void *buf, size_t n,
  * No new configuration input is introduced. */
 opcd_radio_restore_t opcd_radio_conf_load(opcd_state_t *st);
 
+/* ---- IP address list file (#194) ----
+ *
+ * Communication spec 6.5. The list is the spec Figure 4-5 text
+ * (iplist_text.h) in two files: st->paths.ip_list_user, the customer file a
+ * file-transfer account can replace (any means), and st->paths.ip_list,
+ * opcd's own copy of the list in effect. A SetIpConfigList commit writes the
+ * own copy (its outcome is the reply) and then the customer file. */
+typedef enum {
+    OPCD_IPLIST_LOAD_NONE,            /* no file: empty list */
+    OPCD_IPLIST_LOAD_TEXT,            /* text read; malformed or rejected lists dropped and logged */
+    OPCD_IPLIST_LOAD_TOO_LARGE,       /* text over OPC_IPLIST_TEXT_MAX: empty list, file left as is */
+    OPCD_IPLIST_LOAD_ERROR,           /* text present but unreadable: empty list */
+    OPCD_IPLIST_LOAD_MIGRATED,        /* binary converted, text written, binary renamed *.migrated */
+    OPCD_IPLIST_LOAD_LEGACY_UNSAVED,  /* binary used, text write failed: converted again next boot */
+    OPCD_IPLIST_LOAD_LEGACY_DISCARD,  /* binary of the wrong size: empty list */
+} opcd_iplist_load_t;
+
+typedef enum {
+    OPCD_IPLIST_USER_UNSET,     /* no customer file path */
+    OPCD_IPLIST_USER_CREATED,   /* absent: written from the list in effect */
+    OPCD_IPLIST_USER_APPLIED,   /* valid: the whole list is now its content, own copy updated */
+    OPCD_IPLIST_USER_REJECTED,  /* a bad line: previous list kept, file renamed *.rejected and rewritten */
+    OPCD_IPLIST_USER_UNUSABLE,  /* not a regular file or unreadable: previous list kept, file untouched */
+} opcd_iplist_user_t;
+
+/* Start: fill st->ip_list ("the next start" of spec 6.5).
+ * 1. opcd's own copy, read leniently. Without it, the pre-#194 binary at
+ *    st->paths.ip_list_legacy is converted once — its lists re-checked, the
+ *    text written, the binary renamed "<legacy>.migrated" so neither a later
+ *    boot nor an older opcd after a downgrade reads it again (a downgrade
+ *    therefore starts with an empty list). With the text present, a leftover
+ *    binary is renamed the same way. *own receives this step's verdict.
+ * 2. The customer file, read strictly (opened O_NOFOLLOW, a regular file of
+ *    at most OPC_IPLIST_IMPORT_MAX bytes, every line well formed, every list
+ *    with all five keys and SetIpConfigList-valid values; an empty file is an
+ *    empty list). Valid: it becomes the list. Otherwise the list from step 1
+ *    stays, as the return value says.
+ * Lives here, like opcd_radio_conf_load, so the start-up behaviour is
+ * host-testable through st->paths. */
+opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own);
+
 #ifdef __cplusplus
 }
 #endif

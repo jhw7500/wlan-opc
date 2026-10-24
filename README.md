@@ -36,9 +36,20 @@ platform-independent); cross-deploy uses `make PLATFORM=nxp`.
 /usr/local/opc/
 ├── bin/opcd
 ├── bin/vhlctl
-├── etc/{opc.conf, password, iplist.cfg, radio.conf, temp/}
+├── etc/{opc.conf, password, iplist.txt, radio.conf, temp/}
 └── opcd.service   ← symlinked from /etc/systemd/system/opcd.service
 ```
+
+The IP address list (issue 194, communication spec 6.5) is the customer's file
+`/home/admin/iplist.txt` — the file-transfer account's home, so it can be
+replaced over FTP — plus opcd's copy of the list in effect,
+`etc/iplist.txt`. opcd reads the customer file when it starts: a valid file
+replaces the whole list, a file with any bad line is renamed
+`iplist.txt.rejected` and the previous list stays. A SetIpConfigList commit
+writes both files. The pre-0.7.4 binary `etc/iplist.cfg` is converted once at
+the first start and renamed `iplist.cfg.migrated`; an older opcd installed
+afterwards therefore starts with an empty list (rename `iplist.cfg.migrated`
+back to `iplist.cfg` to restore the list as it was at the conversion).
 
 ## Status
 

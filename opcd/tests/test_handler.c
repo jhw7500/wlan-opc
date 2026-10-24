@@ -26,6 +26,7 @@
 
 #include "../handler.h"
 #include "../indication.h"
+#include "../iplist_text.h"
 #include "../opcd_state.h"
 #include "../platform.h"
 #include "../store.h"
@@ -78,6 +79,7 @@ extern void     stub_reset_link(void);
 
 static char g_pw_path[128];
 static char g_iplist_path[128];
+static char g_iplist_user_path[128];
 static char g_radio_path[128];
 
 /* error_cause of the last ack seen by the matching do_* helper below */
@@ -103,6 +105,23 @@ static int bind_loopback_udp(uint16_t *port_out)
     if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) { close(fd); return -1; }
     if (port_out) *port_out = ntohs(sa.sin_port);
     return fd;
+}
+
+/* #194: the list is stored as the spec Figure 4-5 text — read it back as
+ * slots (a list with all five lines and a non-zero IP is populated). */
+static int read_disk_iplist(const char *path, opcd_ip_list_t *out)
+{
+    static char text[OPC_IPLIST_TEXT_MAX + 1];
+    static opc_iplist_text_t t;
+    memset(out, 0, sizeof *out);
+    ssize_t n = opc_store_read_all(path, text, sizeof text);
+    if (n < 0 || opc_iplist_text_parse(text, (size_t)n, &t, NULL, 0) != 0) return -1;
+    for (unsigned i = 0; i < OPC_IPCFG_LIST_MAX_SLOTS; i++) {
+        if (t.keys[i] != OPC_IPLIST_KEY_ALL || t.entry[i].ip_address == 0) continue;
+        out->slots[i] = t.entry[i];
+        out->present[i] = 1;
+    }
+    return 0;
 }
 
 static int wait_fd_readable(int fd, int timeout_ms)
@@ -555,9 +574,11 @@ int main(void)
      * (CWE-377). `make check` runs this in opcd/tests/, a build-owned dir. */
     snprintf(g_pw_path, sizeof g_pw_path, "test_handler_pw_%d.tmp", (int)getpid());
     snprintf(g_iplist_path, sizeof g_iplist_path, "test_handler_iplist_%d.tmp", (int)getpid());
+    snprintf(g_iplist_user_path, sizeof g_iplist_user_path, "test_handler_iplist_user_%d.tmp", (int)getpid());
     snprintf(g_radio_path, sizeof g_radio_path, "test_handler_radio_%d.tmp", (int)getpid());
     unlink(g_pw_path);
     unlink(g_iplist_path);
+    unlink(g_iplist_user_path);
     unlink(g_radio_path);
 
     opcd_state_t st;
@@ -1163,6 +1184,7 @@ int main(void)
      *      SINGLE frame — seed from the committed list (merge), apply the entry,
      *      commit + persist to NVRAM, all in one entry. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
+    st.paths.ip_list_user = g_iplist_user_path;   /* #194: the customer file too */
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
     (void)do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_START, 0xC0A80165 /*.1.101*/);
     r = do_set_ip_list(&st, CIP, 1, OPC_LIST_BOUNDARY_END, 0xC0A80165);
@@ -1176,10 +1198,15 @@ int main(void)
            "0x0003: prior slot 1 survives (seed/merge from committed list)");
     {
         static opcd_ip_list_t disk_list;
-        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) == (ssize_t)sizeof disk_list &&
+        ASSERT(read_disk_iplist(g_iplist_path, &disk_list) == 0 &&
                disk_list.present[4] == 1 && disk_list.slots[4].ip_address == 0xC0A80205 &&
                disk_list.present[0] == 1,
                "0x0003: single-frame commit persisted to NVRAM (비휘발 기록)");
+        static char own_text[OPC_IPLIST_TEXT_MAX + 1], user_text[OPC_IPLIST_TEXT_MAX + 1];
+        ssize_t on = opc_store_read_all(g_iplist_path, own_text, sizeof own_text);
+        ssize_t un = opc_store_read_all(g_iplist_user_path, user_text, sizeof user_text);
+        ASSERT(on > 0 && un == on && memcmp(own_text, user_text, (size_t)on) == 0,
+               "#194: the commit also writes the customer file (spec 6.5)");
     }
 
     /* 14e. #107: 0x0003 is self-contained. A CONTINUE/END that FOLLOWS it has no
@@ -1798,8 +1825,7 @@ int main(void)
                lack.result == OPC_RESULT_OK,
                "async set-ip-list: deferred ack OK");
         static opcd_ip_list_t disk_list;
-        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) ==
-                   (ssize_t)sizeof disk_list &&
+        ASSERT(read_disk_iplist(g_iplist_path, &disk_list) == 0 &&
                disk_list.present[0] == 1 && disk_list.present[1] == 1 &&
                disk_list.slots[1].ip_address == 0xC0A80166,
                "async set-ip-list: committed list on disk");
@@ -1834,8 +1860,7 @@ int main(void)
         ASSERT(wait_fd_readable(cli, 300) != 0,
                "NG-after-commit: no duplicate deferred ack sent");
         memset(&disk_list, 0, sizeof disk_list);
-        ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) ==
-                   (ssize_t)sizeof disk_list &&
+        ASSERT(read_disk_iplist(g_iplist_path, &disk_list) == 0 &&
                disk_list.present[0] == 1 &&
                disk_list.slots[0].ip_address == 0xC0A80170,
                "NG-after-commit: committed list reached NVRAM via queue");
@@ -4141,8 +4166,7 @@ int main(void)
         {
             opcd_ip_list_t disk_list;
             memset(&disk_list, 0xAA, sizeof disk_list);
-            ASSERT(opc_store_read_all(g_iplist_path, &disk_list, sizeof disk_list) ==
-                       (ssize_t)sizeof disk_list &&
+            ASSERT(read_disk_iplist(g_iplist_path, &disk_list) == 0 &&
                    !disk_list.present[1] && disk_list.present[0],
                    "#163: the cleared slot is what is persisted");
         }
@@ -4322,6 +4346,7 @@ int main(void)
 
     unlink(g_pw_path);
     unlink(g_iplist_path);
+    unlink(g_iplist_user_path);
     unlink(g_radio_path);
 
     if (failures == 0) {

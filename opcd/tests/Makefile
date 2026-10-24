@@ -28,7 +28,7 @@ OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_
                        $(OPCDOBJ)/indication.o $(OPCDOBJ)/fault_probe.o \
                        $(OPCDOBJ)/inventory.o $(OPCDOBJ)/json_util.o $(OPCDOBJ)/snapshot.o \
                        $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/opcd_log.o $(OPCDOBJ)/platform_stub.o \
-                       $(OPCDOBJ)/devinfo_cfg.o
+                       $(OPCDOBJ)/devinfo_cfg.o $(OPCDOBJ)/iplist_text.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
 OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
 # Pure parser — no platform backend, no protocol library.
@@ -61,7 +61,7 @@ TESTS := test_inventory test_ntp_parse test_json_util test_snapshot test_handler
          test_store_async test_store_atomic test_fault_probe test_nl80211_parse test_chan_encode \
          test_freq_source test_ip_iface test_topology test_route_lookup test_reset_cause test_roam_notify_conf test_roam_datagram test_opcd_log \
          test_platform_nxp_radio test_nxp_ap_disconnect test_systemd_notify test_essid_marker \
-         test_devinfo_cfg
+         test_devinfo_cfg test_iplist
 BINS  := $(addprefix $(TESTDIR)/,$(TESTS))
 
 .PHONY: all check clean
@@ -147,6 +147,9 @@ $(TESTDIR)/test_topology: $(TESTDIR)/test_topology.o $(OPCD_OBJS_TOPOLOGY)
 
 $(TESTDIR)/test_devinfo_cfg: $(TESTDIR)/test_devinfo_cfg.o $(OPCD_OBJS_DEVINFOCFG)
 	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_devinfo_cfg.o $(OPCD_OBJS_DEVINFOCFG)
+
+$(TESTDIR)/test_iplist: $(TESTDIR)/test_iplist.o $(OPCD_OBJS_HANDLER) $(PROTODIR)/libopcproto.a
+	$(CC) $(CFLAGS) -o $@ $(TESTDIR)/test_iplist.o $(OPCD_OBJS_HANDLER) $(LDFLAGS) $(LDLIBS)
 
 # /proc/net/route direct-reachability lookup (#159) — links only route_lookup.o.
 $(TESTDIR)/test_route_lookup: $(TESTDIR)/test_route_lookup.o $(OPCD_OBJS_ROUTELOOKUP)

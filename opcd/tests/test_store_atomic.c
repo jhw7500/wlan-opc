@@ -127,6 +127,22 @@ int main(void)
     CHECK(opc_store_write_atomic_ex(NULL,"x",1,0600,&outcome)==-1 &&
           errno==EINVAL && outcome==OPC_STORE_UNCHANGED,
           "invalid write cannot leave an old success outcome");
+    {
+        /* #194: the candidate name may be planted by the directory's owner
+         * (the FTP account's home); a link there must not be followed. */
+        char victim[300], lpath[300], ltemp[320];
+        snprintf(victim,sizeof victim,"%s/victim",dir);
+        snprintf(lpath,sizeof lpath,"%s/linked",dir);
+        snprintf(ltemp,sizeof ltemp,"%s.tmp.%d",lpath,(int)getpid());
+        reset();
+        CHECK(opc_store_write_atomic(victim,"keep",4,0600)==0 && symlink(victim,ltemp)==0,
+              "a link to another file is planted at the candidate name");
+        CHECK(opc_store_write_atomic(lpath,"linked",6,0600)==0 && equals(lpath,"linked") &&
+              equals(victim,"keep") && access(ltemp,F_OK)!=0,
+              "the write replaces the link instead of writing through it");
+        unlink(victim);
+        unlink(lpath);
+    }
 
     opc_store_async_t *writer=opc_store_async_create();
     CHECK(writer!=NULL,"async outcome test creates real worker");

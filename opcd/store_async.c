@@ -207,13 +207,14 @@ int opc_store_async_submit_reserved(opc_store_async_t *sa, int reservation,
     }
     pthread_mutex_lock(&sa->mu);
     job_t *j = &sa->jobs[reservation];
-    if (sa->shutdown || j->state != JOB_RESERVED || j->len != len) {
+    if (sa->shutdown || j->state != JOB_RESERVED || len > j->len) {
         int e = sa->shutdown ? ECANCELED : EINVAL;
         pthread_mutex_unlock(&sa->mu);
         errno = e;
         return -1;
     }
     if (len > 0) memcpy(j->data, data, len);
+    j->len = len;
     j->mode = mode;
     j->token = token;
     j->result = 0;
