@@ -772,8 +772,10 @@ static void test_radio_reconciliation(const char *pw_path,
     if (server < 0 || client < 0 || !store) return;
     opcd_state_t st;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
-    /* #198: SetRadioConfig refuses Dual, so a DUAL baseline is the one restored
-     * from a radio.conf written before #198, and the candidate is SINGLE. */
+    /* #198: SetRadioConfig refuses Dual, and a Dual radio.conf restored at start
+     * is no baseline (radio_applied_known stays false), so production no longer
+     * reaches a known DUAL baseline. It is set directly to keep this path
+     * covered; the candidate is SINGLE. */
     opc_set_radio_config_req_t baseline = radio_config(OPC_STATION_DUAL, 36, 40);
     opc_set_radio_config_req_t candidate = radio_config(OPC_STATION_SINGLE, 44, 0);
     opc_set_radio_config_req_t dual_candidate = radio_config(OPC_STATION_DUAL, 44, 48);

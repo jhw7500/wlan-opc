@@ -354,9 +354,11 @@ static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
     return ack.result;
 }
 
-/* #198: SetRadioConfig refuses Dual, so a Dual radio state now exists only as
- * one restored from a radio.conf written before #198. Put that state in place
- * (the same config do_set_radio_dual sends), applied and committed. */
+/* #198: SetRadioConfig refuses Dual, so tests that need a Dual radio state put
+ * it in place directly (the config do_set_radio_dual used to send), applied and
+ * committed. Production reaches a Dual state only from a radio.conf written
+ * before #198, and that one is not a revert baseline: radio_applied_known stays
+ * false until an apply succeeds. */
 static void prime_radio_dual(opcd_state_t *st, uint16_t f1, uint16_t ch1,
                              uint16_t f2, uint16_t ch2)
 {
@@ -3330,14 +3332,16 @@ int main(void)
 
     /* 24e. M2: the deferred revert hands the FULL DUAL last-good config back to
      *      the platform — proven at the handler/stub boundary (the per-interface
-     *      nxp reconverge itself is cross-only / on-target). Since #198 a Dual
-     *      config can only be the restored one, and the failing request is
-     *      Single. */
+     *      nxp reconverge itself is cross-only / on-target). Since #198
+     *      production has no live Dual baseline (a Dual radio.conf restored at
+     *      start leaves radio_applied_known false and arms no revert);
+     *      prime_radio_dual marks it applied so this revert path stays covered.
+     *      The failing request is Single. */
     {
         opcd_state_t st24e;
         init_state(&st24e, OPC_PASSWORD_DEFAULT);
         (void)do_login(&st24e, CIP, OPC_PASSWORD_DEFAULT);
-        /* A DUAL good config (both interfaces), as restored at start. */
+        /* A DUAL good config (both interfaces), marked applied. */
         prime_radio_dual(&st24e, 2412, 1, 5180, 36);
         const uint16_t saved_f1 = 2412;   /* derived from the primed 2.4 GHz ch1 list */
 
@@ -3454,7 +3458,7 @@ int main(void)
             uint16_t f2 = 0, c2 = 0;
             init_state(&st, OPC_PASSWORD_DEFAULT);
             (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
-            prime_radio_dual(&st, CFG_FREQ, CFG_CH, CFG_FREQ, CFG_CH);   /* #198: restored Dual */
+            prime_radio_dual(&st, CFG_FREQ, CFG_CH, CFG_FREQ, CFG_CH);   /* #198: primed Dual */
             st.conf.device_info_freq_source = OPC_FREQ_SRC_AUTO;
             stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
             stub_set_link(1, true, W2_FREQ, W2_CH_RAW);
@@ -3988,7 +3992,7 @@ int main(void)
                "28b: SetRadioConfig 11AX/20 reported while the link is 11AC/80");
         ASSERT(ack.wlan1.status == 0x0001 && ack.wlan1.freq_mhz == 5240,
                "28b: measured Status/FREQ still come from the link");
-        /* d) Dual (restored, #198): WLAN#2 configured 11AX/20, link #2 classified 11N/40 */
+        /* d) Dual (primed, #198): WLAN#2 configured 11AX/20, link #2 classified 11N/40 */
         prime_radio_dual(&st, 5180, 36, 5200, 40);
         stub_set_link(1, true, 5200, 40);
         stub_set_link_rate(1, OPC_WLAN_MODE_11N, true, OPC_BANDWIDTH_40);

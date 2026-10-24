@@ -136,9 +136,10 @@ chk "set-radio 6G band → NG 0x0011"          "0x0011"       $VHL set-radio --s
 chk "set-radio 5G bit25(표 밖) → NG 0x0012"  "0x0012"       $VHL set-radio --station single --w1-band 5 --w1-chlist-hex 0200000000000000 --w1-mode 11 --w1-bw 2
 # D1 (회신 2026-09-18): 행 순서 확정 — 2.4/5GHz 리스트가 row B(뒤 4Byte)에 실리면 부정 프레임
 chk "set-radio 2.4G 리스트 row B → NG 0x0012" "0x0012"      $VHL set-radio --station single --w1-band 2.4 --w1-chlist-hex 0000000000000421 --w1-mode 11 --w1-bw 2
-# Rev1.02 §4.3.8: Priority CH 오류는 SCAN 오류(0x0011/0x0012)와 분리된 0x0015/0x0016
-chk "set-radio Dual priority 6G대역 → NG 0x0015" "0x0015"   $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x06FF
-chk "set-radio Dual priority 5G ch38(표 밖) → NG 0x0016" "0x0016" $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x0226
+# 통신 사양서 6.7(#198): Station Type 이 Single 이 아니면 다른 필드를 보지 않고 NG 0x0010.
+# Priority CH 0x0015/0x0016 은 Dual 요청에서만 검사하므로 실기에서는 나오지 않는다(단위 시험 test_handler.c 14g-2).
+# Priority CH 를 6G 대역(0x06FF)으로 두어 #198 이전 opcd 도 적용 없이 거절한다.
+chk "set-radio Dual → NG 0x0010 (#198)" "0x0010"   $VHL set-radio --station dual --w1-band 5 --w1-chlist 40 --w1-mode 11 --w1-bw 2 --w2-band 2.4 --w2-chlist 1 --w2-mode 11 --w2-bw 2 --priority 0x06FF
 if [ "$RADIO_APPLY" = "1" ]; then
   # Rev1.01: band + channel list. Same config re-sent → apply skipped (OK), so use ch40+ch36 first.
   chk "set-radio OK 실적용(5G ch40,36 밴드락)"  "OK"           $VHL set-radio --station single --w1-band 5 --w1-chlist 40,36 --w1-mode 11 --w1-bw 2
