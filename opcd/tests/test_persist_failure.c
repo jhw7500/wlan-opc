@@ -757,6 +757,8 @@ static void test_ip_failed_commit_drops_dependent_staging(const char *pw_path,
     close(client);
 }
 
+static uint16_t unpack_radio_result(const uint8_t *wire, ssize_t n, uint16_t *err);
+
 static void test_radio_reconciliation(const char *pw_path,
                                       const char *ip_path,
                                       const char *radio_path)
@@ -770,8 +772,13 @@ static void test_radio_reconciliation(const char *pw_path,
     if (server < 0 || client < 0 || !store) return;
     opcd_state_t st;
     init_state(&st, pw_path, ip_path, radio_path, server, store, port);
+    /* #198: SetRadioConfig refuses Dual, and a Dual radio.conf restored at start
+     * is no baseline (radio_applied_known stays false), so production no longer
+     * reaches a known DUAL baseline. It is set directly to keep this path
+     * covered; the candidate is SINGLE. */
     opc_set_radio_config_req_t baseline = radio_config(OPC_STATION_DUAL, 36, 40);
-    opc_set_radio_config_req_t candidate = radio_config(OPC_STATION_DUAL, 44, 48);
+    opc_set_radio_config_req_t candidate = radio_config(OPC_STATION_SINGLE, 44, 0);
+    opc_set_radio_config_req_t dual_candidate = radio_config(OPC_STATION_DUAL, 44, 48);
     st.radio = baseline;
     st.radio_committed = true;
     st.radio_applied_known = true;
@@ -845,7 +852,9 @@ static void test_radio_reconciliation(const char *pw_path,
     close(server);
     close(client);
 
-    /* A known SINGLE baseline still cannot restore WLAN#2 after a DUAL apply. */
+    /* #198: a DUAL candidate over a SINGLE baseline — the case where a SINGLE
+     * baseline could not restore WLAN#2 — no longer reaches the apply: it is
+     * refused with 0x0010 at once, nothing applied, queued or changed. */
     server = bind_loopback(NULL);
     client = bind_loopback(&port);
     store = opc_store_async_create();
@@ -854,15 +863,18 @@ static void test_radio_reconciliation(const char *pw_path,
     st.radio_committed = true;
     st.radio_applied_known = true;
     stub_apply_radio_reset_calls();
-    fault_arm(FAULT_RENAME);
-    CHECK(dispatch_radio(&st, port, 320, &candidate, resp) == 0,
-          "radio degraded: SINGLE-to-DUAL candidate accepted");
+    {
+        uint16_t err = 0;
+        ssize_t rn = dispatch_radio(&st, port, 320, &dual_candidate, resp);
+        CHECK(unpack_radio_result(resp, rn, &err) == OPC_RESULT_NG && err == OPC_ERR_STATION_TYPE,
+              "radio #198: a DUAL candidate is answered NG 0x0010 at once");
+    }
     opc_store_async_finish(store);
     opcd_store_async_on_ready(&st);
-    CHECK(stub_apply_radio_calls() == 1 && !st.radio_applied_known &&
-          st.radio_recovery_state == OPCD_RADIO_RECOVERY_DEGRADED_UNKNOWN_BASELINE,
-          "radio degraded: SINGLE baseline does not pretend to restore WLAN#2");
-    (void)recv_ack(client, wire, 1000);
+    CHECK(stub_apply_radio_calls() == 0 && memcmp(&st.radio, &single, sizeof single) == 0 &&
+          st.radio_applied_known && st.radio_committed &&
+          st.radio_recovery_state == OPCD_RADIO_RECOVERY_HEALTHY,
+          "radio #198: nothing applied or changed for the refused DUAL candidate");
     st.store_async = NULL;
     opc_store_async_destroy(store);
     close(server);
