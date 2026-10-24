@@ -354,12 +354,11 @@ static uint16_t do_set_radio(opcd_state_t *st, uint32_t cip,
     return ack.result;
 }
 
-/* DUAL variant: pack a SetRadioConfig with station_type=DUAL and valid WLAN#1
- * + WLAN#2 configs (both 11AX/20MHz), so the apply-failure revert's full-DUAL
- * config hand-off is verifiable (D9 M2, test 24e). */
-static uint16_t do_set_radio_dual(opcd_state_t *st, uint32_t cip,
-                                  uint16_t f1, uint16_t ch1,
-                                  uint16_t f2, uint16_t ch2)
+/* #198: SetRadioConfig refuses Dual, so a Dual radio state now exists only as
+ * one restored from a radio.conf written before #198. Put that state in place
+ * (the same config do_set_radio_dual sends), applied and committed. */
+static void prime_radio_dual(opcd_state_t *st, uint16_t f1, uint16_t ch1,
+                             uint16_t f2, uint16_t ch2)
 {
     opc_set_radio_config_req_t req;
     memset(&req, 0, sizeof req);
@@ -371,20 +370,9 @@ static uint16_t do_set_radio_dual(opcd_state_t *st, uint32_t cip,
     req.wlan2.mode      = OPC_WLAN_MODE_11AX;
     req.wlan2.bandwidth = OPC_BANDWIDTH_20;
     legacy_to_scan(f2, ch2, &req.wlan2);
-
-    uint8_t frame[OPC_FRAME_MAX];
-    ssize_t fn = opc_set_radio_config_req_pack(frame, sizeof frame, 7, &req);
-    if (fn <= 0) return 0xFFFF;
-
-    uint8_t resp[OPC_FRAME_MAX];
-    ssize_t rlen = 0;
-    if (opcd_dispatch(st, frame, (size_t)fn, cip, 5000, resp, sizeof resp, &rlen) != 0)
-        return 0xFFFE;
-
-    opc_set_radio_config_ack_t ack;
-    if (opc_set_radio_config_ack_unpack(resp, (size_t)rlen, &ack) != 0) return 0xFFFD;
-    g_last_radio_err = ack.error_cause;
-    return ack.result;
+    st->radio = req;
+    st->radio_applied_known = true;
+    st->radio_committed = true;
 }
 
 /* Pack a ChangeIpAddress request, dispatch, return ack result. */
@@ -1417,8 +1405,16 @@ int main(void)
     ASSERT(r == OPC_RESULT_OK && stub_apply_radio_calls() == 0,
            "identical config re-sent → OK, apply skipped");
 
-    /* 14g-2. A21 DUAL: wlan2 band / priority_ch validation (Rev1.01). */
+    /* 14g-2. #198: Station Type Dual is not supported — refused with 0x0010
+     *        before any other field is checked (WLAN#2 6 GHz, a Priority CH
+     *        error or an otherwise valid Dual request alike), and nothing is
+     *        applied or stored. */
     {
+        const opc_set_radio_config_req_t radio_before = st.radio;
+        const bool committed_before = st.radio_committed;
+        static uint8_t conf_before[256], conf_after[256];
+        ssize_t cb = opc_store_read_all(g_radio_path, conf_before, sizeof conf_before);
+        stub_apply_radio_reset_calls();
         opc_set_radio_config_req_t rreq;
         memset(&rreq, 0, sizeof rreq);
         rreq.station_type    = OPC_STATION_DUAL;
@@ -1430,20 +1426,27 @@ int main(void)
         rreq.wlan2.bandwidth = OPC_BANDWIDTH_20;
         rreq.wlan2.scan_band = OPC_SCAN_BAND_6GHZ;
         uint16_t rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_FREQ,
-               "A21: DUAL wlan2 6 GHz band → 0x0011");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_STATION_TYPE,
+               "#198: Dual with WLAN#2 6 GHz → 0x0010 (not the band's 0x0011)");
         rreq.wlan2.scan_band = OPC_SCAN_BAND_2_4GHZ;
         rreq.priority_ch     = (uint16_t)((OPC_BAND_6GHZ << 8) | 1);
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_PRIO_BAND,
-               "Rev1.02: DUAL priority_ch 6 GHz band → 0x0015 (not the SCAN 0x0012)");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_STATION_TYPE,
+               "#198: Dual with a 6 GHz Priority CH → 0x0010 (not 0x0015)");
         rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 38);   /* not in the 5 GHz table */
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_PRIO_CH,
-               "Rev1.02: DUAL priority_ch 5 GHz ch38 → 0x0016 (not the SCAN 0x0012)");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_STATION_TYPE,
+               "#198: Dual with Priority CH 5 GHz ch38 → 0x0010 (not 0x0016)");
         rreq.priority_ch = (uint16_t)((OPC_BAND_5GHZ << 8) | 36);
         rr = do_set_radio_req(&st, CIP, &rreq);
-        ASSERT(rr == OPC_RESULT_OK, "DUAL 5 GHz/2.4 GHz bands, priority ch36 → OK");
+        ASSERT(rr == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_STATION_TYPE,
+               "#198: an otherwise valid Dual request → 0x0010");
+        ssize_t ca = opc_store_read_all(g_radio_path, conf_after, sizeof conf_after);
+        ASSERT(stub_apply_radio_calls() == 0 &&
+               memcmp(&st.radio, &radio_before, sizeof radio_before) == 0 &&
+               st.radio_committed == committed_before && !st.radio_revert_pending &&
+               ca == cb && (cb <= 0 || memcmp(conf_before, conf_after, (size_t)cb) == 0),
+               "#198: a refused Dual request applies nothing and leaves the stored radio.conf as it was");
     }
 
     /* 14h. SetIndication info-bit validation (§3.3.9 0x0010): 0x40 is the
@@ -3325,26 +3328,26 @@ int main(void)
                "issue#12-24d: success updates in-memory radio state");
     }
 
-    /* 24e. M2: DUAL deferred revert hands the FULL DUAL last-good config back to
-     *      the platform — the headline "DUAL partial-apply reconverges" claim,
-     *      proven at the handler/stub boundary (the per-interface nxp reconverge
-     *      itself is cross-only / on-target). */
+    /* 24e. M2: the deferred revert hands the FULL DUAL last-good config back to
+     *      the platform — proven at the handler/stub boundary (the per-interface
+     *      nxp reconverge itself is cross-only / on-target). Since #198 a Dual
+     *      config can only be the restored one, and the failing request is
+     *      Single. */
     {
         opcd_state_t st24e;
         init_state(&st24e, OPC_PASSWORD_DEFAULT);
         (void)do_login(&st24e, CIP, OPC_PASSWORD_DEFAULT);
-        /* Prime a DUAL good config (both interfaces). */
-        uint16_t pr = do_set_radio_dual(&st24e, CIP, 2412, 1, 5180, 36);
-        ASSERT(pr == OPC_RESULT_OK, "issue#12-24e: DUAL prime succeeds");
+        /* A DUAL good config (both interfaces), as restored at start. */
+        prime_radio_dual(&st24e, 2412, 1, 5180, 36);
         const uint16_t saved_f1 = 2412;   /* derived from the primed 2.4 GHz ch1 list */
 
         /* Inject a single apply failure; the deferred revert then succeeds. */
         stub_apply_radio_reset_calls();
         stub_apply_radio_set_fail_once(1);
-        uint16_t r = do_set_radio_dual(&st24e, CIP, 2437, 6, 5200, 40);
+        uint16_t r = do_set_radio(&st24e, CIP, 2437, 6);
 
         ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_RADIO_APPLY,
-               "issue#12-24e: DUAL apply failure → NG 0x0050");
+               "issue#12-24e: apply failure over a DUAL baseline → NG 0x0050");
         ASSERT(stub_apply_radio_calls() == 1,
                "issue#12-24e: dispatch does a single apply (revert deferred)");
         ASSERT(st24e.radio_revert_pending &&
@@ -3451,7 +3454,7 @@ int main(void)
             uint16_t f2 = 0, c2 = 0;
             init_state(&st, OPC_PASSWORD_DEFAULT);
             (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
-            (void)do_set_radio_dual(&st, CIP, CFG_FREQ, CFG_CH, CFG_FREQ, CFG_CH);
+            prime_radio_dual(&st, CFG_FREQ, CFG_CH, CFG_FREQ, CFG_CH);   /* #198: restored Dual */
             st.conf.device_info_freq_source = OPC_FREQ_SRC_AUTO;
             stub_set_link(0, true, LIVE_FREQ, LIVE_CH_RAW);
             stub_set_link(1, true, W2_FREQ, W2_CH_RAW);
@@ -3985,8 +3988,8 @@ int main(void)
                "28b: SetRadioConfig 11AX/20 reported while the link is 11AC/80");
         ASSERT(ack.wlan1.status == 0x0001 && ack.wlan1.freq_mhz == 5240,
                "28b: measured Status/FREQ still come from the link");
-        /* d) Dual: WLAN#2 configured 11AX/20, link #2 classified 11N/40 */
-        ASSERT(do_set_radio_dual(&st, CIP, 5180, 36, 5200, 40) == 0, "28b: dual SetRadioConfig accepted");
+        /* d) Dual (restored, #198): WLAN#2 configured 11AX/20, link #2 classified 11N/40 */
+        prime_radio_dual(&st, 5180, 36, 5200, 40);
         stub_set_link(1, true, 5200, 40);
         stub_set_link_rate(1, OPC_WLAN_MODE_11N, true, OPC_BANDWIDTH_40);
         ASSERT(do_get_devinfo_ack(&st, CIP, &ack) == 0, "28b: devinfo (dual)");

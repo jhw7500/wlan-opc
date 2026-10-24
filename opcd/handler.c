@@ -1839,7 +1839,10 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             session_touch(st);
             *rlen = 0;
             return 0;
-        } else if (req.station_type != OPC_STATION_SINGLE && req.station_type != OPC_STATION_DUAL) {
+        } else if (req.station_type != OPC_STATION_SINGLE) {
+            /* §4.3.8 0x0010 "지원하지 않는 스테이션 종별": Dual is not supported
+             * (communication spec 6.7, #198), so it is refused here with the
+             * remaining fields unchecked and nothing applied or stored. */
             result = OPC_RESULT_NG; err = OPC_ERR_STATION_TYPE;
         } else if (!valid_wlan_mode(req.wlan1.mode)) {
             result = OPC_RESULT_NG; err = OPC_ERR_RADIO_MODE;
