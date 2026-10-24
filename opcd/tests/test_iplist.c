@@ -158,6 +158,32 @@ int main(void)
                "no record yet: a valid customer file is applied");
     }
 
+    /* ---- Tribunal LOW: opcd's copy unreadable — the unreplaced customer file restores it ---- */
+    {
+        static char huge[OPC_IPLIST_TEXT_MAX + 1];
+        memset(huge, '#', sizeof huge);
+        put_file(own, huge, sizeof huge);                    /* oversized: not read */
+        put_file(user, FIG45, sizeof FIG45 - 1);
+        put_file(record, FIG45, sizeof FIG45 - 1);
+        ASSERT(start() == OPCD_IPLIST_USER_APPLIED && own_verdict == OPCD_IPLIST_LOAD_TOO_LARGE &&
+               list_is_fig45() && FIG45_IS(user) && FIG45_IS(own) && FIG45_IS(record),
+               "oversized own copy: the unreplaced customer file is applied and repairs it");
+        unlink(own);
+        ASSERT(mkdir(own, 0700) == 0, "own copy made unreadable (a directory)");
+        ASSERT(start() == OPCD_IPLIST_USER_APPLIED && own_verdict == OPCD_IPLIST_LOAD_ERROR &&
+               list_is_fig45() && FIG45_IS(user) && FIG45_IS(record),
+               "unreadable own copy: the customer file is applied, nothing is emptied");
+        /* ... and with opcd's copy still unwritable, a replaced file is applied
+         * but not recorded, so the next start cannot take it for unreplaced. */
+        static const char NINE[] =
+            "IPAddress9=10.0.9.5\nIPSubnetMask9=255.255.255.0\nIPDefaultGateway9=0.0.0.0\n"
+            "WL54EssId9=\"nine\"\nNTPServer9=0.0.0.0\n";
+        put_file(user, NINE, sizeof NINE - 1);
+        ASSERT(start() == OPCD_IPLIST_USER_APPLIED && st.ip_list.present[8] && FIG45_IS(record),
+               "own copy not written: the applied bytes are not recorded");
+        rmdir(own);
+    }
+
     put_file(own, FIG45, sizeof FIG45 - 1);
     put_file(user, "", 0);
     ASSERT(start() == OPCD_IPLIST_USER_APPLIED && !st.ip_list.present[0] && !st.ip_list.present[1] &&

@@ -890,7 +890,12 @@ opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own)
     }
     opcd_ip_list_t list;
     if (rr == 0 && iplist_from_text(in, n, true, &list, why, sizeof why) == 0) {
-        if (iplist_user_unreplaced(st, in, n)) {
+        /* opcd's copy decides only when it was actually read: an unreadable or
+         * oversized copy left st->ip_list empty, and the unreplaced customer
+         * file is then the one good copy to restore from (Tribunal LOW). */
+        bool own_read = lr == OPCD_IPLIST_LOAD_TEXT || lr == OPCD_IPLIST_LOAD_MIGRATED ||
+                        lr == OPCD_IPLIST_LOAD_LEGACY_UNSAVED;
+        if (own_read && iplist_user_unreplaced(st, in, n)) {
             /* Not replaced since opcd wrote it: opcd's own copy is the list in
              * effect. A later SetIpConfigList whose customer-file copy did not
              * land must not be undone here (Tribunal A-R1-001). */
@@ -899,12 +904,14 @@ opcd_iplist_user_t opcd_iplist_load(opcd_state_t *st, opcd_iplist_load_t *own)
             return OPCD_IPLIST_USER_KEPT;
         }
         st->ip_list = list;
+        /* Record the customer's bytes as applied only once opcd's copy holds
+         * them, so a later commit whose customer-file copy fails is not
+         * overridden by them at the next start — and a failed copy here is not
+         * mistaken for an unreplaced file then. */
         if (iplist_write(st->paths.ip_list, &st->ip_list, true) != 0)
             fprintf(stderr, "opcd: iplist: writing %s failed: %s\n", st->paths.ip_list, strerror(errno));
-        /* Record the customer's bytes as applied, so a later commit whose
-         * customer-file copy fails is not overridden by them at the next start. */
-        if (st->paths.ip_list_user_last &&
-            opc_store_write_atomic(st->paths.ip_list_user_last, in, n, 0644) != 0)
+        else if (st->paths.ip_list_user_last &&
+                 opc_store_write_atomic(st->paths.ip_list_user_last, in, n, 0644) != 0)
             fprintf(stderr, "opcd: iplist: writing %s failed: %s\n",
                     st->paths.ip_list_user_last, strerror(errno));
         fprintf(stderr, "opcd: iplist: %s applied (%u lists)\n", user, iplist_count(&st->ip_list));
