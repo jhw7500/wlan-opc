@@ -30,6 +30,19 @@ After an NVRAM NG the client re-sends the same request, and the host communicati
 
 Graceful shutdown stops writer admission, joins submitted jobs and harvests/reconciles their results while the platform and UDP socket remain alive, then destroys the writer. This can wait on blocked storage; it does not guarantee bounded shutdown or recovery after SIGKILL.
 
+## Radio cross-file window (issue 178)
+
+SetRadioConfig changes files in two places. The wlan-package helper `opc_wlan_apply.sh` writes the new wpa_supplicant configuration to a temporary file, syncs it, renames it over the configuration, syncs the file and its directory, and only then runs `wpa_cli reconfigure`; mode and bandwidth go to `wifi_init_conf.json` after the reconfigure. opcd submits `radio.conf` only after that apply succeeded. After an abrupt power loss the files can therefore diverge in one direction only: a new wpa_supplicant configuration with the old `radio.conf` (and possibly the old JSON). The window runs from the helper's directory sync to the directory fsync of `radio.conf`.
+
+opcd does not compare the files at start. It reads `radio.conf` as the committed configuration, with no verified live baseline (`radio_applied_known` stays false). What follows depends on the client:
+
+- If it re-sends the new configuration, which it never saw acknowledged, the request differs from `radio.conf` and is applied and stored, so the files converge.
+- If it sends the old configuration, equal to `radio.conf`, the equal-configuration branch answers OK without applying. The device keeps running the new wpa_supplicant configuration while GetDeviceInfo reports the old SCAN band and list.
+
+The same state can arise without power loss: if the first apply after a start is followed by a `radio.conf` write that fails before rename (UNCHANGED), no baseline is known, no restoration is armed, and the request answers NVRAM NG while the new configuration stays live.
+
+Decision (2026-10-20): this window is accepted and documented here. A WAL would not close it, because the wpa_supplicant configuration is replaced before `radio.conf` is submitted. Re-applying the first equal request after every start was rejected: if a client re-sends its configuration at start, every boot would drop the link for a reconfigure. Comparing the files at start was rejected for its parsing surface (band and channel list from the wpa_supplicant configuration, plus the mode/bandwidth JSON). If a power-cut test or a field report shows the window matters, the planned fix is a transaction marker: written and fsynced just before the apply, removed once `radio.conf` is DURABLE. A marker found at start makes opcd start with `radio_committed` false, so the next equal request takes the normal apply-and-store path; a marker that survives wrongly costs one extra reapply.
+
 ## Verification and limits
 
 `test_store_atomic` uses the real filesystem and worker with injected file-fsync, rename, close and directory-fsync failures. It checks exact visible bytes, candidate cleanup, result/errno/outcome propagation, private file mode and relative-path directory synchronization. The old implementation fails the parent-sync behavior tests.
