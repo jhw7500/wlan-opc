@@ -443,14 +443,40 @@ int main(int argc, char **argv)
                strstr(log, "ip route replace default via 192.168.1.1 dev mlan0") != NULL,
                "#162 Gateway follows the management interface (mlan0)");
 
+        /* #196: 0.0.0.0 gateway/NTP mean "not set". After a slot that set
+         * both, a slot without them removes the default route on the
+         * management interface only and the ChangeIp NTP drop-in, so
+         * timesyncd is back on the device's own server. */
         ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0 && access(IPT_DROPIN, F_OK) == 0,
+               "#196 setup: a slot with GW/NTP installs the NTP drop-in");
+        unlink(g_exec_log);
         e.default_gateway = 0;
         e.ntp_server = 0;
-        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#162 apply with GW/NTP unset succeeds");
-        ASSERT(read_log(log, sizeof log) == 0 &&
-               strstr(log, "route replace default") == NULL && strstr(log, "try-restart") == NULL &&
-               access(IPT_DROPIN, F_OK) != 0,
-               "#162 0.0.0.0 gateway/NTP are unset: nothing applied");
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0, "#196 apply with GW/NTP unset succeeds");
+        ASSERT(read_log(log, sizeof log) == 0, "#196 unset apply invocations captured");
+        p_ip = strstr(log, "ip addr replace 192.168.1.101/24 dev eth0");
+        const char *p_del = strstr(log, "ip -4 route flush exact 0.0.0.0/0 dev eth0");
+        ASSERT(p_del != NULL && p_ip != NULL && p_del > p_ip &&
+               strstr(log, "route replace default") == NULL,
+               "#196 Gateway 0.0.0.0: the default route on the management interface is removed after the address");
+        ASSERT(strstr(log, "dev mlan0") == NULL,
+               "#196 Gateway 0.0.0.0: the other interface's default route is not touched");
+        ASSERT(access(IPT_DROPIN, F_OK) != 0 &&
+               strstr(log, "systemctl --no-block try-restart systemd-timesyncd.service") != NULL,
+               "#196 NTP 0.0.0.0: the ChangeIp drop-in is removed and timesyncd re-reads");
+        ASSERT(ops->get_ntp_server(&ntp) == 0 && ntp == 0x0A000009u,
+               "#196 NTP 0.0.0.0: GetDeviceInfo NTP is the device's own timesyncd.conf server again");
+        unlink(g_exec_log);
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0 && read_log(log, sizeof log) == 0 &&
+               strstr(log, "ip -4 route flush exact 0.0.0.0/0 dev eth0") != NULL &&
+               strstr(log, "try-restart") == NULL,
+               "#196 unset again with no drop-in: the route removal repeats, timesyncd is not restarted");
+        unlink(g_exec_log);
+        ASSERT(ops->apply_ip_change(&e, 1, 4) == 0 && read_log(log, sizeof log) == 0 &&
+               strstr(log, "ip -4 route flush exact 0.0.0.0/0 dev mlan0") != NULL &&
+               strstr(log, "dev eth0") == NULL,
+               "#196 Gateway 0.0.0.0 follows the management interface (mlan0) and leaves eth0 alone");
         e.default_gateway = 0xC0A80101u;
         e.ntp_server = 0xC0A80105u;
 

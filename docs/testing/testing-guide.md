@@ -708,7 +708,9 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
   (set-radio는 wpa_supplicant conf의 freq를 실제 수정). `change-ip`는 nxp 백엔드에서 eth0 관리 IP를
   `ip addr`로 **실제 변경**(런타임만 — reboot 시 22-eth0.network로 복원되는 휘발성, wifi_init.sh의 mlan /32는 보존).
   리스트의 Gateway(0.0.0.0 제외)는 관리 IF의 기본 경로(`ip route replace default`), NTP(0.0.0.0 제외)는
-  `/run` timesyncd drop-in로 역시 휘발 적용한다(#162). ESSID는 wpa conf 편집이라 비휘발이므로 편집 직전에
+  `/run` timesyncd drop-in로 역시 휘발 적용한다(#162). 0.0.0.0(미설정)이면 관리 IF의 main 테이블 기본 경로를
+  지우고(`ip -4 route flush exact 0.0.0.0/0 dev <IF>`, 다른 IF·table 100 은 그대로) ChangeIp drop-in 을 지워
+  장치 timesyncd.conf 로 돌아간다(#196). ESSID는 wpa conf 편집이라 비휘발이므로 편집 직전에
   `/usr/local/opc/etc/changeip_essid.restore` 표식(원래 `ssid=`·슬롯·시각·요청 SSID `target=` hex)을 먼저 쓰고,
   적용 성공 뒤 conf의 현재 `ssid=` 토큰을 `applied=`로 커밋한다. 실패·타임아웃이면 conf를 다시 읽어 요청 SSID로
   디코드되면 커밋, 다른 값(다른 작성자)이면 커밋하지 않고(미커밋 표식 삭제·커밋 체인은 target 제거), 안 바뀌었으면
