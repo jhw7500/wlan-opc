@@ -6,7 +6,7 @@ When capacity is still full, the request remains unaccepted: no settings change,
 
 A reservation is submitted or canceled within the current dispatch. Radio apply failure, IP requests that never commit and other non-submitting exits release it. Reserved jobs are not worker jobs; graceful shutdown drains only submitted data as before. A partially committing IP-list frame still answers its earlier validation error immediately, with its prefix write already guaranteed a slot and its completion logged without a second ACK.
 
-This change removes the former 500ms completion wait and false NVRAM failure caused by transient queue pressure. Genuine write failures still return NVRAM NG. Synchronous fallback when writer creation fails can still block on storage. [Persistence outcomes](persistence-outcomes.md) describes parent-directory synchronization, publication and bounded radio recovery. A complete platform snapshot, WAL and abrupt-power-loss qualification remain open under issue 144.
+This change removes the former 500ms completion wait and false NVRAM failure caused by transient queue pressure. Genuine write failures still return NVRAM NG. Synchronous fallback when writer creation fails can still block on storage. [Persistence outcomes](persistence-outcomes.md) describes parent-directory synchronization, publication and bounded radio recovery. A complete platform snapshot and physical power-loss qualification remain unverified. Issue 178 found a WAL unnecessary, since an OK is sent only after the write is durable, and accepted the one remaining window, the radio cross-file divergence described in [Persistence outcomes](persistence-outcomes.md).
 
 ## Verification
 
