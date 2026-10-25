@@ -590,13 +590,27 @@ int main(void)
     r = do_login(&st, CIP, "wrong");
     ASSERT(r == OPC_RESULT_NG, "wrong password: login rejected");
 
-    /* 4. set-password must refuse an empty new password, leaving state intact. */
+    /* 4. set-password must refuse an empty new password, leaving state intact.
+     *    #200: the refusal is 0x0013 (new password invalid, spec [표15]) and is
+     *    checked before the old password, so a right old password is not
+     *    reported as a mismatch (0x0010); 0x0010 stays for a wrong old one. */
     init_state(&st, OPC_PASSWORD_DEFAULT);
     (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+    unlink(g_pw_path);
     r = do_set_password(&st, CIP, OPC_PASSWORD_DEFAULT, "");
     ASSERT(r == OPC_RESULT_NG, "set-password: empty new password rejected");
+    ASSERT(g_last_pw_err == OPC_ERR_NEW_PW_CHAR,
+           "#200: empty new password with the right old one → 0x0013 (not 0x0010)");
     ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0,
            "set-password: password unchanged after empty reject");
+    r = do_set_password(&st, CIP, "WrongOld1", "");
+    ASSERT(r == OPC_RESULT_NG && g_last_pw_err == OPC_ERR_NEW_PW_CHAR,
+           "#200: empty new password with a wrong old one → 0x0013 ([표15]: 0x0013 before 0x0010)");
+    r = do_set_password(&st, CIP, "WrongOld1", "NewSecret123");
+    ASSERT(r == OPC_RESULT_NG && g_last_pw_err == OPC_ERR_PASSWORD_MISMATCH,
+           "#200: wrong old password with a valid new one stays 0x0010");
+    ASSERT(strcmp(st.password, OPC_PASSWORD_DEFAULT) == 0 && access(g_pw_path, F_OK) != 0,
+           "#200: refused requests change neither the password nor the stored file");
 
     /* 5. set-password with a real new password still works (no regression). */
     init_state(&st, OPC_PASSWORD_DEFAULT);

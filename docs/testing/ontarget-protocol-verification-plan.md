@@ -112,7 +112,7 @@ ID/Length 는 `protocol/ids.h`·`protocol/commands.h`·스펙 §3.3 검증값. E
 | Logout | `0xF002` | `logout` | — | 0 | 60 | OK, 세션 종료(통지 설정은 유지 #160) | 미로그인→0x0001 ; 타 IP→0x0002 | §3.3.2 |
 | GetBasicInfo | `0x0001` | `basic-info` | 불요 | 0 | 72 | Vendor=0x00902cfb, Station=SINGLE(0x0001) | (발행조건 없음, 항상 응답) | §3.3.3 |
 | GetDeviceInfo | `0x0002` | `device-info` | 요 | 0 | 408 | 전 필드 디코드 | 미로그인→**0x0001** ; indication ON 중→**0x0010** | §3.3.4 |
-| SetPassword | `0x1001` | `set-password --old --new` | 요 | 312 | 60 | OK + restart 후 잔존 | 구비번 오타→0x0010 ; 신비번 문자/NUL→0x0013/0x0014 ; NVRAM→0x0004 | §3.3.5 |
+| SetPassword | `0x1001` | `set-password --old --new` | 요 | 312 | 60 | OK + restart 후 잔존 | 구비번 오타→0x0010 ; 신비번 문자·빈 값/NUL→0x0013/0x0014 ; NVRAM→0x0004 | §3.3.5 |
 | SetIpConfigList | `0x1002` | `set-ip-list --slot --flag start\|cont\|end\|start_end --ip --mask --gw --ntp --essid` | 요 | 56+64·n | 60 | END(또는 0x0003 start_end) 수신 시 commit | slot→0x0010 ; IP→0x0011 ; netmask→0x0012 ; GW→0x0013 ; NTP→0x0014 ; ESSID 문자/NUL→0x0015/0x0016 ; Len≠56+64n→0x0017 ; seq위반→0x0018 | §3.3.6 |
 | ChangeIpAddress | `0x1003` | `change-ip --slot N` | 요 | 60 | 60 | OK(armed)→logout 후 적용 | slot→0x0010 ; 빈 슬롯→**0x0011** ; 리스트변경 중 경합→**0x0012** | §3.3.7 |
 | SetRadioConfig | `0x1004` | `set-radio --station --w1-band --w1-chlist --w1-mode --w1-bw [--w2-* --priority]` | 요 | 84 | 60 | OK + reboot 잔존(wpa freq 실수정) | station→0x0010 ; band(6G)→**0x0011** ; chlist/priority→0x0012 ; mode→**0x0013** ; bw→**0x0014** ; 적용실패→0x0050 | §3.3.8 |
@@ -202,7 +202,7 @@ wifi_roam.py/passive_roam.py 의 로밍 성공 뒤 훅, #83). 능동 검증 = `r
 | 요청 | 기대 ErrorCause | 비고 |
 |---|---|---|
 | `login --password ''` / 오타 | NG **0x0010** | 빈/오타 비번 |
-| `set-password --new ''` | NG 0x0010 + **파일 sha 불변** | 잠김위험 0 |
+| `set-password --new ''` | NG 0x0013(#200) + **파일 sha 불변** | 잠김위험 0 |
 | 2nd-host `login` | NG **0x0002** | 세션 배타 제어 |
 | indication ON 중 `device-info` | NG **0x0010** | §3.3.4 |
 | `set-indication --to 0.0.0.0 / 224.0.0.1 / 255.255.255.255` | NG **0x0012** | **#34 정정**: testing-guide 치트시트는 0x0010 표기 → 현재 코드 0x0012 (`opcd/handler.c` `valid_unicast_ipv4`, `OPC_ERR_IND_RECIPIENT_IP=0x0012`) |
