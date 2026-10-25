@@ -60,8 +60,9 @@ void opcd_session_logout(opcd_state_t *st);
 size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered);
 
 /* D12/D13: bad-length datagram → 0x0003 NG toward the logged-in session's
- * IP only; every other source is dropped silently (SEC-003). GetBasicInfo
- * answers with basic info and GetDeviceInfo with its 416 B NG form (#185).
+ * IP only; every other source is dropped silently (SEC-003). GetDeviceInfo
+ * answers its 416 B NG form (#185); GetBasicInfo gets the 68 B general NG
+ * like every other command (#195).
  * `valid_len` is how many bytes of `frame` actually landed in the buffer. */
 void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport);

@@ -2577,8 +2577,9 @@ int main(void)
                "D13: NG echoes req/seq with 0x0003");
         ASSERT(rn == 68, "#185: other commands keep the 68 B general NG");
 
-        /* #185: the two commands whose responses are not the general ACK
-         * answer a bad-length frame in their own formats. */
+        /* #185: GetDeviceInfo, whose response is not the general ACK, answers
+         * a bad-length frame in its own format. #195: GetBasicInfo answers
+         * the 68 B general NG like every other command. */
         {
             uint8_t infof[30];
             memset(infof, 0, sizeof infof);
@@ -2590,26 +2591,17 @@ int main(void)
             (void)opc_fixed_header_pack(infof, &ih);
             opcd_reject_bad_length(&st, infof, sizeof infof, LOOP, cli_port);
             ASSERT(wait_fd_readable(cli, 1000) == 0,
-                   "#185: bad-length GetBasicInfo is answered");
+                   "#195: bad-length GetBasicInfo from the session IP is answered");
             rn = recv(cli, rx_buf, sizeof rx_buf, 0);
-            opc_get_basic_info_ack_t bi;
-            ASSERT(rn == 80 &&
-                   opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
-                   ahdr.req_indication_id == OPC_REQ_GET_BASIC_INFO &&
-                   ahdr.sequence_number == 78 &&
-                   opc_get_basic_info_ack_unpack(rx_buf, (size_t)rn, &bi) == 0 &&
-                   bi.device_status == st.boot_status,
-                   "#185: bad-length GetBasicInfo answers the 80 B basic info");
             {
-                uint8_t qf[OPC_FRAME_MAX], qr[OPC_FRAME_MAX];
-                ssize_t qn = opc_get_basic_info_req_pack(qf, sizeof qf, 80);
-                ssize_t qrlen = -1;
-                ASSERT(qn > 0 &&
-                       opcd_dispatch(&st, qf, (size_t)qn, LOOP, cli_port,
-                                     qr, sizeof qr, &qrlen) == 0 &&
-                       qrlen == 80 && rn == 80 &&
-                       memcmp(qr + 64, rx_buf + 64, 16) == 0,
-                       "#185: bad-length GetBasicInfo body equals the normal answer");
+                uint16_t bres = 0, berr = 0;
+                ASSERT(rn == 68 &&
+                       opc_frame_parse(rx_buf, (size_t)rn, &ahdr, NULL, NULL) == 0 &&
+                       ahdr.sequence_number == 78 &&
+                       opc_simple_ack_unpack(rx_buf, (size_t)rn, OPC_REQ_GET_BASIC_INFO,
+                                             &bres, &berr) == 0 &&
+                       bres == OPC_RESULT_NG && berr == OPC_ERR_PACKET_SIZE,
+                       "#195: bad-length GetBasicInfo answers the 68 B general NG 0x0003, not basic info");
             }
             opcd_reject_bad_length(&st, infof, sizeof infof, LOOP + 1, other_port);
             ASSERT(wait_fd_readable(other, 300) != 0,
@@ -4340,6 +4332,42 @@ int main(void)
             opcd_reject_bad_length(&st, fr, sizeof fr, CIP, 5000);
             ASSERT(st.idle_deadline == armed,
                    "#167: 0x0003 length error does not refresh (frame-level)");
+        }
+        /* #195: a GetBasicInfo with Length 56 is a 64 B frame, so it passes the
+         * receive-length check and fails only the Length-0 body rule. From the
+         * session IP or another one it answers the 68 B general NG 0x0003, not
+         * basic info, and touches neither the timer nor the session; a
+         * well-formed GetBasicInfo still answers the 80 B basic info. */
+        {
+            uint8_t gf[OPC_FRAME_MAX], gr[OPC_FRAME_MAX];
+            ssize_t gn = opc_frame_build(gf, sizeof gf, OPC_CMD_REQUEST,
+                                         OPC_REQ_GET_BASIC_INFO, 95, 56, NULL, 0);
+            for (int src = 0; src < 2; src++) {
+                ssize_t grl = -1;
+                uint16_t gres = 0, gerr = 0;
+                opc_header_t gh;
+                armed = idle_arm(&st);
+                ASSERT(gn == 64 &&
+                       opcd_dispatch(&st, gf, (size_t)gn, src ? CIP + 1 : CIP, 5000,
+                                     gr, sizeof gr, &grl) == 0 &&
+                       grl == 68 &&
+                       opc_frame_parse(gr, (size_t)grl, &gh, NULL, NULL) == 0 &&
+                       gh.sequence_number == 95 &&
+                       opc_simple_ack_unpack(gr, (size_t)grl, OPC_REQ_GET_BASIC_INFO,
+                                             &gres, &gerr) == 0 &&
+                       gres == OPC_RESULT_NG && gerr == OPC_ERR_PACKET_SIZE,
+                       src ? "#195: Length-56 GetBasicInfo from another IP → 68 B NG 0x0003"
+                           : "#195: Length-56 GetBasicInfo from the session IP → 68 B NG 0x0003");
+                ASSERT(st.idle_deadline == armed && st.logged_in && st.holder_ip == CIP,
+                       src ? "#195: malformed GetBasicInfo from another IP leaves timer and session alone"
+                           : "#195: malformed GetBasicInfo from the session IP does not refresh the timer");
+            }
+            uint8_t g8[OPC_FRAME_MAX];
+            ssize_t g8n = opc_get_basic_info_req_pack(g8, sizeof g8, 96), g8rl = -1;
+            ASSERT(g8n == 8 &&
+                   opcd_dispatch(&st, g8, (size_t)g8n, CIP, 5000, gr, sizeof gr, &g8rl) == 0 &&
+                   g8rl == 80,
+                   "#195: a well-formed GetBasicInfo still answers the 80 B basic info");
         }
     }
 
