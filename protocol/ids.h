@@ -203,8 +203,8 @@
  * operator/system, 0x0000_001x wireless, 0x0000_002x environment,
  * 0x0000_003x initialization, 0x0000_004x maintenance — and a value, once
  * used, is never reused with another meaning: a new cause takes a new value
- * in its category. wlan-package tests check these values against the
- * scripts that write them and against their category. */
+ * in its category. wlan-package #381 adds the test that checks these values
+ * against the scripts that write them and against their category. */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */
 #define OPC_RESET_CAUSE_SYSTEM                0x00000002  /* system reboot/shutdown, cause unknown */
 #define OPC_RESET_CAUSE_WLAN_LINK_LOST        0x00000010  /* wifi_checker: interface/FW gone */
