@@ -1180,6 +1180,30 @@ static int nxp_apply_ntp(uint32_t server_host)
     return rc;
 }
 
+/* #196: an NTP Server of 0.0.0.0 means "not set", so the server an earlier
+ * ChangeIpAddress put in the runtime drop-in is dropped and timesyncd goes
+ * back to the device's own TIMESYNCD_CONF. timesyncd is asked to re-read even
+ * when the drop-in is already gone: an earlier clear may have removed it and
+ * then failed to restart timesyncd, which reads drop-ins only at start
+ * (Tribunal A-R1-001). Best-effort like nxp_apply_ntp. */
+static int nxp_clear_ntp(void)
+{
+    bool removed = unlink(OPC_NTP_DROPIN) == 0;
+    if (!removed && errno != ENOENT) {
+        int e = errno;
+        fprintf(stderr, "opcd: nxp_apply_ip_change: ntp drop-in removal failed: %s\n", strerror(e));
+        return -e;
+    }
+    const char *argv[] = { "sh", "-c",
+        "systemctl --no-block try-restart systemd-timesyncd.service", NULL };
+    int rc = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
+                              (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
+    fprintf(stderr, "opcd: nxp_apply_ip_change: ntp unset — %s%s\n",
+            removed ? "ChangeIp drop-in removed" : "no ChangeIp drop-in",
+            rc == 0 ? ", timesyncd back to the device setting" : " (timesyncd restart FAILED)");
+    return rc;
+}
+
 /* Apply a committed IP-config slot to the management IP at runtime, on the
  * interface the caller selects (0=eth0, 1=mlan0): opc.conf device_ip_iface
  * under the eth0_ip topology, mlan0 unconditionally under peer_route (#122,
@@ -1207,8 +1231,11 @@ static int nxp_apply_ntp(uint32_t server_host)
  * not applied" decisions): a non-zero gateway becomes the default route on the
  * management interface (`ip route replace`, gone after reboot); a non-zero NTP
  * server goes to a /run timesyncd drop-in (OPC_NTP_DROPIN) and timesyncd is
- * asked to re-read it. 0.0.0.0 means unset and is not applied. Both are
- * best-effort like the ESSID: logged, never overriding the IP result.
+ * asked to re-read it. 0.0.0.0 means "not set" (#196, spec §4.3.6): a 0
+ * gateway removes the main-table default route on the management interface
+ * (other interfaces and wifi_init.sh's table 100 are left alone), and a 0 NTP
+ * server removes the drop-in so the device's own timesyncd.conf applies again.
+ * Both are best-effort like the ESSID: logged, never overriding the IP result.
  *
  * The ESSID is the one non-volatile part (wpa conf edit): see the marker in
  * essid_marker.h (#161). */
@@ -1311,11 +1338,24 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_
                                        (char *const *)gargv, IP_CHANGE_TIMEOUT_MS);
             fprintf(stderr, "opcd: nxp_apply_ip_change: default gateway %s on %s%s\n",
                     gwbuf, dev, grc == 0 ? " (ip route)" : " FAILED");
-        } else if (gw != 0) {
+        } else if (gw == 0) {
+            /* #196: no gateway in the slot = no default route on this
+             * interface. Only the main table on `dev` — the same place the
+             * `replace` above installs one. No match exits 0. */
+            char gcmd[80];
+            snprintf(gcmd, sizeof gcmd, "ip -4 route flush exact 0.0.0.0/0 dev %s", dev);
+            const char *gargv[] = { "sh", "-c", gcmd, NULL };
+            int grc = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
+                                       (char *const *)gargv, IP_CHANGE_TIMEOUT_MS);
+            fprintf(stderr, "opcd: nxp_apply_ip_change: gateway unset — default route on %s removed%s\n",
+                    dev, grc == 0 ? "" : " FAILED");
+        } else {
             fprintf(stderr, "opcd: nxp_apply_ip_change: non-unicast gateway 0x%08x — not applied\n", gw);
         }
         if (slot->ntp_server != 0)
             (void)nxp_apply_ntp(slot->ntp_server);
+        else
+            (void)nxp_clear_ntp();
     }
 
     /* essid is best-effort: a failure is logged but does NOT override the IP result

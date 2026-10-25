@@ -97,8 +97,9 @@ $VHL login --password "$PW" >/dev/null 2>&1
 sec "5. SetIpConfigList"
 # slot1은 §6의 ChangeIp 커밋 대상이 될 수 있는 슬롯이므로 ESSID/GW/NTP를 미설정으로 둔다.
 # ESSID가 비어 있지 않으면 커밋이 platform_nxp.c의 `slot->essid[0] != '\\0'` 게이트를 통과해
-# run_opc_wlan_apply()로 그 ESSID를 mlan0(하드코딩)에 적용하고 무선을 끊는다. GW/NTP는 적용
-# 대상이 아니지만(검증·에코만) 같은 이유로 함께 비운다.
+# run_opc_wlan_apply()로 그 ESSID를 mlan0(하드코딩)에 적용하고 무선을 끊는다. GW/NTP 는 0이 아니면
+# 관리 IF 기본 경로·timesyncd drop-in 으로 적용되고(#162), 0.0.0.0 이면 커밋 때 그 기본 경로와
+# ChangeIp drop-in 을 지운다(#196). 이 스위트는 커밋하지 않으므로(§6) 어느 쪽도 일어나지 않는다.
 chk "set-ip-list START(slot1) → OK"          "OK"           $VHL set-ip-list --slot 1 --flag start --ip 10.0.0.50 --mask 255.255.255.0 --gw 0.0.0.0 --ntp 0.0.0.0 --essid ""
 # staging 중 change-ip는 슬롯을 보기 전에 거절된다 — handle_change_ip_address의 검사 순서가
 # armed → ip_list_staging_active → 범위 → present 이기 때문이다(opcd/handler.c).
