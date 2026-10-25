@@ -87,6 +87,9 @@ int __wrap_execv(const char *path, char *const argv[])
     if (getenv("OPCD_NXP_FAIL_MLAN1") != NULL &&
         argv[1] != NULL && strcmp(argv[1], "mlan1") == 0)
         _exit(42);
+    if (getenv("OPCD_NXP_FAIL_TIMESYNCD") != NULL &&    /* #196: timesyncd restart failed */
+        argv[2] != NULL && strstr(argv[2], "systemd-timesyncd") != NULL)
+        _exit(1);
     if (getenv("OPCD_NXP_FAIL_WLAN_APPLY") != NULL &&   /* #161: ESSID apply refused/failed */
         argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0)
         _exit(42);
@@ -470,8 +473,26 @@ int main(int argc, char **argv)
         unlink(g_exec_log);
         ASSERT(ops->apply_ip_change(&e, 0, 4) == 0 && read_log(log, sizeof log) == 0 &&
                strstr(log, "ip -4 route flush exact 0.0.0.0/0 dev eth0") != NULL &&
-               strstr(log, "try-restart") == NULL,
-               "#196 unset again with no drop-in: the route removal repeats, timesyncd is not restarted");
+               strstr(log, "systemctl --no-block try-restart systemd-timesyncd.service") != NULL,
+               "#196 unset again with no drop-in: the route removal and the timesyncd re-read both repeat");
+        /* Tribunal A-R1-001: a clear that removed the drop-in but failed to
+         * restart timesyncd is retried by the next unset apply. */
+        e.default_gateway = 0xC0A80101u;
+        e.ntp_server = 0xC0A80105u;
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0 && access(IPT_DROPIN, F_OK) == 0,
+               "#196 retry setup: the drop-in is back");
+        e.default_gateway = 0;
+        e.ntp_server = 0;
+        setenv("OPCD_NXP_FAIL_TIMESYNCD", "1", 1);
+        unlink(g_exec_log);
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0 && access(IPT_DROPIN, F_OK) != 0 &&
+               read_log(log, sizeof log) == 0 && strstr(log, "try-restart systemd-timesyncd") != NULL,
+               "#196 a failed timesyncd restart still removes the drop-in");
+        unsetenv("OPCD_NXP_FAIL_TIMESYNCD");
+        unlink(g_exec_log);
+        ASSERT(ops->apply_ip_change(&e, 0, 4) == 0 && read_log(log, sizeof log) == 0 &&
+               strstr(log, "systemctl --no-block try-restart systemd-timesyncd.service") != NULL,
+               "#196 the next unset apply asks timesyncd to re-read again after a failed restart");
         unlink(g_exec_log);
         ASSERT(ops->apply_ip_change(&e, 1, 4) == 0 && read_log(log, sizeof log) == 0 &&
                strstr(log, "ip -4 route flush exact 0.0.0.0/0 dev mlan0") != NULL &&

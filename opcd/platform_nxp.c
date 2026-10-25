@@ -1182,13 +1182,14 @@ static int nxp_apply_ntp(uint32_t server_host)
 
 /* #196: an NTP Server of 0.0.0.0 means "not set", so the server an earlier
  * ChangeIpAddress put in the runtime drop-in is dropped and timesyncd goes
- * back to the device's own TIMESYNCD_CONF. Only a removed drop-in needs
- * timesyncd to re-read; with none there is nothing to undo. Best-effort like
- * nxp_apply_ntp. */
+ * back to the device's own TIMESYNCD_CONF. timesyncd is asked to re-read even
+ * when the drop-in is already gone: an earlier clear may have removed it and
+ * then failed to restart timesyncd, which reads drop-ins only at start
+ * (Tribunal A-R1-001). Best-effort like nxp_apply_ntp. */
 static int nxp_clear_ntp(void)
 {
-    if (unlink(OPC_NTP_DROPIN) != 0) {
-        if (errno == ENOENT) return 0;
+    bool removed = unlink(OPC_NTP_DROPIN) == 0;
+    if (!removed && errno != ENOENT) {
         int e = errno;
         fprintf(stderr, "opcd: nxp_apply_ip_change: ntp drop-in removal failed: %s\n", strerror(e));
         return -e;
@@ -1197,7 +1198,8 @@ static int nxp_clear_ntp(void)
         "systemctl --no-block try-restart systemd-timesyncd.service", NULL };
     int rc = run_argv_bounded("nxp_apply_ip_change", IP_BIN_SH,
                               (char *const *)argv, IP_CHANGE_TIMEOUT_MS);
-    fprintf(stderr, "opcd: nxp_apply_ip_change: ntp unset — ChangeIp drop-in removed%s\n",
+    fprintf(stderr, "opcd: nxp_apply_ip_change: ntp unset — %s%s\n",
+            removed ? "ChangeIp drop-in removed" : "no ChangeIp drop-in",
             rc == 0 ? ", timesyncd back to the device setting" : " (timesyncd restart FAILED)");
     return rc;
 }
