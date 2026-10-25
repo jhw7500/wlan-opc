@@ -1131,8 +1131,17 @@ static int handle_get_basic_info(opcd_state_t *st, const uint8_t *frame, size_t 
 {
     (void)port;
     if (opc_get_basic_info_req_unpack(frame, flen) != 0) {
-        /* Spec says this must always answer — best effort with current state. */
-    } else if (session_owns(st, ip)) {
+        /* #195 (communication spec 4.2/4.3/5.5): a malformed GetBasicInfo
+         * (Length other than 0) answers the 68 B general NG 0x0003 like every
+         * other command. §4.3.3 "always answered" is about state conditions
+         * such as Login, not packet format errors. A format error is not
+         * activity, so the idle timer is left alone (#167). */
+        emit_ack(rlen, opc_simple_ack_pack(resp, rcap, OPC_REQ_GET_BASIC_INFO, seq,
+                                           OPC_SIMPLE_ACK_LENGTH, OPC_RESULT_NG,
+                                           OPC_ERR_PACKET_SIZE));
+        return 0;
+    }
+    if (session_owns(st, ip)) {
         /* #167: a query from the session IP counts as activity. Another IP's
          * GetBasicInfo needs no Login, so it must not keep a dead session alive. */
         session_touch(st);
@@ -2309,10 +2318,9 @@ size_t opcd_intake_frame_len(const uint8_t *frame, size_t buffered)
  * other source is dropped silently, preserving the SEC-003 no-reflection
  * stance. The first OPC_FIXED_HEADER_SIZE bytes of `frame` must hold the
  * (possibly truncated) datagram's start; req_id and seq are echoed from
- * them so the client can correlate the NG. The two requests whose responses
- * are not the general ACK answer in their own formats (#185): GetBasicInfo
- * always answers with basic info (§4.3.3), as a body that fails to parse does,
- * and GetDeviceInfo answers its 416 B form with the 0x0003 NG. */
+ * them so the client can correlate the NG. GetDeviceInfo, whose response is
+ * not the general ACK, answers its 416 B form with the 0x0003 NG (#185).
+ * GetBasicInfo gets the 68 B general NG like every other command (#195). */
 void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
                             size_t valid_len, uint32_t cip, uint16_t cport)
 {
@@ -2327,9 +2335,7 @@ void opcd_reject_bad_length(opcd_state_t *st, const uint8_t *frame,
     /* Request IDs share their values with Indication IDs (0x0001/0x0002), so
      * only a REQUEST frame selects the command's own format. */
     const bool request = hdr.command_type == OPC_CMD_REQUEST;
-    if (request && hdr.req_indication_id == OPC_REQ_GET_BASIC_INFO) {
-        n = pack_basic_info_ack(st, resp, sizeof resp, hdr.sequence_number);
-    } else if (request && hdr.req_indication_id == OPC_REQ_GET_DEVICE_INFO) {
+    if (request && hdr.req_indication_id == OPC_REQ_GET_DEVICE_INFO) {
         opc_get_device_info_ack_t ack;
         memset(&ack, 0, sizeof ack);
         ack.result      = OPC_RESULT_NG;
