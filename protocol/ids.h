@@ -195,7 +195,16 @@
  * 0x0000_0001 is the operator Reset request; 0x0000_0002 is any system
  * reboot whose cause opcd could not learn; 0x0000_0010+ are the autonomous
  * reset sources of the board's recovery scripts (issue #47 T9), written to
- * OPC_PATH_RESET_CAUSE by wlan_reboot_policy.sh before it reboots. */
+ * OPC_PATH_RESET_CAUSE by wlan_reboot_policy.sh before it reboots
+ * (factory_reset.sh writes 0x0000_0040 itself).
+ *
+ * Rules promised to the customer (communication spec 7.6, wlan-package #381):
+ * the upper nibble of the lowest byte is the category — 0x0000_000x
+ * operator/system, 0x0000_001x wireless, 0x0000_002x environment,
+ * 0x0000_003x initialization, 0x0000_004x maintenance — and a value, once
+ * used, is never reused with another meaning: a new cause takes a new value
+ * in its category. wlan-package #381 adds the test that checks these values
+ * against the scripts that write them and against their category. */
 #define OPC_RESET_CAUSE_USER                  0x00000001  /* operator-issued Reset */
 #define OPC_RESET_CAUSE_SYSTEM                0x00000002  /* system reboot/shutdown, cause unknown */
 #define OPC_RESET_CAUSE_WLAN_LINK_LOST        0x00000010  /* wifi_checker: interface/FW gone */
