@@ -688,10 +688,19 @@ peer_route에서는 device-info IP 삼중항과 ChangeIp 적용이 `device_ip_if
 | `congestion_threshold_pct` | 80 | CPU/Memory/Disk/Net 공통 **진입** 임계(%) |
 | `congestion_clear_pct` | 진입 임계 − min(10, 진입 임계/2) (1..100) | **해제** 임계(%) — 사용률이 이 값 아래로 내려가야 래치가 풀린다(#141). **미지정이면 설정된 진입 임계에서 파생**되므로 `congestion_threshold_pct`만 낮춰도 밴드가 사라지지 않는다. 폭은 진입 임계의 **절반을 넘지 않는다** — 낮은 임계에서 밴드가 범위 전체를 삼켜 오히려 둔감해지는 것을 막는다(80→70, 20→10, 10→5, 5→3, 1→1). 진입 임계를 넘는 값·`0`·숫자가 아닌 값은 **거부/클램프되고 stderr에 기록**된다. 히스테리시스를 끄려면 해제 임계를 **진입 임계와 같게** 설정한다 |
 | — (참고) | | 밴드 안(해제~진입)에 머무는 자원이 `SetIndicationConfig` 후 재통지될 때 `current_val`은 **진입 임계보다 낮을 수 있다**(해제 임계까지). 밴드 규칙상 여전히 폭주 중이므로 모순이 아니다 |
-| `congestion_net_if` / `congestion_net_capacity_mbps` | eth0 / 1000 | 네트워크 사용률 소스·링크 속도 폴백 |
+| `congestion_net_if` | mlan0 (`mlan0`·`mlan1`만) | Network 사용률을 잴 무선 station 인터페이스. 그 인터페이스의 `/var/log/cantops/json/<if>/link.json` 을 읽는다(#192). 그 밖의 값(예: 예전 기본값 `eth0`)은 stderr 경고 1줄을 남기고 무시하며 mlan0 를 그대로 쓴다 |
+| `congestion_net_capacity_mbps` | — | #192 부터 쓰지 않는다. 기존 opc.conf 가 그대로 읽히도록 키는 받되 값은 무시하고 stderr 에 경고 1줄을 남긴다 |
 | `congestion_disk_dev` | mmcblk0 | `/proc/diskstats` 장치명 |
 
 통지는 자원별 **폭주 진입 시 1회**(임계 미만→초과 전이). 지속 중 재통지 없음, 해소 통지는 발주처 Q6 회신 대기. 로컬 재현은 `opcd/tests/test_handler.c` 23 블록(합성 `/proc/stat`) 참조.
+
+Network(0x0004) 사용률은 무선 인터페이스가 쓰는 **채널의 점유율**이다(#192). cantops logger 가 약 1초마다 쓰는 link.json 의 최상위 `survey_in_use` 섹션(운용 채널 survey 행의 `active_time_ms`·`busy_time_ms`, 연결 이후 누적 ms, 그리고 그 survey 를 읽은 logger 의 CLOCK_MONOTONIC 시각 `mono_ms`)을 읽어 측정 주기 사이의 Δbusy/Δactive 를 % 로 쓴다(100 % 에서 포화). busy 에는 펌웨어가 잰 CCA 와 자기 송수신 시간이 함께 들어가므로, 같은 채널을 쓰는 다른 단말·이웃 BSS 의 트래픽도 포함하는 공유 채널 지표다. 예전 방식(eth0 송수신량 ÷ 링크 속도)은 유선 포화는 통지하고 무선 포화는 놓쳤다.
+
+- 파일이 없거나 `survey_in_use` 섹션·값(`mono_ms` 포함)이 없으면 그 표본은 **판정 불가**다. 진입도 해제도 아니며 래치를 유지하고, 다음에 읽히는 표본은 기준값만 다시 잡는다.
+- 카운터는 연결(재연결·로밍)마다 0 부터 다시 센다. 그래서 두 값 중 하나라도 줄었거나, Δactive 나 Δmono 가 0 이거나(logger 정지), Δactive 가 Δmono 와 0.5초(`OPCD_FAULT_NET_CLOCK_SLACK_MS`)를 넘게 어긋나면 그 표본도 판정 불가로 두고 새 값을 기준으로 삼는다. 0 % 로 취급해 해제하지 않는다.
+- 마지막 조건은 벽시계 스텝을 잡는다. moal 은 active 시간을 CLOCK_REALTIME 으로 재고 busy 는 펌웨어 airtime 이라, 측정 창 안에서 시계가 바뀌면 비율이 틀어진다(예: 10초 창에서 2.5초 뒤로 → busy 6000/active 7500 = 거짓 80% 진입). 그래서 opcd 자신의 경과 시간이 아니라 logger 가 찍은 단조 시각 `mono_ms` 와 대조한다.
+- 연결 중(`link` 섹션 있음)인데 `survey_in_use` 가 없는 표본이 6번(`OPCD_FAULT_NET_MISSING_LOG_SAMPLES`) 쌓이면 펌웨어가 채널 busy 시간(CCA)을 내지 않을 수 있다는 진단을 stderr 에 1줄 남긴다. 정상 표본을 한 번 읽으면 다시 남길 수 있다.
+- 로컬 재현은 `opcd/tests/test_fault_probe.c` 10f·12 블록(합성 link.json) 참조.
 
 ### ErrorCause (protocol/ids.h) — `0x0010`은 다의(ARCH-001)
 `0x0001` login-violation · `0x0002` login-condition · `0x0010` indication-violation/pw-mismatch/slot-range/station-type ·

@@ -2738,8 +2738,8 @@ int main(void)
                      sizeof st.fault_probe.path_proc_stat, "%s", fpstat);
             snprintf(st.fault_probe.path_diskstats,
                      sizeof st.fault_probe.path_diskstats, "%s/none", fpd);
-            snprintf(st.fault_probe.net_dir,
-                     sizeof st.fault_probe.net_dir, "%s/none", fpd);
+            snprintf(st.fault_probe.net_link_json,
+                     sizeof st.fault_probe.net_link_json, "%s/none", fpd);
             snprintf(st.fault_probe.path_meminfo,
                      sizeof st.fault_probe.path_meminfo, "%s/none", fpd);
             opc_ind_fault_detect_t fdi;
