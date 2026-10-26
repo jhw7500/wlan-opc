@@ -41,9 +41,12 @@ extern "C" {
  * was wrong, #140). §4.1.3.1 only makes the VHL wait for a RESPONSE before
  * sending the next request — it says nothing about how many jobs a request
  * leaves behind. A SetIpConfigList whose tail entry fails after an earlier
- * one committed answers NG immediately and still queues a no-ack write
- * (handler.c persist_no_ack), so a fully compliant VHL can fill every slot by
- * sending such frames back to back.
+ * one committed answers NG immediately and still queues a no-ack write (the
+ * no_ack argument of handler.c persist_ip_list). Back-to-back frames like
+ * that used to fill every slot; since #144 handler.c admits a persisted
+ * resource (password, IP list, radio) only while it has no outstanding job
+ * (persist_resource_busy), so they no longer pile up. An IP list completion
+ * also queues a log-only copy to the customer file (#194).
  *
  * Shutdown: opc_store_async_destroy() completes every queued job before
  * joining the worker — pending data still reaches NVRAM; only the
@@ -54,22 +57,26 @@ extern "C" {
  * the abrupt-termination loss window. opc_store_write_atomic has no
  * write-ahead log, so a job's data exists only in its slot until that job's
  * own write+fsync+rename lands, and the queue is drained before exit ONLY on
- * the graceful path (opc_store_async_destroy from the signalfd SIGTERM/SIGINT
- * branch and at end of main, opcd.c). On SIGKILL or power loss every still
+ * the graceful path (the signalfd SIGTERM/SIGINT branch only ends the main
+ * loop; opcd.c then finishes, reconciles and destroys the queue at the end of
+ * main). On SIGKILL or power loss every still
  * queued job is lost silently, with no on-disk trace and no reconciliation at
  * next boot. The raise widens that worst case from 4 writes to 16 (bounded by
  * OPC_STORE_ASYNC_DATA_MAX: 32 KiB -> 128 KiB; the largest blob actually
  * persisted is sizeof(opcd_ip_list_t) = 6784 B, so ~106 KiB in practice).
  * #194 raised DATA_MAX to 24 KiB for the text IP list (at most 21,604 B):
- * 16 x 24 KiB = 384 KiB of job buffers.
+ * 16 x 24 KiB = 384 KiB of job buffers. Since #144 (above) the jobs actually
+ * outstanding are at most one per persisted resource plus customer-file
+ * copies, so that is the loss window, not 16.
  *
  * Accepted rather than capped: reaching it needs an abrupt kill DURING a
  * saturating burst, the lost writes are config the VHL can re-send, and the
  * alternative at the time — keeping depth at 4 — preserved the dispatch
  * stall. Issue #144 now reserves capacity before mutation and relies on
- * client timeout/retransmission when full, with no dispatch wait. Write durability (a WAL, or a cap on the no-ack
- * share of the queue, which is the portion no client will ever retry because
- * it was already answered NG) is a separate follow-up, not part of this fix. */
+ * client timeout/retransmission when full, with no dispatch wait. #178
+ * concluded that no write-ahead log is needed; the one remaining cross-file
+ * window is documented in docs/testing/persistence-outcomes.md ("Radio
+ * cross-file window"). */
 #define OPC_STORE_ASYNC_QUEUE_DEPTH 16
 #define OPC_STORE_ASYNC_DATA_MAX    24576
 

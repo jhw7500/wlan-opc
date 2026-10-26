@@ -248,7 +248,6 @@ static_assert(OPC_IPLIST_TEXT_MAX <= OPC_STORE_ASYNC_DATA_MAX,
 static_assert(OPCD_PENDING_ACK_MAX == OPC_STORE_ASYNC_QUEUE_DEPTH,
               "pending ACK capacity must match writer capacity");
 
-#define OPCD_STORE_TOKEN_NO_ACK UINT64_MAX
 /* #194: the customer-file copy of a published IP list; completion is log-only. */
 #define OPCD_STORE_TOKEN_MIRROR (UINT64_MAX - 1)
 
@@ -374,9 +373,6 @@ static int persist_blob(opcd_state_t *st, const char *path,
     return 0;
 }
 
-/* Preserve the earlier IP entry error as the immediate response. Its
- * committed prefix owns capacity already and is written by the sole worker;
- * completion is log-only, with the existing power-loss durability boundary. */
 static int persist_password(opcd_state_t *st, const char *candidate, size_t len,
                             uint32_t ip, uint16_t port, uint16_t seq,
                             int reservation, bool *deferred,
@@ -1569,9 +1565,12 @@ static int handle_set_ip_config_list(opcd_state_t *st, const uint8_t *frame, siz
             /* One NVRAM write per request, after the last commit — the final
              * in-memory list is what reaches disk either way (this also trims
              * the per-commit write churn noted in PERF-004). Only an all-OK
-             * request takes the deferred-ack path: when an entry already
-             * failed, the ack must carry that error now, so the committed
-             * portion is written in-line (malformed-frame corner). */
+             * request takes the deferred-ack path. When an entry already
+             * failed, the ack must carry that error now (malformed-frame
+             * corner), so the committed prefix is queued as a no-ack job: it
+             * owns capacity already, the sole worker writes it, and its
+             * completion sends no ack (a failure is only logged), with the
+             * existing power-loss durability boundary. */
             bool deferred = false;
             opc_store_outcome_t outcome = OPC_STORE_UNCHANGED;
             bool no_ack = result != OPC_RESULT_OK;
@@ -2363,16 +2362,8 @@ void opcd_store_async_on_ready(opcd_state_t *st)
     size_t n = opc_store_async_drain(st->store_async, done,
                                      OPC_STORE_ASYNC_QUEUE_DEPTH);
     for (size_t i = 0; i < n; i++) {
-        /* No-ack check first, on purpose: OPCD_STORE_TOKEN_NO_ACK is UINT64_MAX
-         * and would also trip the >= OPCD_PENDING_ACK_MAX guard below, so this
-         * branch must run first to log no-ack failures rather than drop them
-         * silently. Do not reorder. */
-        if (done[i].token == OPCD_STORE_TOKEN_NO_ACK) {
-            if (done[i].result != 0)
-                fprintf(stderr, "opcd: NVRAM write failed (no-ack commit): %s\n",
-                        strerror(done[i].saved_errno));
-            continue;
-        }
+        /* Sentinel tokens first: they are >= OPCD_PENDING_ACK_MAX, so the
+         * slot guard below would drop them without logging. */
         if (done[i].token == OPCD_STORE_TOKEN_MIRROR) {
             if (done[i].result != 0)
                 fprintf(stderr, "opcd: iplist: writing the customer file failed: %s\n",

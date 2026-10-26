@@ -101,10 +101,10 @@ typedef enum opcd_radio_recovery_state {
 /* Raised 4 -> 16 (#140, 2026-09-21), tracking OPC_STORE_ASYNC_QUEUE_DEPTH.
  *
  * The binding constraint is the async store's job queue, not this array:
- * handler.c static_asserts OPCD_PENDING_ACK_MAX <= OPC_STORE_ASYNC_QUEUE_DEPTH
- * (intended equality), and each store job carries its own
- * OPC_STORE_ASYNC_DATA_MAX (8 KiB) buffer, so the queue is what costs memory
- * (this array is 40 B/slot: 160 B -> 640 B).
+ * handler.c static_asserts OPCD_PENDING_ACK_MAX == OPC_STORE_ASYNC_QUEUE_DEPTH,
+ * and each store job carries its own OPC_STORE_ASYNC_DATA_MAX buffer (8 KiB
+ * then, 24 KiB since #194), so the queue is what costs memory (this array is
+ * 40 B/slot: 160 B -> 640 B).
  *
  * The D3(a) decision of 2026-09-18 kept both at 4 on the grounds that +96 KiB
  * "is not negligible on an embedded target". That was never measured and is
@@ -112,8 +112,9 @@ typedef enum opcd_radio_recovery_state {
  * with opcd at VmRSS 1,536 kB, so the ~108 KiB this costs is 0.0055 % of
  * system RAM (measured on cts-wlan, NXP i.MX93, aarch64, 2026-09-21).
  *
- * Depth does not eliminate saturation — see store_async.h for the compliant
- * client that reaches it — it only makes it 4x harder to reach. */
+ * Depth alone did not eliminate saturation (#140); since #144 the
+ * per-resource admission in handler.c keeps a compliant client from reaching
+ * it (see store_async.h). */
 #define OPCD_PENDING_ACK_MAX 16
 typedef struct opcd_pending_ack {
     bool     in_use;

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -109,6 +110,16 @@ opc_store_async_t *opc_store_async_create(void)
 
     sa->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (sa->event_fd < 0) {
+        free(sa);
+        return NULL;
+    }
+    /* notify_completion() writes this fd under sa->mu and drain() reads it
+     * even when nothing has completed (opcd drains without waiting for poll),
+     * so both depend on O_NONBLOCK (#178). Without it, fail creation: opcd
+     * then falls back to synchronous writes instead of blocking. */
+    int fl = fcntl(sa->event_fd, F_GETFL);
+    if (fl < 0 || !(fl & O_NONBLOCK)) {
+        close(sa->event_fd);
         free(sa);
         return NULL;
     }
