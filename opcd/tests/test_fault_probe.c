@@ -52,15 +52,19 @@ static void write_meminfo(const char *path, unsigned long long total_kb,
 
 /* Synthetic cantops <iface>/link.json (#192), cut down to what the Network
  * probe reads. `associated` adds the link section (the station's association
- * marker); active_ms < 0 leaves the survey_in_use section out. */
+ * marker); active_ms < 0 leaves the survey_in_use section out, mono_ms < 0
+ * leaves only the section's mono_ms stamp out. */
 static void write_link_json(const char *path, bool associated,
-                            long long active_ms, long long busy_ms)
+                            long long active_ms, long long busy_ms,
+                            long long mono_ms)
 {
-    char survey[160] = "", text[512];
+    char mono[40] = "", survey[200] = "", text[512];
+    if (mono_ms >= 0)
+        snprintf(mono, sizeof mono, ", \"mono_ms\": %lld", mono_ms);
     if (active_ms >= 0)
         snprintf(survey, sizeof survey,
                  ",\n  \"survey_in_use\": {\"freq\": 5200, \"active_time_ms\": %lld, "
-                 "\"busy_time_ms\": %lld}", active_ms, busy_ms);
+                 "\"busy_time_ms\": %lld%s}", active_ms, busy_ms, mono);
     snprintf(text, sizeof text,
              "{\n  \"date\": \"2026-10-26 12:00:00\",\n"
              "  \"info\": {\"address\": \"00:50:43:02:fe:01\"}%s%s\n}\n",
@@ -219,7 +223,7 @@ int main(void)
     snprintf(flink, sizeof flink, "%s/link.json", d);
     write_file(fstat, "cpu  0 0 0 1000 0 0 0 0\n");
     write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 0 0\n");
-    write_link_json(flink, true, 10000, 1000);
+    write_link_json(flink, true, 10000, 1000, 900000);
 
     opcd_fault_probe_init(&p);
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s", fstat);
@@ -233,7 +237,7 @@ int main(void)
     /* advance: cpu 900/1000 busy, disk 950 ms, channel busy 900 of 1000 ms */
     write_file(fstat, "cpu  900 0 0 1100 0 0 0 0\n");
     write_file(fdisk, " 179 0 mmcblk0 0 0 0 0 0 0 0 0 0 950 0\n");
-    write_link_json(flink, true, 11000, 1900);
+    write_link_json(flink, true, 11000, 1900, 901000);
     p.mono_ms -= 1000;                       /* pretend one second elapsed */
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0, "sample: second call ok");
     ASSERT(r.cpu_over && r.cpu_pct == 90,    "sample: cpu 90% detected");
@@ -594,24 +598,24 @@ int main(void)
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
     snprintf(p.net_link_json,  sizeof p.net_link_json,  "%s", flink);
     snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
-    write_link_json(flink, true, 10000, 0);
+    write_link_json(flink, true, 10000, 0, 900000);
     (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
-    write_link_json(flink, true, 11000, 790);                    /* 79% */
+    write_link_json(flink, true, 11000, 790, 901000);            /* 79% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 79 &&
            !r.net_over && !r.net_entered,
            "hysteresis/net: 79% is below the entry level");
-    write_link_json(flink, true, 12000, 1590);                   /* 80% */
+    write_link_json(flink, true, 12000, 1590, 902000);           /* 80% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 80 &&
            r.net_over && r.net_entered,
            "hysteresis/net: reaching the entry level (80%) is an ENTRY");
-    write_link_json(flink, true, 13000, 2290);                   /* 70%, in band */
+    write_link_json(flink, true, 13000, 2290, 903000);           /* 70%, in band */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 70 &&
            r.net_over && !r.net_cleared && !r.net_entered,
            "hysteresis/net: a dip to clear_pct (70%) is NOT a clear");
-    write_link_json(flink, true, 14000, 2980);                   /* 69% */
+    write_link_json(flink, true, 14000, 2980, 904000);           /* 69% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 69 &&
            !r.net_over && r.net_cleared,
@@ -719,85 +723,130 @@ int main(void)
     }
 
     /* 12. #192 Network (0x0004) through the sampler: the operating channel's
-     *     cumulative active / busy time from link.json survey_in_use. A delta
-     *     counts only when both counters moved forward and Δactive matches the
-     *     elapsed time within OPCD_FAULT_NET_ACTIVE_SLACK_MS; anything else is
-     *     UNKNOWN — neither entry nor clear, latch held — and re-baselines.
-     *     Only the network source is live. */
+     *     cumulative active / busy time from link.json survey_in_use, stamped
+     *     with the logger's monotonic mono_ms. A delta counts only when both
+     *     counters and the stamp moved forward and Δactive matches Δmono within
+     *     OPCD_FAULT_NET_CLOCK_SLACK_MS; anything else is UNKNOWN — neither
+     *     entry nor clear, latch held — and re-baselines. Only the network
+     *     source is live; the probe's own elapsed time plays no part. */
     opcd_fault_probe_init(&p);
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s/none", d);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
     snprintf(p.net_link_json,  sizeof p.net_link_json,  "%s", flink);
     snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
-    write_link_json(flink, true, 50000, 5000);
+    write_link_json(flink, true, 50000, 5000, 200000);
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && !r.net_over && !r.net_entered,
            "net: priming call reports nothing");
-    write_link_json(flink, true, 51000, 5500);                   /* 500 of 1000 */
+    write_link_json(flink, true, 51000, 5500, 201000);           /* 500 of 1000 */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 50 &&
            !r.net_over && !r.net_entered,
            "net: busy 500 of 1000 ms active = 50%, under");
-    write_link_json(flink, true, 52000, 6700);                   /* 1200 of 1000 */
+    write_link_json(flink, true, 52000, 6700, 202000);           /* 1200 of 1000 */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 100 &&
            r.net_over && r.net_entered,
            "net: busy above active clamps to 100% (an ENTRY)");
-    p.mono_ms -= 1000;                       /* logger stopped: file unchanged */
+    p.mono_ms -= 1000;          /* logger stopped: file and its mono_ms unchanged */
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
            !r.net_over && !r.net_entered && !r.net_cleared,
-           "net: a stale link.json (Δactive 0) is UNKNOWN, not a 0% clear");
-    write_link_json(flink, true, 53000, 7600);                   /* 90% */
+           "net: a stale link.json (Δmono 0) is UNKNOWN, not a 0% clear");
+    /* Each guard on its own, inside the clock slack: a stamp that did not move
+     * while active did, and active that did not move while the stamp did. */
+    write_link_json(flink, true, 52300, 6900, 202000);
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
+           !r.net_over && !r.net_entered && !r.net_cleared,
+           "net: mono_ms not advancing (active +300) is UNKNOWN, not a 66% clear");
+    write_link_json(flink, true, 52300, 6900, 202300);
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
+           !r.net_over && !r.net_entered && !r.net_cleared,
+           "net: active not advancing (mono +300) is UNKNOWN, not a clear");
+    write_link_json(flink, true, 54300, 8700, 204300);  /* resumed: 1800 of 2000 */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 90 &&
            r.net_over && !r.net_entered,
            "net: the latch held through the stale sample (no second ENTRY)");
-    write_link_json(flink, true, 600, 500);  /* roam: counters restart */
+    write_link_json(flink, true, 600, 500, 205000);     /* roam: counters restart */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
            !r.net_over && !r.net_entered && !r.net_cleared,
            "net: a roam reset (active went down) is UNKNOWN, latch held");
-    /* A second roam right after: the new association's active (900) passes the
-     * old one (600) within the slack, so only busy going down gives it away. */
-    write_link_json(flink, true, 900, 100);
+    /* busy alone going down while active kept pace with mono — a counter
+     * anomaly the clock check cannot see */
+    write_link_json(flink, true, 1600, 100, 206000);
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
            !r.net_over && !r.net_entered && !r.net_cleared,
-           "net: a reset seen only on busy (busy went down) is UNKNOWN, not 100%");
-    write_link_json(flink, true, 1900, 1000);                    /* 90% */
+           "net: busy going down alone (active kept pace) is UNKNOWN, not 100%");
+    write_link_json(flink, true, 2600, 1000, 207000);            /* 90% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 90 &&
            r.net_over && !r.net_entered,
            "net: measured again from the post-roam baseline, latch held (no second ENTRY)");
-    write_link_json(flink, true, 6900, 1500);  /* 5000 ms active in ~1000 ms */
-    p.mono_ms -= 1000;
-    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
-           !r.net_over && !r.net_entered && !r.net_cleared,
-           "net: Δactive off the elapsed time beyond the slack is UNKNOWN, not a 10% clear");
-    write_link_json(flink, true, 7900, 1600);                    /* 10% */
+    write_link_json(flink, true, 3600, 1100, 208000);            /* 10% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 10 &&
            !r.net_over && r.net_cleared,
-           "net: the rejected sample re-baselined; the next real drop is the clear");
-    write_link_json(flink, true, 10400, 2600); /* 2500 ms active in ~1000 ms */
-    p.mono_ms -= 1000;
-    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 40 && !r.net_over,
-           "net: Δactive within the slack of the elapsed time is measured (40%)");
+           "net: a real drop after the roam is the clear");
 
-    /* 12b. A failed read — survey_in_use missing, link.json missing — is
-     *      UNKNOWN like any unreadable source: the latch holds, and the next
-     *      good read re-primes instead of spanning the gap. */
+    /* 12a. Wall-clock steps (tribunal A-R1-001). moal measures active time on
+     *      CLOCK_REALTIME while busy is firmware airtime, so a step inside the
+     *      window skews Δbusy / Δactive; the logger's mono_ms does not step.
+     *      10 s windows (Δmono 10000). */
     opcd_fault_probe_init(&p);
     snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s/none", d);
     snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
     snprintf(p.net_link_json,  sizeof p.net_link_json,  "%s", flink);
     snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
-    write_link_json(flink, true, 1000, 0);
+    write_link_json(flink, true, 100000, 10000, 1000000);
     (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
-    write_link_json(flink, true, 2000, 900);                     /* 90% */
+    write_link_json(flink, true, 110000, 15000, 1010000);        /* 50% */
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 50 && !r.net_over,
+           "net/clock: 5000 of 10000 ms = 50%, under");
+    /* stepped back 2.5 s: read as 6000 / 7500 it would be a false 80% ENTRY */
+    write_link_json(flink, true, 117500, 21000, 1020000);
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
+           !r.net_over && !r.net_entered && !r.net_cleared,
+           "net/clock: clock stepped back (Δmono 10000, Δactive 7500, Δbusy 6000) is UNKNOWN, no ENTRY");
+    write_link_json(flink, true, 127500, 29500, 1030000);        /* 85% */
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 85 &&
+           r.net_over && r.net_entered,
+           "net/clock: the step re-baselined; a real 85% is the ENTRY");
+    /* stepped forward 2.5 s: read as 6000 / 12500 it would be a false 48% clear */
+    write_link_json(flink, true, 140000, 35500, 1040000);
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
+           !r.net_over && !r.net_entered && !r.net_cleared,
+           "net/clock: clock stepped forward (Δmono 10000, Δactive 12500) is UNKNOWN, the held latch does not clear");
+    write_link_json(flink, true, 150400, 40700, 1050000);        /* 5200 of 10400 */
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 50 &&
+           !r.net_over && r.net_cleared,
+           "net/clock: Δactive 400 ms over Δmono is jitter — measured (50%, the clear)");
+    write_link_json(flink, true, 160000, 45500, 1060000);        /* 4800 of 9600 */
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 50 && !r.net_over,
+           "net/clock: Δactive 400 ms under Δmono is jitter — measured (50%)");
+
+    /* 12b. A failed read — survey_in_use without mono_ms, no survey_in_use,
+     *      no link.json — is UNKNOWN like any unreadable source: the latch
+     *      holds, and the next good read re-primes instead of spanning the gap. */
+    opcd_fault_probe_init(&p);
+    snprintf(p.path_proc_stat, sizeof p.path_proc_stat, "%s/none", d);
+    snprintf(p.path_diskstats, sizeof p.path_diskstats, "%s/none", d);
+    snprintf(p.net_link_json,  sizeof p.net_link_json,  "%s", flink);
+    snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);   /* host-independent */
+    write_link_json(flink, true, 1000, 0, 300000);
+    (void)opcd_fault_probe_sample(&p, &r);                       /* prime */
+    write_link_json(flink, true, 2000, 900, 301000);             /* 90% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_entered,
            "net/readfail: entry");
-    write_link_json(flink, true, -1, 0);                         /* no survey row */
+    write_link_json(flink, true, 3000, 1000, -1);        /* no mono_ms: 10% unstamped */
+    p.mono_ms -= 1000;
+    ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
+           !r.net_over && !r.net_entered && !r.net_cleared,
+           "net/readfail: survey_in_use without mono_ms is UNKNOWN (no 10% clear)");
+    write_link_json(flink, true, -1, 0, 0);                      /* no survey row */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
            !r.net_over && !r.net_entered && !r.net_cleared,
@@ -807,16 +856,16 @@ int main(void)
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_pct == 0 &&
            !r.net_over && !r.net_entered && !r.net_cleared,
            "net/readfail: a missing link.json is UNKNOWN");
-    write_link_json(flink, true, 5000, 3600);
+    write_link_json(flink, true, 6000, 3600, 306000);
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 &&
            !r.net_over && !r.net_entered && !r.net_cleared,
            "net/readfail: the first good read re-primes (nothing reported)");
-    write_link_json(flink, true, 6000, 4500);                    /* 90% */
+    write_link_json(flink, true, 7000, 4500, 307000);            /* 90% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_over && !r.net_entered,
            "net/readfail: recovered over-sample is NOT a duplicate entry");
-    write_link_json(flink, true, 7000, 5000);                    /* 50% */
+    write_link_json(flink, true, 8000, 5000, 308000);            /* 50% */
     p.mono_ms -= 1000;
     ASSERT(opcd_fault_probe_sample(&p, &r) == 0 && r.net_cleared,
            "net/readfail: a real drop after recovery is the clear");
@@ -836,19 +885,19 @@ int main(void)
         snprintf(p.net_link_json,  sizeof p.net_link_json,  "%s", flink);
         snprintf(p.path_meminfo,   sizeof p.path_meminfo,   "%s/none", d);
         int saved = stderr_to(errf);
-        write_link_json(flink, false, -1, 0);                    /* not associated */
+        write_link_json(flink, false, -1, 0, 0);                 /* not associated */
         for (int i = 0; i < 8; i++) (void)opcd_fault_probe_sample(&p, &r);
         n_unassoc = count_lines(errf, diag);
-        write_link_json(flink, true, -1, 0);                     /* associated, no row */
+        write_link_json(flink, true, -1, 0, 0);                  /* associated, no row */
         for (int i = 0; i < 5; i++) (void)opcd_fault_probe_sample(&p, &r);
         n_5 = count_lines(errf, diag);
         (void)opcd_fault_probe_sample(&p, &r);
         n_6 = count_lines(errf, diag);
         for (int i = 0; i < 3; i++) (void)opcd_fault_probe_sample(&p, &r);
         n_9 = count_lines(errf, diag);
-        write_link_json(flink, true, 1000, 100);                 /* a good read */
+        write_link_json(flink, true, 1000, 100, 400000);         /* a good read */
         (void)opcd_fault_probe_sample(&p, &r);
-        write_link_json(flink, true, -1, 0);
+        write_link_json(flink, true, -1, 0, 0);
         for (int i = 0; i < 6; i++) (void)opcd_fault_probe_sample(&p, &r);
         n_rearm = count_lines(errf, diag);
         stderr_restore(saved);

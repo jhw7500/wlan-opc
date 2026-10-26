@@ -59,13 +59,18 @@ extern "C" {
  *     /var/log/cantops/json/<congestion_net_if>/link.json as the top-level
  *     survey_in_use section (active_time_ms / busy_time_ms, cumulative since
  *     association; the moal busy time counts the firmware CCA plus our own
- *     rx and tx). Wireless station interfaces only (mlan0 default, mlan1):
+ *     rx and tx; mono_ms, the logger's CLOCK_MONOTONIC time of that survey
+ *     read). Wireless station interfaces only (mlan0 default, mlan1):
  *     the eth0 bytes / link speed ratio this replaced reported a saturated
  *     wired link and missed a saturated radio. It is a SHARED-channel figure —
  *     other stations and neighbouring BSSs on the same channel count too.
- *     A sample whose Δactive does not match the elapsed time within
- *     OPCD_FAULT_NET_ACTIVE_SLACK_MS (a (re)association or roam reset the
- *     counters, the logger stopped, a clock anomaly) is UNKNOWN
+ *     UNKNOWN samples: a counter that went down ((re)association or roam
+ *     reset them), a file that did not move (logger stopped: Δmono 0), and a
+ *     Δactive that differs from Δmono by more than
+ *     OPCD_FAULT_NET_CLOCK_SLACK_MS. The last one catches wall-clock steps:
+ *     moal measures active time on CLOCK_REALTIME while busy is firmware
+ *     airtime, so a step inside the window would skew the ratio — the
+ *     producer's monotonic stamp is the reference that does not step
  *
  * Source paths are struct fields rather than literals so unit tests can
  * point the probe at synthetic files — the same temp-path pattern the store
@@ -77,9 +82,10 @@ extern "C" {
                                               * entry threshold (#141) */
 #define OPCD_FAULT_CLEAR_PCT_DEFAULT \
     (OPCD_FAULT_THRESHOLD_PCT_DEFAULT - OPCD_FAULT_CLEAR_BAND_PCT)
-#define OPCD_FAULT_NET_ACTIVE_SLACK_MS   3000   /* max |Δactive − elapsed| of a valid
-                                                 * Network sample (#192): absorbs the
-                                                 * logger's ~1 s write lag at both ends */
+#define OPCD_FAULT_NET_CLOCK_SLACK_MS    500    /* max |Δactive − Δmono| of a valid
+                                                 * Network sample (#192): the survey
+                                                 * read and its mono_ms stamp are a
+                                                 * few ms apart, a clock step is not */
 #define OPCD_FAULT_NET_MISSING_LOG_SAMPLES 6    /* associated samples without a survey
                                                  * row before the one diagnostic (#192) */
 #define OPCD_FAULT_PROBE_INTERVAL_DEFAULT 10    /* s, device-internal watch period (#121) */
@@ -135,6 +141,7 @@ typedef struct opcd_fault_probe {
     uint64_t cpu_busy, cpu_total;
     uint64_t disk_io_ms;
     uint64_t net_active_ms, net_busy_ms;   /* survey_in_use, cumulative */
+    uint64_t net_mono_ms;           /* survey_in_use.mono_ms of that read */
     unsigned net_missing;           /* associated samples without survey_in_use
                                      * since the last good read (diagnostic) */
     uint64_t mono_ms;               /* CLOCK_MONOTONIC of the last sample */

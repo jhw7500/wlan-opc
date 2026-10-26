@@ -345,9 +345,11 @@ void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)
 
 /* Network source (#192): the operating channel's cumulative active / busy time,
  * which the cantops logger copies from the driver survey into link.json's
- * survey_in_use section (the file is replaced atomically about once a second).
- * A missing file, a missing section or a missing / negative value is a failed
- * read — UNKNOWN, like any other unreadable source.
+ * survey_in_use section (the file is replaced atomically about once a second),
+ * stamped with the logger's CLOCK_MONOTONIC time of that read (mono_ms). A
+ * missing file, a missing section or a missing / negative value — mono_ms
+ * included, since producer and consumer ship together — is a failed read:
+ * UNKNOWN, like any other unreadable source.
  *
  * A station that IS associated (link.address present — the association test
  * the platform readers use) yet keeps arriving without the section most likely
@@ -356,17 +358,20 @@ void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)
  * OPCD_FAULT_NET_MISSING_LOG_SAMPLES such samples rather than the first — a
  * periodic scan can hide the row for a moment. Only a good read re-arms it;
  * an unassociated or unreadable sample neither counts nor re-arms. */
-static int read_net_survey(opcd_fault_probe_t *p, uint64_t *active_ms, uint64_t *busy_ms)
+static int read_net_survey(opcd_fault_probe_t *p, uint64_t *active_ms,
+                           uint64_t *busy_ms, uint64_t *mono_ms)
 {
     char *json = opc_json_slurp_file(p->net_link_json);
     if (!json) return -1;
-    long active = -1, busy = -1;
+    long active = -1, busy = -1, mono = -1;
     bool ok = opc_json_integer_section(json, "survey_in_use", "active_time_ms", &active) == 0 &&
               opc_json_integer_section(json, "survey_in_use", "busy_time_ms",   &busy)   == 0 &&
-              active >= 0 && busy >= 0;
+              opc_json_integer_section(json, "survey_in_use", "mono_ms",        &mono)   == 0 &&
+              active >= 0 && busy >= 0 && mono >= 0;
     if (ok) {
         *active_ms = (uint64_t)active;
         *busy_ms   = (uint64_t)busy;
+        *mono_ms   = (uint64_t)mono;
         p->net_missing = 0;
     } else {
         char ap[32];
@@ -401,8 +406,8 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
     uint64_t mem_used = 0, mem_total = 0;
     bool mem_ok  = read_text(p->path_meminfo, buf, sizeof buf) == 0 &&
                    opcd_fault_parse_meminfo(buf, &mem_used, &mem_total) == 0;
-    uint64_t net_active = 0, net_busy = 0;
-    bool net_ok  = read_net_survey(p, &net_active, &net_busy) == 0;
+    uint64_t net_active = 0, net_busy = 0, net_mono = 0;
+    bool net_ok  = read_net_survey(p, &net_active, &net_busy, &net_mono) == 0;
     uint64_t now = mono_now_ms();
 
     /* Deltas are computed only for a source that was primed by a previous
@@ -424,18 +429,23 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
                                ? disk  - p->disk_io_ms : 0;
         /* Network (#192): the survey counters run from association and restart
          * near 0 on every (re)association or roam, so a delta counts only when
-         * both moved forward AND the channel's active time grew by about the
-         * time that passed. A reset inside the window, a stale file (logger
-         * stopped: Δactive 0) or a clock anomaly fails that, and the sample is
-         * UNKNOWN — never 0% (a false clear) nor a guess (a false entry). The
-         * new readings still become the baseline below. */
+         * both moved forward, the logger's stamp moved forward (a file that did
+         * not, the logger stopped), and Δactive matches that Δmono. The last
+         * test is against the producer's monotonic stamp, not our elapsed
+         * time: moal takes active time from CLOCK_REALTIME while busy is
+         * firmware airtime, so a wall-clock step inside the window would skew
+         * the ratio — up to a false entry or clear (tribunal A-R1-001). Any
+         * failure is UNKNOWN — never 0% (a false clear) nor a guess (a false
+         * entry) — and the new readings still become the baseline below. */
         bool net_measured = false;
         uint64_t d_net_busy = 0, d_net_active = 0;
         if (net_ok && p->net_primed &&
-            net_active >= p->net_active_ms && net_busy >= p->net_busy_ms) {
+            net_active >= p->net_active_ms && net_busy >= p->net_busy_ms &&
+            net_mono > p->net_mono_ms) {
             uint64_t da   = net_active - p->net_active_ms;
-            uint64_t skew = da > elapsed ? da - elapsed : elapsed - da;
-            if (da > 0 && skew <= OPCD_FAULT_NET_ACTIVE_SLACK_MS) {
+            uint64_t dm   = net_mono   - p->net_mono_ms;
+            uint64_t skew = da > dm ? da - dm : dm - da;
+            if (da > 0 && skew <= OPCD_FAULT_NET_CLOCK_SLACK_MS) {
                 d_net_active = da;
                 d_net_busy   = net_busy - p->net_busy_ms;
                 net_measured = true;
@@ -491,7 +501,9 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
      * read drops the primed flag so recovery starts from a fresh baseline. */
     if (cpu_ok)  { p->cpu_busy = busy; p->cpu_total = total; }
     if (disk_ok) p->disk_io_ms = disk;
-    if (net_ok)  { p->net_active_ms = net_active; p->net_busy_ms = net_busy; }
+    if (net_ok)  {
+        p->net_active_ms = net_active; p->net_busy_ms = net_busy; p->net_mono_ms = net_mono;
+    }
     p->cpu_primed  = cpu_ok;
     p->disk_primed = disk_ok;
     p->net_primed  = net_ok;
