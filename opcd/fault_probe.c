@@ -10,7 +10,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +17,10 @@
 #include <unistd.h>
 
 #include "fault_probe.h"
+#include "json_util.h"
+
+/* cantops logger output per interface; the Network source (#192) */
+#define OPCD_FAULT_NET_LINK_JSON_FMT "/var/log/cantops/json/%s/link.json"
 
 /* Read a small text file into buf (NUL-terminated). 32 KiB covers
  * /proc/diskstats with room to spare on the target (a handful of mmcblk
@@ -42,17 +45,6 @@ static int read_text(const char *path, char *buf, size_t cap)
         }
     }
     buf[n] = '\0';
-    return 0;
-}
-
-static int read_u64_file(const char *path, uint64_t *out)
-{
-    char buf[32];
-    if (read_text(path, buf, sizeof buf) != 0) return -1;
-    char *end = NULL;
-    unsigned long long v = strtoull(buf, &end, 10);
-    if (end == buf) return -1;
-    *out = (uint64_t)v;
     return 0;
 }
 
@@ -164,7 +156,7 @@ static bool fault_over(const opcd_fault_probe_t *p, bool in_band, uint64_t pct)
 void opcd_fault_evaluate(const opcd_fault_probe_t *p,
                          uint64_t d_busy, uint64_t d_total,
                          uint64_t d_disk_ms, uint64_t elapsed_ms,
-                         uint64_t d_net_bytes, unsigned link_mbps,
+                         uint64_t d_net_busy_ms, uint64_t d_net_active_ms,
                          uint64_t mem_used_kb, uint64_t mem_total_kb,
                          opcd_fault_report_t *out)
 {
@@ -186,29 +178,17 @@ void opcd_fault_evaluate(const opcd_fault_probe_t *p,
         if (pct > 100) pct = 100;
         out->disk_pct  = (uint16_t)pct;
         out->disk_over = fault_over(p, p->disk_congested, pct);
-
-        /* bytes → Mbit/s: *8 bits, /elapsed_ms gives kbit/s, /1000 → Mbit/s.
-         * Clamp before the multiply: a pathological delta (sysfs counter
-         * anomaly) must saturate instead of wrapping uint64. */
-        if (d_net_bytes > UINT64_MAX / 8u) d_net_bytes = UINT64_MAX / 8u;
-        /* current_val is link utilisation % (DFK 2026-06-29: 사용률 0-100%), not
-         * raw Mbps (proto-todo T6). Compute the percentage directly from bits to
-         * avoid the precision loss of flooring to whole Mbps first (Gemini review:
-         * 9.7 Mbit/s of a 10 Mbit/s link must read 97%, not the 90% a whole-Mbps
-         * floor would give by truncating to 9 Mbps). Derivation:
-         *   Mbit/s = bytes*8 / (elapsed_ms*1000);  pct = (Mbit/s / link_mbps) * 100
-         *          = bytes*8 / (elapsed_ms * 10 * link_mbps).
-         * Without a known link speed the percentage is undefined, so the resource
-         * stays un-flagged (net_pct 0, not over). Over-link traffic saturates at
-         * 100% rather than exceeding it. (d_net_bytes is clamped to UINT64_MAX/8
-         * above, so the *8 cannot overflow.) */
-        if (link_mbps > 0) {
-            uint64_t denom = (uint64_t)elapsed_ms * 10u * (uint64_t)link_mbps;
-            uint64_t pct = denom ? (d_net_bytes * 8ULL) / denom : 0;
-            if (pct > 100u) pct = 100u;
-            out->net_pct  = (uint16_t)pct;
-            out->net_over = fault_over(p, p->net_congested, pct);
-        }
+    }
+    /* Network (#192): wireless channel occupancy, busy over active time of the
+     * operating channel — current_val is that % (DFK 2026-06-29: 사용률 0-100%).
+     * d_net_active_ms 0 is the sampler's UNKNOWN (unprimed or rejected delta),
+     * so the resource stays un-flagged. Busy above active can only be a counter
+     * anomaly and saturates at 100%. */
+    if (d_net_active_ms > 0) {
+        uint64_t pct = d_net_busy_ms >= d_net_active_ms
+                           ? 100u : d_net_busy_ms * 100u / d_net_active_ms;
+        out->net_pct  = (uint16_t)pct;
+        out->net_over = fault_over(p, p->net_congested, pct);
     }
 }
 
@@ -217,13 +197,13 @@ void opcd_fault_probe_init(opcd_fault_probe_t *p)
     memset(p, 0, sizeof *p);
     p->threshold_pct     = OPCD_FAULT_THRESHOLD_PCT_DEFAULT;
     p->clear_pct         = OPCD_FAULT_CLEAR_PCT_DEFAULT;
-    p->net_capacity_mbps = OPCD_FAULT_NET_CAPACITY_DEFAULT;
     p->probe_interval_s  = OPCD_FAULT_PROBE_INTERVAL_DEFAULT;
     snprintf(p->disk_dev,       sizeof p->disk_dev,       "mmcblk0");
     snprintf(p->path_proc_stat, sizeof p->path_proc_stat, "/proc/stat");
     snprintf(p->path_meminfo,   sizeof p->path_meminfo,   "/proc/meminfo");
     snprintf(p->path_diskstats, sizeof p->path_diskstats, "/proc/diskstats");
-    snprintf(p->net_dir,        sizeof p->net_dir,        "/sys/class/net/eth0");
+    snprintf(p->net_link_json,  sizeof p->net_link_json,
+             OPCD_FAULT_NET_LINK_JSON_FMT, "mlan0");
 }
 
 void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
@@ -247,7 +227,7 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
         } else if (strcmp(key, "congestion_clear_pct") == 0) {
             char *end = NULL;
             unsigned long v = strtoul(val, &end, 10);
-            /* endptr-checked like read_u64_file: without it "abc" parses as 0
+            /* endptr-checked: without it "abc" parses as 0
              * and would silently disable the band (reviewer A, #141). 0 is not
              * a valid release level — set clear EQUAL to threshold to turn the
              * band off. The clear <= threshold invariant is restored after the
@@ -270,9 +250,12 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
             if (v >= 1 && v <= OPCD_FAULT_PROBE_INTERVAL_MAX)
                 p->probe_interval_s = (unsigned)v;
         } else if (strcmp(key, "congestion_net_capacity_mbps") == 0) {
-            unsigned long v = strtoul(val, NULL, 10);
-            /* upper bound guards the (unsigned) store on LP64 hosts */
-            if (v >= 1 && v <= UINT_MAX) p->net_capacity_mbps = (unsigned)v;
+            /* #192: there is no link-speed denominator any more. Still
+             * recognised so an existing opc.conf loads unchanged, and said so
+             * that a tuned value is not taken for one that works. */
+            fprintf(stderr, "opcd: fault probe: congestion_net_capacity_mbps "
+                            "ignored — Network congestion is the wireless "
+                            "channel occupancy since #192\n");
         } else if (strcmp(key, "congestion_disk_dev") == 0) {
             if (strlen(val) >= sizeof p->disk_dev)
                 /* silent truncation would never match diskstats — refuse loudly */
@@ -281,14 +264,18 @@ void opcd_fault_probe_conf(opcd_fault_probe_t *p, const char *conf_path)
             else
                 snprintf(p->disk_dev, sizeof p->disk_dev, "%s", val);
         } else if (strcmp(key, "congestion_net_if") == 0) {
-            if (strchr(val, '/') != NULL || val[0] == '.')
-                /* interface names never contain '/' nor start with '.' —
-                 * reject so the probe cannot be pointed outside sysfs
-                 * (e.g. "../../proc"). VLAN names like eth0.100 still pass. */
-                fprintf(stderr, "opcd: fault probe: congestion_net_if '%s' "
-                                "rejected (path characters)\n", val);
+            /* #192: the probe measures the channel a wireless station uses,
+             * so only the station interfaces are valid. Anything else — eth0
+             * from an opc.conf written for the old byte-rate probe — is
+             * refused loudly and the current one (mlan0 by default) stays.
+             * The two fixed names also keep the value out of the path. */
+            if (strcmp(val, "mlan0") == 0 || strcmp(val, "mlan1") == 0)
+                snprintf(p->net_link_json, sizeof p->net_link_json,
+                         OPCD_FAULT_NET_LINK_JSON_FMT, val);
             else
-                snprintf(p->net_dir, sizeof p->net_dir, "/sys/class/net/%s", val);
+                fprintf(stderr, "opcd: fault probe: congestion_net_if '%s' "
+                                "ignored — the Network probe reads a wireless "
+                                "station (mlan0/mlan1) since #192\n", val);
         }
     }
     fclose(f);
@@ -356,28 +343,45 @@ void opcd_fault_probe_reset_latch(opcd_fault_probe_t *p)
     p->cpu_notified = p->mem_notified = p->disk_notified = p->net_notified = false;
 }
 
-static int read_net_bytes(const opcd_fault_probe_t *p, uint64_t *bytes)
+/* Network source (#192): the operating channel's cumulative active / busy time,
+ * which the cantops logger copies from the driver survey into link.json's
+ * survey_in_use section (the file is replaced atomically about once a second).
+ * A missing file, a missing section or a missing / negative value is a failed
+ * read — UNKNOWN, like any other unreadable source.
+ *
+ * A station that IS associated (link.address present — the association test
+ * the platform readers use) yet keeps arriving without the section most likely
+ * runs firmware that does not report the channel busy time, and the resource
+ * would stay unknown without a word. Say so ONCE, after
+ * OPCD_FAULT_NET_MISSING_LOG_SAMPLES such samples rather than the first — a
+ * periodic scan can hide the row for a moment. Only a good read re-arms it;
+ * an unassociated or unreadable sample neither counts nor re-arms. */
+static int read_net_survey(opcd_fault_probe_t *p, uint64_t *active_ms, uint64_t *busy_ms)
 {
-    char path[128];
-    uint64_t rx = 0, tx = 0;
-    snprintf(path, sizeof path, "%s/statistics/rx_bytes", p->net_dir);
-    if (read_u64_file(path, &rx) != 0) return -1;
-    snprintf(path, sizeof path, "%s/statistics/tx_bytes", p->net_dir);
-    if (read_u64_file(path, &tx) != 0) return -1;
-    *bytes = rx + tx;
-    return 0;
-}
-
-static unsigned read_link_mbps(const opcd_fault_probe_t *p)
-{
-    char path[128], buf[16];
-    snprintf(path, sizeof path, "%s/speed", p->net_dir);
-    if (read_text(path, buf, sizeof buf) == 0) {
-        long v = strtol(buf, NULL, 10);
-        if (v > 0) return (unsigned)v;
+    char *json = opc_json_slurp_file(p->net_link_json);
+    if (!json) return -1;
+    long active = -1, busy = -1;
+    bool ok = opc_json_integer_section(json, "survey_in_use", "active_time_ms", &active) == 0 &&
+              opc_json_integer_section(json, "survey_in_use", "busy_time_ms",   &busy)   == 0 &&
+              active >= 0 && busy >= 0;
+    if (ok) {
+        *active_ms = (uint64_t)active;
+        *busy_ms   = (uint64_t)busy;
+        p->net_missing = 0;
+    } else {
+        char ap[32];
+        if (opc_json_string_section(json, "link", "address", ap, sizeof ap) == 0 &&
+            p->net_missing < OPCD_FAULT_NET_MISSING_LOG_SAMPLES &&
+            ++p->net_missing == OPCD_FAULT_NET_MISSING_LOG_SAMPLES)
+            fprintf(stderr, "opcd: fault probe: %s has had no usable operating-"
+                            "channel survey (survey_in_use) for %u samples while "
+                            "associated — the firmware may not report the channel "
+                            "busy time (CCA); Network congestion stays unknown "
+                            "(#192)\n",
+                    p->net_link_json, (unsigned)OPCD_FAULT_NET_MISSING_LOG_SAMPLES);
     }
-    /* wireless interfaces report -1 / no node — use the configured value */
-    return p->net_capacity_mbps;
+    free(json);
+    return ok ? 0 : -1;
 }
 
 int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
@@ -389,7 +393,7 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
      * well under 1 KiB; the headroom absorbs many-device dev/CI hosts.
      * One frame per probe interval on the daemon stack — no recursion. */
     char buf[32768];
-    uint64_t busy = 0, total = 0, disk = 0, net = 0;
+    uint64_t busy = 0, total = 0, disk = 0;
     bool cpu_ok  = read_text(p->path_proc_stat, buf, sizeof buf) == 0 &&
                    opcd_fault_parse_proc_stat(buf, &busy, &total) == 0;
     bool disk_ok = read_text(p->path_diskstats, buf, sizeof buf) == 0 &&
@@ -397,7 +401,8 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
     uint64_t mem_used = 0, mem_total = 0;
     bool mem_ok  = read_text(p->path_meminfo, buf, sizeof buf) == 0 &&
                    opcd_fault_parse_meminfo(buf, &mem_used, &mem_total) == 0;
-    bool net_ok  = read_net_bytes(p, &net) == 0;
+    uint64_t net_active = 0, net_busy = 0;
+    bool net_ok  = read_net_survey(p, &net_active, &net_busy) == 0;
     uint64_t now = mono_now_ms();
 
     /* Deltas are computed only for a source that was primed by a previous
@@ -417,11 +422,28 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
                                ? total - p->cpu_total  : 0;
         uint64_t d_disk  = (disk_ok && p->disk_primed && disk >= p->disk_io_ms)
                                ? disk  - p->disk_io_ms : 0;
-        uint64_t d_net   = (net_ok && p->net_primed && net   >= p->net_bytes)
-                               ? net   - p->net_bytes  : 0;
+        /* Network (#192): the survey counters run from association and restart
+         * near 0 on every (re)association or roam, so a delta counts only when
+         * both moved forward AND the channel's active time grew by about the
+         * time that passed. A reset inside the window, a stale file (logger
+         * stopped: Δactive 0) or a clock anomaly fails that, and the sample is
+         * UNKNOWN — never 0% (a false clear) nor a guess (a false entry). The
+         * new readings still become the baseline below. */
+        bool net_measured = false;
+        uint64_t d_net_busy = 0, d_net_active = 0;
+        if (net_ok && p->net_primed &&
+            net_active >= p->net_active_ms && net_busy >= p->net_busy_ms) {
+            uint64_t da   = net_active - p->net_active_ms;
+            uint64_t skew = da > elapsed ? da - elapsed : elapsed - da;
+            if (da > 0 && skew <= OPCD_FAULT_NET_ACTIVE_SLACK_MS) {
+                d_net_active = da;
+                d_net_busy   = net_busy - p->net_busy_ms;
+                net_measured = true;
+            }
+        }
 
-        opcd_fault_evaluate(p, d_busy, d_total, d_disk, elapsed, d_net,
-                            (net_ok && p->net_primed) ? read_link_mbps(p) : 0,
+        opcd_fault_evaluate(p, d_busy, d_total, d_disk, elapsed,
+                            d_net_busy, d_net_active,
                             mem_ok ? mem_used : 0, mem_ok ? mem_total : 0,
                             out);
         /* Entry latch (#121): report the transition, then remember the level
@@ -457,7 +479,7 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
             p->disk_congested = out->disk_over;
             p->disk_notified  = out->disk_over;
         }
-        if (net_ok && p->net_primed) {
+        if (net_measured) {
             out->net_entered  =  out->net_over && !p->net_notified;
             out->net_cleared  = !out->net_over &&  p->net_notified;
             p->net_congested  = out->net_over;
@@ -469,7 +491,7 @@ int opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out)
      * read drops the primed flag so recovery starts from a fresh baseline. */
     if (cpu_ok)  { p->cpu_busy = busy; p->cpu_total = total; }
     if (disk_ok) p->disk_io_ms = disk;
-    if (net_ok)  p->net_bytes  = net;
+    if (net_ok)  { p->net_active_ms = net_active; p->net_busy_ms = net_busy; }
     p->cpu_primed  = cpu_ok;
     p->disk_primed = disk_ok;
     p->net_primed  = net_ok;

@@ -30,7 +30,8 @@ OPCD_OBJS_HANDLER   := $(OPCDOBJ)/handler.o $(OPCDOBJ)/store.o $(OPCDOBJ)/store_
                        $(OPCDOBJ)/chan_encode.o $(OPCDOBJ)/opcd_log.o $(OPCDOBJ)/platform_stub.o \
                        $(OPCDOBJ)/devinfo_cfg.o $(OPCDOBJ)/iplist_text.o
 OPCD_OBJS_STORE_ASYNC := $(OPCDOBJ)/store.o $(OPCDOBJ)/store_async.o
-OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o
+# fault_probe reads the Network source from link.json via json_util (#192).
+OPCD_OBJS_FAULT     := $(OPCDOBJ)/fault_probe.o $(OPCDOBJ)/json_util.o
 # Pure parser — no platform backend, no protocol library.
 OPCD_OBJS_NL80211   := $(OPCDOBJ)/nl80211_parse.o
 # Pure channel-field encoder — no platform backend, no protocol library.

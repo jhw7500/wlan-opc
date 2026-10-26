@@ -16,7 +16,8 @@ extern "C" {
  *   - threshold: entry 80% for every resource, cleared at 70% — a
  *     hysteresis band, not one level (#141). Both overridable via opc.conf
  *     (congestion_threshold_pct / congestion_clear_pct / congestion_net_if /
- *      congestion_disk_dev / congestion_net_capacity_mbps)
+ *      congestion_disk_dev). congestion_net_capacity_mbps is still accepted
+ *     so older opc.conf files load, but it no longer applies (#192)
  *   - sampling: on a DEVICE-INTERNAL interval (congestion_probe_interval_s,
  *     default 10 s), independent of the Indication Period (#121 — the spec
  *     leaves the resource watch period to the vendor, like Reset Cause)
@@ -51,9 +52,20 @@ extern "C" {
  *     first call like the counters, but needs no re-baseline after a read
  *     failure (the next readable sample is measured)
  *   - Disk (0x0003): /proc/diskstats io_ticks utilisation, current_val = %
- *   - Network (0x0004): (rx+tx) rate vs link speed, threshold = 80% of the
- *     capacity, current_val = link utilisation % (DFK 2026-06-29: 사용률 0-100%;
- *     proto-todo T6 — was Mbps before the answer)
+ *   - Network (0x0004): occupancy of the wireless channel the station uses
+ *     (#192), Δbusy / Δactive of the operating channel's survey row,
+ *     current_val = % (DFK 2026-06-29: 사용률 0-100%; proto-todo T6 — was Mbps
+ *     before the answer). The cantops logger copies the row into
+ *     /var/log/cantops/json/<congestion_net_if>/link.json as the top-level
+ *     survey_in_use section (active_time_ms / busy_time_ms, cumulative since
+ *     association; the moal busy time counts the firmware CCA plus our own
+ *     rx and tx). Wireless station interfaces only (mlan0 default, mlan1):
+ *     the eth0 bytes / link speed ratio this replaced reported a saturated
+ *     wired link and missed a saturated radio. It is a SHARED-channel figure —
+ *     other stations and neighbouring BSSs on the same channel count too.
+ *     A sample whose Δactive does not match the elapsed time within
+ *     OPCD_FAULT_NET_ACTIVE_SLACK_MS (a (re)association or roam reset the
+ *     counters, the logger stopped, a clock anomaly) is UNKNOWN
  *
  * Source paths are struct fields rather than literals so unit tests can
  * point the probe at synthetic files — the same temp-path pattern the store
@@ -65,7 +77,11 @@ extern "C" {
                                               * entry threshold (#141) */
 #define OPCD_FAULT_CLEAR_PCT_DEFAULT \
     (OPCD_FAULT_THRESHOLD_PCT_DEFAULT - OPCD_FAULT_CLEAR_BAND_PCT)
-#define OPCD_FAULT_NET_CAPACITY_DEFAULT  1000   /* Mbps, when sysfs speed is absent */
+#define OPCD_FAULT_NET_ACTIVE_SLACK_MS   3000   /* max |Δactive − elapsed| of a valid
+                                                 * Network sample (#192): absorbs the
+                                                 * logger's ~1 s write lag at both ends */
+#define OPCD_FAULT_NET_MISSING_LOG_SAMPLES 6    /* associated samples without a survey
+                                                 * row before the one diagnostic (#192) */
 #define OPCD_FAULT_PROBE_INTERVAL_DEFAULT 10    /* s, device-internal watch period (#121) */
 #define OPCD_FAULT_PROBE_INTERVAL_MAX     3600
 
@@ -84,7 +100,6 @@ typedef struct opcd_fault_probe {
                                      * the configured threshold so lowering the
                                      * entry level never silently collapses the
                                      * band (reviewer A, #141). */
-    unsigned net_capacity_mbps;     /* fallback when <net_dir>/speed unusable */
     char     disk_dev[33];          /* /proc/diskstats device name —
                                      * kernel DISK_NAME_LEN(32) + NUL */
     unsigned probe_interval_s;      /* watch period, 1..OPCD_FAULT_PROBE_INTERVAL_MAX */
@@ -109,7 +124,7 @@ typedef struct opcd_fault_probe {
     char     path_proc_stat[96];
     char     path_meminfo[96];
     char     path_diskstats[96];
-    char     net_dir[96];           /* /sys/class/net/<if> */
+    char     net_link_json[96];     /* /var/log/cantops/json/<if>/link.json */
     /* previous counters for delta computation. Each source carries its own
      * primed flag: a source that could not be read keeps (or drops back to)
      * un-primed, so the first readable sample re-establishes the baseline
@@ -119,7 +134,9 @@ typedef struct opcd_fault_probe {
     bool     cpu_primed, disk_primed, net_primed;
     uint64_t cpu_busy, cpu_total;
     uint64_t disk_io_ms;
-    uint64_t net_bytes;             /* rx + tx */
+    uint64_t net_active_ms, net_busy_ms;   /* survey_in_use, cumulative */
+    unsigned net_missing;           /* associated samples without survey_in_use
+                                     * since the last good read (diagnostic) */
     uint64_t mono_ms;               /* CLOCK_MONOTONIC of the last sample */
 } opcd_fault_probe_t;
 
@@ -141,7 +158,7 @@ typedef struct opcd_fault_report {
     bool     cpu_cleared,  mem_cleared,  disk_cleared,  net_cleared;
 } opcd_fault_report_t;
 
-/* Defaults: 80% threshold, mmcblk0, eth0, real /proc and /sys paths. */
+/* Defaults: 80% threshold, mmcblk0, mlan0's link.json, real /proc paths. */
 void opcd_fault_probe_init(opcd_fault_probe_t *p);
 
 /* Minimal key=value reader for the congestion_* keys in opc.conf. A missing
@@ -181,13 +198,15 @@ void opcd_fault_probe_rearm(opcd_fault_probe_t *p, opcd_fault_res_t res);
 
 /* Sample the sources and evaluate utilisation since the previous call.
  * The first call only primes the counters (*out zeroed, returns 0). An
- * unreadable source leaves its resource un-flagged. */
+ * unreadable source, and a Network delta rejected by the survey checks,
+ * leaves its resource un-flagged with the latch held. */
 int  opcd_fault_probe_sample(opcd_fault_probe_t *p, opcd_fault_report_t *out);
 
 /* Pure helpers, unit-tested directly. opcd_fault_evaluate expects
  * elapsed_ms >= 1 (the sampler enforces a 1 ms floor); 0 silently skips the
- * disk and network calculations, and mem_total_kb 0 (meminfo unread) skips the
- * memory one. It reads the entry latches (*_congested) as
+ * disk calculation, d_net_active_ms 0 (Network UNKNOWN) skips the network one,
+ * and mem_total_kb 0 (meminfo unread) skips the memory one. It reads the
+ * entry latches (*_congested) as
  * well as the thresholds, so *_over is the HYSTERETIC state ("considered
  * congested"), not a bare sample-vs-entry-level comparison (#141).
  * opcd_fault_parse_meminfo needs all of MemTotal/MemFree/Buffers/Cached/Slab
@@ -198,7 +217,7 @@ int  opcd_fault_parse_meminfo(const char *text, uint64_t *used_kb, uint64_t *tot
 void opcd_fault_evaluate(const opcd_fault_probe_t *p,
                          uint64_t d_busy, uint64_t d_total,
                          uint64_t d_disk_ms, uint64_t elapsed_ms,
-                         uint64_t d_net_bytes, unsigned link_mbps,
+                         uint64_t d_net_busy_ms, uint64_t d_net_active_ms,
                          uint64_t mem_used_kb, uint64_t mem_total_kb,
                          opcd_fault_report_t *out);
 
