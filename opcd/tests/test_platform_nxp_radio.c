@@ -93,6 +93,9 @@ int __wrap_execv(const char *path, char *const argv[])
     if (getenv("OPCD_NXP_FAIL_WLAN_APPLY") != NULL &&   /* #161: ESSID apply refused/failed */
         argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0)
         _exit(42);
+    if (getenv("OPCD_NXP_WLAN_APPLY_EXIT") != NULL &&   /* #210: helper exit code under test */
+        argv[0] != NULL && strcmp(argv[0], "opc_wlan_apply.sh") == 0)
+        _exit((int)strtol(getenv("OPCD_NXP_WLAN_APPLY_EXIT"), NULL, 10));
     if (argv[0] != NULL && strcmp(argv[0], "wlan_reboot_policy.sh") == 0) {   /* #164 outcomes of the real script */
         if (getenv("OPCD_NXP_FAIL_RESET") != NULL)       _exit(2);      /* non-zero exit: systemd-run/executor failure (policy gates are bypassed by --force) */
         if (getenv("OPCD_NXP_RESET_STOPPED") != NULL) {                 /* #179 on the board: the shutdown stops D-Bus, the client exits 1, */
@@ -429,6 +432,32 @@ int main(int argc, char **argv)
                "#161 apply failed with a foreign ssid in the conf -> nothing committed, uncommitted marker removed");
         unsetenv("OPCD_NXP_FAIL_WLAN_APPLY_AFTER_EDIT");
         unsetenv("OPCD_TEST_CONF_PATH");
+
+        /* #210: the helper's exit code and its documented meaning reach the log,
+         * so on-target triage can tell "restore marker absent (6)" from
+         * "multi-network conf refused (2)" without decoding the raw wait status. */
+        static const struct { const char *code; const char *needle; } apply_exit_cases[] = {
+            { "2",  "opcd: opc_wlan_apply: exit=2 reason=usage-or-multi-network-conf" },
+            { "6",  "opcd: opc_wlan_apply: exit=6 reason=transaction-cancelled-or-marker-absent" },
+            { "42", "opcd: opc_wlan_apply: exit=42 reason=unknown" },
+        };
+        for (size_t ci = 0; ci < sizeof apply_exit_cases / sizeof apply_exit_cases[0]; ci++) {
+            ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
+            setenv("OPCD_NXP_WLAN_APPLY_EXIT", apply_exit_cases[ci].code, 1);
+            fflush(stderr);                          /* capture opcd's stderr for this one apply */
+            int saved_err = dup(2);
+            int efd = open(errlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            dup2(efd, 2);
+            close(efd);
+            int apply_rc = ops->apply_ip_change(&e, 0, 4);
+            fflush(stderr);
+            dup2(saved_err, 2);
+            close(saved_err);
+            unsetenv("OPCD_NXP_WLAN_APPLY_EXIT");
+            ASSERT(apply_rc == 0, "#210 failed ESSID apply: IP result stays success");
+            ASSERT(file_has(errlog, apply_exit_cases[ci].needle), apply_exit_cases[ci].needle);
+        }
+        unlink(errlog);
 
         ipt_reset("network={\n    ssid=\"site-A\"\n}\n");
         e.subnet_mask = 0xFFFFFFFFu;               /* /32 host slot, off-block gateway (P2P) */

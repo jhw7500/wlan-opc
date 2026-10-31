@@ -945,6 +945,35 @@ static int run_argv_bounded(const char *label, const char *path,
     return run_argv_bounded_status(label, path, argv, timeout_ms, NULL);
 }
 
+/* #210: name the helper's exit code so on-target triage can tell the causes
+ * documented in opc_wlan_apply.sh apart without decoding the raw wait status:
+ * 2 usage (a multi-network conf refuses the ssid change), 3 ctrl_interface
+ * missing, 4 conf/JSON/driver apply failed, 5 reconfigure failed, 6
+ * transaction cancelled, rollback failed or the ChangeIp ESSID restore marker
+ * absent. Logging only: the caller still sees run_argv_bounded's -EPROTO. */
+static const char *opc_wlan_apply_exit_reason(int code)
+{
+    switch (code) {
+    case 2:  return "usage-or-multi-network-conf";
+    case 3:  return "ctrl-interface-missing";
+    case 4:  return "conf-json-driver-apply-failed";
+    case 5:  return "reconfigure-failed";
+    case 6:  return "transaction-cancelled-or-marker-absent";
+    default: return "unknown";
+    }
+}
+
+static void log_opc_wlan_apply_failure(int wstatus)
+{
+    if (WIFEXITED(wstatus))
+        fprintf(stderr, "opcd: opc_wlan_apply: exit=%d reason=%s\n",
+                WEXITSTATUS(wstatus),
+                opc_wlan_apply_exit_reason(WEXITSTATUS(wstatus)));
+    else if (WIFSIGNALED(wstatus))
+        fprintf(stderr, "opcd: opc_wlan_apply: signal=%d reason=killed\n",
+                WTERMSIG(wstatus));
+}
+
 /* Run opc_wlan_apply.sh synchronously with any non-empty freq/mode/bw/ssid
  * fields. Radio config passes freq+mode+bw in one call; the ChangeIp ESSID path
  * remains an SSID-only call. The helper persists the profile and triggers the
@@ -980,8 +1009,12 @@ static int run_opc_wlan_apply(const char *iface, const char *freqs,
         argv[n++] = ssid;
     }
     argv[n] = NULL;
-    return run_argv_bounded("opc_wlan_apply", OPC_WLAN_APPLY_SH,
-                            (char *const *)argv, timeout_ms);
+    int wstatus = -1;
+    int rc = run_argv_bounded_status("opc_wlan_apply", OPC_WLAN_APPLY_SH,
+                                     (char *const *)argv, timeout_ms, &wstatus);
+    if (rc == -EPROTO && wstatus != -1)
+        log_opc_wlan_apply_failure(wstatus);
+    return rc;
 }
 
 static const char *radio_mode_token(uint8_t mode)
