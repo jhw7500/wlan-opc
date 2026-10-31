@@ -2237,7 +2237,11 @@ void opcd_apply_pending_ip_change(opcd_state_t *st)
     /* Hand off to the platform backend to rewrite the active IP (stub no-ops;
      * nxp reconfigures eth0's management IP directly via ip addr). Clear the
      * indication target only on success — a failed apply means the IP did not
-     * move, so the existing indication session stays valid. Per platform.h the
+     * move, so the existing indication session stays valid. opcd applies the
+     * same rule when the slot carries the unchanged IP (ESSID-only change):
+     * spec 4.3.9 discards the notification setting on an IP change and says
+     * nothing about an unchanged address, so the device-side contract is
+     * "cleared on every applied ChangeIp" (#211). Per platform.h the
      * vtable is fully populated after init(), so only the registration guard
      * (opcd_platform() can be NULL before register) is needed. */
     const opcd_platform_ops_t *plat = opcd_platform();
