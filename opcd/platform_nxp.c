@@ -1392,8 +1392,15 @@ static int nxp_apply_ip_change(const opc_ipcfg_entry_t *slot, int iface, uint16_
     }
 
     /* essid is best-effort: a failure is logged but does NOT override the IP result
-     * (unlike freq apply, which is fatal). Reconnect outcome is reported separately
-     * via the WlanStatusChange indication. The spec wants the ESSID volatile too
+     * (unlike freq apply, which is fatal). Whether the host learns the reconnect
+     * outcome depends on the address result above. On success handler.c clears
+     * the indication target (spec 4.3.9 discards the notification setting on an
+     * IP change), so the later WlanStatusChange is dropped at the indication
+     * send gate without an opcd log line; the reconnect is visible only in the
+     * wpa_supplicant journal (#211; confirmed on a board, also for an ESSID-only
+     * change). When the address pipeline failed, this block still runs and the
+     * indication target is kept, so that WlanStatusChange is sent as before.
+     * The spec wants the ESSID volatile too
      * (#161) but the apply script edits the persistent wpa conf, so the original
      * is first recorded in a restore marker (essid_marker.h) that `opcd -R`
      * puts back at boot. No marker => no conf edit: a persistent change nobody
