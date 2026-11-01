@@ -62,6 +62,8 @@ extern void     stub_apply_radio_set_fail(int fail);
 extern void     stub_apply_radio_set_fail_once(int fail);
 extern int      stub_apply_radio_calls(void);
 extern void     stub_apply_radio_reset_calls(void);
+extern void     stub_apply_radio_watch_marker(const char *path);   /* #178 */
+extern int      stub_apply_radio_marker_seen(void);
 extern int      stub_apply_radio_last_w1_freq(void);
 extern int      stub_apply_radio_last_station(void);
 extern void     stub_validate_radio_set_error(uint16_t err);
@@ -4423,6 +4425,138 @@ int main(void)
                "#159: no route found -> 0x0012");
 
         stub_route_reset();
+    }
+
+
+    /* #178 (candidate 4). SetRadioConfig transaction marker. The helper makes
+     * the new wpa_supplicant conf durable before it returns, but radio.conf is
+     * persisted afterwards (sync or via the async store), so a power loss in
+     * between leaves conf(new) != radio.conf(old) and, at the next boot, the
+     * old config loads COMMITTED: re-sending it takes the equal-config shortcut
+     * (OK, no apply) and the device keeps running the new conf. The marker is
+     * armed (durable) before the platform apply and cleared only when
+     * radio.conf is DURABLE; a leftover marker at boot forces UNCOMMITTED so
+     * the next matching request re-applies and re-persists. */
+    {
+        char marker_path[160];
+        snprintf(marker_path, sizeof marker_path, "test_handler_radio_txn_%d.tmp", (int)getpid());
+        unlink(marker_path);
+
+        /* 178-1: success path — marker exists while the platform apply runs and
+         *        is gone once radio.conf is durable (sync store). */
+        init_state(&st, OPC_PASSWORD_DEFAULT);
+        st.paths.radio_marker = marker_path;
+        (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+        unlink(g_radio_path);
+        stub_apply_radio_reset_calls();
+        stub_apply_radio_watch_marker(marker_path);
+        uint16_t r = do_set_radio(&st, CIP, 5180, 36);
+        ASSERT(r == OPC_RESULT_OK && st.radio_committed && stub_apply_radio_calls() == 1,
+               "#178-1: set-radio OK, applied once, committed");
+        ASSERT(stub_apply_radio_marker_seen() == 1,
+               "#178-1: the marker was on disk when the platform apply ran");
+        ASSERT(access(marker_path, F_OK) != 0,
+               "#178-1: the marker is cleared after the durable radio.conf write");
+
+        /* 178-2: crash-equivalent — applied, but radio.conf not durable: the
+         *        marker must survive (nothing cleared it). */
+        {
+            char bad_path[160];
+            snprintf(bad_path, sizeof bad_path, "no_such_dir_%d/radio", (int)getpid());
+            st.paths.radio = bad_path;
+            stub_apply_radio_reset_calls();
+            r = do_set_radio(&st, CIP, 5200, 40);
+            ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_NVRAM && !st.radio_committed,
+                   "#178-2: persist failure -> NG 0x0004, uncommitted");
+            ASSERT(access(marker_path, F_OK) == 0,
+                   "#178-2: the marker survives when radio.conf did not become durable");
+            st.paths.radio = g_radio_path;
+        }
+
+        /* 178-3: next boot — radio.conf still holds the OLD config (5180/36) and
+         *        the marker is left over: the file must load UNCOMMITTED, so the
+         *        old config re-sent is re-applied + re-persisted (not skipped),
+         *        which clears the marker. Positive control: without the marker
+         *        the same file loads COMMITTED. */
+        {
+            opcd_state_t ls;
+            init_state(&ls, OPC_PASSWORD_DEFAULT);
+            ls.paths.radio_marker = marker_path;
+            ASSERT(opcd_radio_conf_load(&ls) == OPCD_RADIO_RESTORE_COMMITTED && !ls.radio_committed,
+                   "#178-3: leftover marker at boot -> stored config loads UNCOMMITTED");
+            ASSERT(ls.radio.wlan1.scan_band == OPC_SCAN_BAND_5GHZ,
+                   "#178-3: the stored config itself is still loaded (not discarded)");
+            (void)do_login(&ls, CIP, OPC_PASSWORD_DEFAULT);
+            stub_apply_radio_reset_calls();
+            r = do_set_radio(&ls, CIP, 5180, 36);     /* equals radio.conf (old) */
+            ASSERT(r == OPC_RESULT_OK && stub_apply_radio_calls() == 1 && ls.radio_committed,
+                   "#178-3: the old config is re-applied instead of skipped, then committed");
+            ASSERT(access(marker_path, F_OK) != 0,
+                   "#178-3: the marker is cleared once the re-persist is durable");
+            opcd_state_t ls2;
+            init_state(&ls2, OPC_PASSWORD_DEFAULT);
+            ls2.paths.radio_marker = marker_path;
+            ASSERT(opcd_radio_conf_load(&ls2) == OPCD_RADIO_RESTORE_COMMITTED && ls2.radio_committed,
+                   "#178-3: positive control - no marker -> the same file loads COMMITTED");
+        }
+
+        /* 178-4: the marker cannot be written -> no apply at all (no conf edit
+         *        without a marker), NG 0x0004. */
+        {
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.paths.radio_marker = "no_such_dir_178/radio.txn";
+            (void)do_login(&st, CIP, OPC_PASSWORD_DEFAULT);
+            stub_apply_radio_reset_calls();
+            r = do_set_radio(&st, CIP, 5220, 44);
+            ASSERT(r == OPC_RESULT_NG && g_last_radio_err == OPC_ERR_NVRAM && stub_apply_radio_calls() == 0,
+                   "#178-4: marker arm failure -> NG 0x0004 and the platform apply does not run");
+        }
+
+        /* 178-5: async store — the marker stays armed while the radio.conf write
+         *        is in flight and is cleared by the DURABLE completion. */
+        {
+            uint16_t cli_port = 0;
+            int srv = bind_loopback_udp(NULL);
+            int cli = bind_loopback_udp(&cli_port);
+            opc_store_async_t *sa = opc_store_async_create();
+            ASSERT(srv >= 0 && cli >= 0 && sa != NULL, "#178-5: async rig up");
+            const uint32_t LOOP = 0x7F000001;
+            init_state(&st, OPC_PASSWORD_DEFAULT);
+            st.paths.radio_marker = marker_path;
+            st.udp_fd = srv;
+            st.store_async = sa;
+            (void)do_login(&st, LOOP, OPC_PASSWORD_DEFAULT);
+            unlink(g_radio_path);
+            stub_apply_radio_reset_calls();
+            opc_set_radio_config_req_t areq;
+            memset(&areq, 0, sizeof areq);
+            areq.station_type = OPC_STATION_SINGLE;
+            areq.wlan1.mode = OPC_WLAN_MODE_11AX;
+            areq.wlan1.bandwidth = OPC_BANDWIDTH_20;
+            legacy_to_scan(5240, 48, &areq.wlan1);
+            areq.wlan2.scan_band = OPC_SCAN_BAND_UNSET;
+            areq.wlan2.mode = 0xFF; areq.wlan2.bandwidth = 0xFF;
+            uint8_t aframe[OPC_FRAME_MAX], aresp[OPC_FRAME_MAX];
+            ssize_t afn = opc_set_radio_config_req_pack(aframe, sizeof aframe, 178, &areq);
+            ssize_t arlen = -1;
+            int adrc = opcd_dispatch(&st, aframe, (size_t)afn, LOOP, cli_port, aresp, sizeof aresp, &arlen);
+            ASSERT(adrc == 0 && arlen == 0 && !st.radio_committed,
+                   "#178-5: async set-radio - ack deferred, uncommitted while the write is in flight");
+            ASSERT(access(marker_path, F_OK) == 0,
+                   "#178-5: the marker stays armed while the radio.conf write is in flight");
+            ASSERT(wait_fd_readable(opc_store_async_event_fd(sa), 5000) == 0,
+                   "#178-5: completion signalled");
+            opcd_store_async_on_ready(&st);
+            ASSERT(st.radio_committed, "#178-5: DURABLE completion commits");
+            ASSERT(access(marker_path, F_OK) != 0,
+                   "#178-5: DURABLE completion clears the marker");
+            opc_store_async_destroy(sa);
+            close(srv);
+            close(cli);
+        }
+
+        stub_apply_radio_watch_marker(NULL);
+        unlink(marker_path);
     }
 
     unlink(g_pw_path);

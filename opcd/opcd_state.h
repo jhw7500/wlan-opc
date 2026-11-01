@@ -52,6 +52,7 @@ typedef struct opcd_paths {
     const char *ip_list_user_last;/* what opcd last put in (or applied from) the customer's copy */
     const char *ip_list_legacy;   /* pre-#194 binary list, migrated once at boot */
     const char *radio;
+    const char *radio_marker;     /* SetRadioConfig transaction marker (#178), see handler.h */
     const char *device_info;
     const char *temp_dir;
     const char *wifi_init_conf;   /* topology source (#122), see topology.h */
@@ -68,6 +69,7 @@ typedef struct opcd_paths {
 #define OPC_PATH_IPLIST_USER "/home/admin/iplist.txt"
 #define OPC_PATH_IPLIST_USER_LAST OPC_PATH_BASE "/iplist.user.last"
 #define OPC_PATH_RADIO       OPC_PATH_BASE "/radio.conf"
+#define OPC_PATH_RADIO_MARKER OPC_PATH_BASE "/radio.txn"   /* #178 */
 #define OPC_PATH_DEVICE_INFO OPC_PATH_BASE "/device_info.json"
 #define OPC_PATH_WIFI_INIT_CONF "/usr/local/etc/wifi_init_conf.json"   /* wlan-package */
 #define OPC_PATH_TEMP        OPC_PATH_BASE "/temp"

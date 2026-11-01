@@ -126,7 +126,9 @@ opcd_radio_restore_t opcd_radio_conf_restore(const void *buf, size_t n,
 
 /* Read st->paths.radio, apply the verdict above to st->radio /
  * st->radio_committed, log it, and — on MIGRATED — write the normalized config
- * back to that same path. Returns the verdict taken.
+ * back to that same path. A leftover SetRadioConfig transaction marker
+ * (st->paths.radio_marker, #178) downgrades a COMMITTED load to uncommitted.
+ * Returns the verdict taken.
  *
  * Lives here rather than in opcd.c's main() translation unit so the whole
  * startup behaviour, including the write-back, is host-testable: the path is

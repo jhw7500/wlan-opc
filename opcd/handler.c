@@ -421,6 +421,31 @@ static int persist_radio(opcd_state_t *st, uint32_t ip, uint16_t port,
                         ip, port, seq, reservation, deferred, outcome);
 }
 
+/* ---- SetRadioConfig transaction marker (#178) ----
+ *
+ * The wlan-package helper makes the new wpa_supplicant conf durable before it
+ * returns, but radio.conf is persisted only afterwards (synchronously or via
+ * the async store). A power loss in between leaves conf(new) != radio.conf(old)
+ * and the next boot would load the old config COMMITTED, so re-sending it
+ * would take the equal-config shortcut without applying. The marker is written
+ * (durably) before the platform apply and removed only when radio.conf is
+ * DURABLE; opcd_radio_conf_load() treats a leftover marker as "uncommitted".
+ * The file carries the requested config as evidence; its presence is what
+ * matters. Failure to arm refuses the apply (no conf edit without a marker,
+ * the same rule the ChangeIp ESSID marker follows). */
+static int radio_txn_arm(opcd_state_t *st, const opc_set_radio_config_req_t *req)
+{
+    if (!st->paths.radio_marker) return 0;
+    return opc_store_write_atomic(st->paths.radio_marker, req, sizeof *req, 0644);
+}
+
+static void radio_txn_clear(opcd_state_t *st)
+{
+    if (st->paths.radio_marker && unlink(st->paths.radio_marker) != 0 && errno != ENOENT)
+        fprintf(stderr, "opcd: radio.txn: marker removal failed: %s (next boot starts uncommitted)\n",
+                strerror(errno));
+}
+
 /* radio.conf is a raw dump of opc_set_radio_config_req_t. Before Rev1.01 (#102)
  * the per-WLAN block was {freq_mhz(2), channel(2), mode(1), bw(1)} — 16 bytes
  * in total. Such a file is converted (band from the frequency, the channel
@@ -501,6 +526,18 @@ opcd_radio_restore_t opcd_radio_conf_load(opcd_state_t *st)
      * matching request must run apply + persist instead of being skipped as
      * "already there" (Codex P2). */
     st->radio_committed = (rr != OPCD_RADIO_RESTORE_LEGACY);
+    if (st->radio_committed && st->paths.radio_marker &&
+        access(st->paths.radio_marker, F_OK) == 0) {
+        /* #178: a SetRadioConfig was applied but its radio.conf write never
+         * became durable (power loss or crash in the window). The stored
+         * config may be older than the live wpa_supplicant conf, so do not
+         * treat it as committed: the next matching request must run
+         * apply + persist instead of the equal-config shortcut. The marker
+         * stays until that persist is durable. */
+        fprintf(stderr, "opcd: radio.conf: SetRadioConfig transaction marker found — "
+                        "the stored config may be stale, starting uncommitted (#178)\n");
+        st->radio_committed = false;
+    }
     if (rr == OPCD_RADIO_RESTORE_LEGACY)
         fprintf(stderr, "opcd: radio.conf: legacy Rev1.00 layout converted to SCAN "
                         "band/channel list — re-send SetRadioConfig to confirm\n");
@@ -1933,7 +1970,15 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
             const opc_set_radio_config_req_t baseline = st->radio;
             const bool baseline_committed = st->radio_committed;
             const bool baseline_valid = radio_baseline_covers(st, &req);
-            if (plat->apply_radio_config(&req) != 0) {
+            if (radio_txn_arm(st, &req) != 0) {
+                /* #178: no marker, no apply — the conf edit would be
+                 * undetectable after a power loss. Storage is unwritable, the
+                 * same condition persist_radio would hit, so answer the same NG. */
+                opc_store_async_cancel(st->store_async, reservation);
+                fprintf(stderr, "opcd: set_radio: transaction marker write failed: %s — apply refused\n",
+                        strerror(errno));
+                result = OPC_RESULT_NG; err = OPC_ERR_NVRAM;
+            } else if (plat->apply_radio_config(&req) != 0) {
                 opc_store_async_cancel(st->store_async, reservation);
                 /* Platform refused/failed the kernel change. Arm a best-effort
                  * revert to the last-good config so a partial apply (e.g. DUAL:
@@ -1986,6 +2031,7 @@ static int handle_set_radio_config(opcd_state_t *st, const uint8_t *frame, size_
                     return 0;
                 } else {
                     st->radio_committed = true;
+                    radio_txn_clear(st);   /* #178: radio.conf is durable */
                 }
             }
             session_touch(st);
@@ -2458,6 +2504,7 @@ void opcd_store_async_on_ready(opcd_state_t *st)
             if (pa->radio_gen == st->radio_gen) {
                 if (done[i].outcome == OPC_STORE_DURABLE) {
                     st->radio_committed = true;
+                    radio_txn_clear(st);   /* #178: radio.conf is durable */
                 } else if (done[i].outcome == OPC_STORE_REPLACED_UNSYNCED) {
                     /* The candidate is both live and visible on disk, but its
                      * directory entry is not confirmed durable. Keep it as the
