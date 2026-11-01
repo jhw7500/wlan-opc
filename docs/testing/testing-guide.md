@@ -143,6 +143,7 @@ sshpass -p '' ssh root@192.168.0.100        # 빈 비번
 | essid | `/etc/wpa_supplicant/wpa_supplicant-mlan0.conf` 의 첫 `ssid=`(설정값, 접속 여부 무관 — ChangeIp 적용값·#161 부팅 복원·공장초기화를 그대로 따름, #193) | config | 매 요청 |
 | mode, bw | SetRadioConfig 값(`radio.conf`) → 없으면 `/usr/local/etc/wifi_init_conf.json` `.mlanN.radio.mode`/`.radio.bw` → mode는 `.mlanN.STANDARD`(비면 `.global.STANDARD`) → 없으면 0xFF. 접속 링크 값은 쓰지 않음(#193) | config | 매 요청 |
 | WLAN 개수(1/2) | `/var/log/cantops/json/mlan1/link.json` 존재 여부 | live | — |
+| (SetRadioConfig 트랜잭션 표식) | `/usr/local/opc/etc/radio.txn` — apply 직전 생성, `radio.conf` DURABLE 뒤 삭제(#178). 기동 시 남아 있으면 저장 설정을 uncommitted 로 로드 | config | set-radio |
 | freq/channel, station_type, priority_ch | `/usr/local/opc/etc/radio.conf` (set-radio 캐시: SCAN band+채널 목록). freq/channel은 `opc.conf::device_info_freq_source` 토글에 따라 `live`(기본, Rev1.01)=접속 시 live·미접속 0xFFFF / `auto`=접속 시 live·미접속 시 설정 파생값 / `config`=설정 파생값(Rev1.00 해석). priority_ch는 Single이면 0xFFFF | live(기본)/config | set-radio·매 요청 |
 | device_status | opcd 런타임 세션 | runtime | 실시간 |
 

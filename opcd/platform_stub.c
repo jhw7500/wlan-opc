@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "platform.h"
 
@@ -241,6 +242,10 @@ static int s_apply_radio_fail_once = 0;
 static int s_apply_radio_calls = 0;
 static int s_apply_radio_last_w1_freq = 0;
 static int s_apply_radio_last_station = 0;
+/* #178: when set, each apply records whether this path existed at call time
+ * (the transaction marker must be on disk before the platform apply runs). */
+static const char *s_apply_radio_watch_path = NULL;
+static int s_apply_radio_marker_seen = 0;
 static uint16_t s_validate_radio_error = 0;
 static int s_validate_radio_calls = 0;
 
@@ -258,6 +263,8 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
      * and the LAST one carries the previous (reverted-to) config — including its
      * station_type, so a DUAL revert is verifiable from the handler test. */
     s_apply_radio_calls++;
+    if (s_apply_radio_watch_path && access(s_apply_radio_watch_path, F_OK) == 0)
+        s_apply_radio_marker_seen++;
     /* Rev1.01: no FREQ field — derive the configured frequency (lowest selected
      * channel) so the revert tests keep a scalar to compare. */
     uint16_t w1_freq = 0, w1_ch = 0;
@@ -289,6 +296,9 @@ static int stub_apply_radio_config(const opc_set_radio_config_req_t *cfg)
 void stub_apply_radio_set_fail(int fail)      { s_apply_radio_fail = fail; }
 void stub_apply_radio_set_fail_once(int fail) { s_apply_radio_fail_once = fail; }
 int  stub_apply_radio_calls(void)             { return s_apply_radio_calls; }
+void stub_apply_radio_watch_marker(const char *path)
+{ s_apply_radio_watch_path = path; s_apply_radio_marker_seen = 0; }
+int  stub_apply_radio_marker_seen(void)       { return s_apply_radio_marker_seen; }
 void stub_apply_radio_reset_calls(void)       { s_apply_radio_calls = 0;
                                                 s_apply_radio_last_w1_freq = 0;
                                                 s_apply_radio_last_station = 0; }
